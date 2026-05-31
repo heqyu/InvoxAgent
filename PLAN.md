@@ -102,16 +102,18 @@ interface PeerStream {
 
 ## 4. Confidence ledger (self-constrained-build Rule 6)
 
-| Claim | Confidence | Verification plan |
-|---|---|---|
-| ACP method names listed in §0 | High | Verified via official docs |
-| `@zed-industries/agent-client-protocol` exposes `AgentSideConnection` | High | Verified via npm + DeepWiki |
-| Exact constructor signature (streams vs adapter object) | **Medium** | Read package source / type defs in stage 1 before integrating |
-| Whether the package ships a stdio helper | Medium | Verify in stage 1; fall back to manual stdin/stdout adapter if not |
-| `openai` SDK supports AbortSignal in stream calls | High | Documented since v4 |
-| Web Streams interop with the package's expected stream shape | **Medium** | If package wants Node `Readable`, add a small adapter; do not abandon Web Streams |
-
-Items flagged Medium will be confirmed by reading actual source in the relevant stage, not guessed.
+| Claim | Initial | Resolved | Source |
+|---|---|---|---|
+| ACP method names listed in §0 | High | ✅ | docs |
+| Package exposes `AgentSideConnection` | High | ✅ | npm + types on disk |
+| Constructor signature | **Medium** | ✅ `new AgentSideConnection(toAgent: (conn) => Agent, stream: Stream)` — factory pattern, agent created with conn handle | `dist/acp.d.ts:30` |
+| Stdio helper shipped | Medium | ✅ `acp.ndJsonStream(output: WritableStream<Uint8Array>, input: ReadableStream<Uint8Array>): Stream` | `dist/stream.d.ts:24` |
+| `openai` SDK supports AbortSignal | High | (confirms at stage 2) | docs |
+| Web Streams interop | **Medium** | ✅ Package consumes `WritableStream<Uint8Array>` / `ReadableStream<Uint8Array>` directly. PLAN §1 transport abstraction matches. | `dist/stream.d.ts` |
+| `Agent` interface required methods | (new) | ✅ `initialize`, `newSession`, `authenticate`, `prompt`, `cancel`. Optional: `loadSession`, `setSessionMode`, `setSessionModel`, `extMethod`, `extNotification` | `dist/acp.d.ts:479` |
+| `PROTOCOL_VERSION` constant | (new) | ✅ exported as `1` | `dist/schema.d.ts:22` |
+| `PromptResponse.stopReason` literals | (new) | ✅ `"end_turn" \| "max_tokens" \| "max_turn_requests" \| "refusal" \| "cancelled"` | `dist/schema.d.ts:1391` |
+| `SessionNotification.update` discriminator | (new) | ✅ `sessionUpdate` field; chunk variants use `agent_message_chunk` etc. with a `ContentBlock` | `dist/schema.d.ts:1418` |
 
 ## 5. Repo layout
 
@@ -140,6 +142,42 @@ invox/
     smoke-ws.ts           ← stage 4 acceptance harness
 ```
 
-## 6. Open questions
+## 6. Open questions / deferred items
 
-None at plan time. New ones get appended here, never inlined into code as TODO.
+- **Package rename** — `@zed-industries/agent-client-protocol@0.4.5` is deprecated in favor of `@agentclientprotocol/sdk`. Deferred to stage 5 polish: API is identical (rename only) and the deprecated version still works. Zed itself doesn't care which npm package the agent depends on — it just JSON-RPCs. Risk: low. Trigger to escalate: a security advisory on the old name, or any API drift on the new name.
+
+## 7. Zed direct-connect acceptance (added after stage 0)
+
+**User requirement:** every milestone where the protocol is exercised must be **directly verifiable from Zed**, not just from synthetic harnesses.
+
+Zed launches an external agent via its `agent_servers` setting in `~/.config/zed/settings.json` (or `%APPDATA%/Zed/settings.json` on Windows):
+
+```json
+{
+  "agent_servers": {
+    "invox": {
+      "command": "node",
+      "args": ["G:/OhMyProjs/InvoxAgent/dist/cli.js"]
+    }
+  }
+}
+```
+
+For dev iteration without rebuilding:
+
+```json
+{
+  "agent_servers": {
+    "invox-dev": {
+      "command": "node",
+      "args": ["--import", "tsx", "G:/OhMyProjs/InvoxAgent/src/cli.ts"]
+    }
+  }
+}
+```
+
+**Acceptance addendum to every protocol-exercising stage (1, 2, 3, 4, 5):**
+
+> The synthetic harness (`smoke-stdio.ts` / `smoke-ws.ts`) passes **AND** opening Zed's agent panel, selecting `invox`, sending a prompt produces the expected behavior. Both must be VERIFIED before the stage commit.
+
+Stage 4's WebSocket transport is browser/custom-client-only and not Zed-exercised — Zed acceptance for stage 4 = "stdio still works alongside the new WS transport, regression-free".
