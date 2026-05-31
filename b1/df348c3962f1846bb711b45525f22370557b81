@@ -1,0 +1,22 @@
+src/log.ts
+  s_dc41a57ecf88ca::t_53c657c6906dd8 1-4,9-10,26-48,57-58
+README.md
+  s_dc41a57ecf88ca::t_dd04fcd9a9b5e1 155
+  s_dc41a57ecf88ca::t_e8decd4fe6fde3 156
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "b1df348c3962f1846bb711b45525f22370557b81",
+  "prompts": {},
+  "sessions": {
+    "s_dc41a57ecf88ca": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2d3ba70e-c4b3-423d-9478-f460e1b6cc7e",
+        "model": "claude-4.7-opus"
+      },
+      "human_author": "invox <invox@local>"
+    }
+  }
+}
