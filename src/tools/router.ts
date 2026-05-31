@@ -237,13 +237,21 @@ async function bash(
     const out = await term.currentOutput();
     const exitCode = exit.exitCode ?? null;
     const signal = exit.signal ?? null;
-    const tail = out.output;
-    const resultText =
-      `exit=${exitCode ?? "null"}${signal ? ` signal=${signal}` : ""}\n` +
-      `--- output ---\n${tail}`;
+    const stdout = out.output;
+
+    // Both the LLM and the client UI see this same text. We previously used
+    // ToolCallContent.terminal here, but that requires the terminal to stay
+    // alive — and we release it in `finally` below, leaving the UI with a
+    // dead reference. Embedding the captured text as a `content` block
+    // matches what well-behaved ACP agents do and Zed renders it inline.
+    const display =
+      `$ ${command}\n` +
+      `exit=${exitCode ?? "?"}${signal ? ` signal=${signal}` : ""}\n` +
+      (stdout.length > 0 ? stdout : "(no output)");
+
     return {
-      resultText,
-      acpContent: [{ type: "terminal", terminalId: term.id }],
+      resultText: display,
+      acpContent: [{ type: "content", content: { type: "text", text: display } }],
       kind: "execute",
       title: `bash: ${command.slice(0, 60)}${command.length > 60 ? "…" : ""}`,
       ok: exitCode === 0,
