@@ -180,4 +180,58 @@ assert(
 );
 console.error("[stage7] ✓ phase 2 follow-up was persisted (history has both user msgs)");
 
+// ── Phase 3: title is derived from first user message ───────────────────
+assert(
+  typeof finalPersisted.title === "string" && finalPersisted.title.startsWith("hello stage 7"),
+  `6. title should start with first user message, got ${JSON.stringify(finalPersisted.title)}`,
+);
+console.error(`[stage7] ✓ phase 3 title set: ${JSON.stringify(finalPersisted.title)}`);
+
+// ── Phase 4: prune deletes old sessions ─────────────────────────────────
+{
+  // Forge an "old" session by writing one with updatedAt 100 days ago
+  // into the same store. Then run prune via env-driven TTL=30. Expect
+  // the old one gone and our real session intact.
+  const fakeOldId = "00000000-0000-0000-0000-000000000aaa";
+  const oldFile = join(tmp, ".invox", "sessions", `${fakeOldId}.json`);
+  const ms100d = 100 * 24 * 60 * 60 * 1000;
+  const old = {
+    version: 1,
+    id: fakeOldId,
+    cwd: tmp,
+    title: "(old test session)",
+    createdAt: Date.now() - ms100d,
+    updatedAt: Date.now() - ms100d,
+    history: [{ role: "user", content: "long ago" }],
+  };
+  // mkdirSync was already done by phase 1's save(); just write directly.
+  // Use the persistence module's API would create a circular import in this
+  // example file, so we just write here with fs.
+  // (Both files exist now: the real session + the fake old one.)
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const fs = await import("node:fs");
+  fs.writeFileSync(oldFile, JSON.stringify(old, null, 2), "utf8");
+
+  // Trigger prune by spinning up a fresh invox in the same cwd and
+  // sending one prompt. agent.persist() runs prune() on first save.
+  await withInvox(async (client) => {
+    await client.initialize({
+      protocolVersion: 1,
+      clientCapabilities: {
+        fs: { readTextFile: true, writeTextFile: true },
+        terminal: false,
+      },
+    });
+    const sess = await client.newSession({ cwd: tmp, mcpServers: [] });
+    await client.prompt({
+      sessionId: sess.sessionId,
+      prompt: [{ type: "text", text: "trigger prune" }],
+    });
+  });
+
+  assert(!existsSync(oldFile), `7. prune should have deleted the 100-day-old session at ${oldFile}`);
+  assert(existsSync(sessFile), `7. prune should NOT have touched the recent session`);
+  console.error("[stage7] ✓ phase 4 prune deletes old, keeps recent");
+}
+
 console.error("[stage7] PASS");

@@ -37,7 +37,7 @@ import {
 } from "@zed-industries/agent-client-protocol";
 import { log } from "../log.js";
 import type { LLMMessage, LLMProvider, ParsedToolCall } from "../llm/types.js";
-import { SessionStore, type PersistedSession } from "../persistence.js";
+import { SessionStore, sessionTtlDays, titleFromHistory, type PersistedSession } from "../persistence.js";
 import { FileCache } from "../tools/cache.js";
 import { kindFromTier } from "../tools/permissions.js";
 import { getTool, TOOL_SPECS } from "../tools/registry.js";
@@ -355,11 +355,18 @@ export class InvoxAgent implements Agent {
 
   /** Save the session to disk. Quiet on failure (logged inside the store). */
   private persist(session: Session): void {
-    if (!session.store) session.store = new SessionStore(session.cwd);
+    if (!session.store) {
+      session.store = new SessionStore(session.cwd);
+      // First time we see this cwd in this process — prune old sessions
+      // opportunistically. Cheap (just stats updatedAt fields), so doing
+      // it inline doesn't slow down the first prompt noticeably.
+      session.store.prune(sessionTtlDays());
+    }
     const snapshot: PersistedSession = {
       version: 1,
       id: session.id,
       cwd: session.cwd,
+      title: titleFromHistory(session.history),
       createdAt: session.createdAt,
       updatedAt: Date.now(),
       history: session.history,
