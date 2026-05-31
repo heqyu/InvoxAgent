@@ -152,6 +152,8 @@ Then in Zed: open the agent panel, pick **invox**, send a prompt. Stage 1 echoes
 | Env var | Purpose | Default |
 |---|---|---|
 | `INVOX_LOG` | log level: `silent` / `error` / `warn` / `info` / `debug` | `info` |
+| `INVOX_LOG_FILE` | absolute path to also append logs to (in addition to stderr) | unset |
+| `INVOX_LOG_FILE` | absolute path to also append logs to (in addition to stderr) | unset |
 | `INVOX_BASE_URL` | OpenAI-compatible base URL (set both this and API_KEY for real LLM) | — |
 | `INVOX_MODEL` | model name passed to provider | `gpt-4o-mini` |
 | `INVOX_API_KEY` | provider API key | — |
