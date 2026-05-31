@@ -312,11 +312,15 @@ function guessKind(name: string): "read" | "edit" | "execute" | "other" {
 }
 
 /**
- * Build a human-readable title that fits a card header. Falls back to the
- * tool name if the args don't have an obvious string field.
+ * Build a human-readable title that fits a card header. Prefers the LLM's
+ * own `description` arg (filled per the schema in tools/specs.ts) so the
+ * card shows what the LLM intended in plain language. Falls back to a
+ * sensible default per tool name.
  */
 function guessTitle(name: string, rawArgs: string): string {
   const parsed = safeParseJSON(rawArgs);
+  const desc = typeof parsed?.["description"] === "string" ? parsed["description"].trim() : "";
+  if (desc) return desc;
   if (!parsed) return name;
   switch (name) {
     case "read_file": {

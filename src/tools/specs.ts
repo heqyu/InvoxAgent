@@ -4,9 +4,25 @@
 // Three tools (per stage-3 user choice: fs + bash):
 //   - read_file:  read a text file from the user's filesystem (via ACP fs.readTextFile)
 //   - write_file: create/overwrite a text file (via ACP fs.writeTextFile, surfaced as diff)
-//   - bash:       execute a shell command (via ACP terminal/* methods)
+//   - bash:       execute a shell command (via node:child_process spawn)
+//
+// Every tool also takes a `description` arg: a short human phrase the LLM
+// fills with what it intends to do. The agent surfaces it as the ACP tool
+// card's subtitle (rawInput.description) and the toolUpdate title — this is
+// the trick the reference Zed agents use to make their cards readable, since
+// Zed doesn't render command stdout inline anyway. Without it the card is
+// just `bash: <cmd>` with no human context.
 
 import type { ToolSpec } from "../llm/types.js";
+
+const DESCRIPTION_FIELD = {
+  type: "string",
+  description:
+    "A short human-readable phrase describing what this call is doing, " +
+    "in the same language the user is using. Shown as the title of the " +
+    "tool call card in the user's editor. Example: 'Read project README' " +
+    "or '查看当前目录'.",
+} as const;
 
 export const TOOL_SPECS: ToolSpec[] = [
   {
@@ -23,8 +39,9 @@ export const TOOL_SPECS: ToolSpec[] = [
             type: "string",
             description: "Absolute path, or path relative to session cwd.",
           },
+          description: DESCRIPTION_FIELD,
         },
-        required: ["path"],
+        required: ["path", "description"],
       },
     },
   },
@@ -46,8 +63,9 @@ export const TOOL_SPECS: ToolSpec[] = [
             type: "string",
             description: "Full new contents of the file.",
           },
+          description: DESCRIPTION_FIELD,
         },
-        required: ["path", "content"],
+        required: ["path", "content", "description"],
       },
     },
   },
@@ -65,8 +83,9 @@ export const TOOL_SPECS: ToolSpec[] = [
             type: "string",
             description: "The full command line to run.",
           },
+          description: DESCRIPTION_FIELD,
         },
-        required: ["command"],
+        required: ["command", "description"],
       },
     },
   },
