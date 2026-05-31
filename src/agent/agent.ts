@@ -235,6 +235,16 @@ export class InvoxAgent implements Agent {
         toolCallId: call.id,
       });
 
+      // Visibility for diagnosing 'LLM keeps retrying tool' loops:
+      // dump exactly what the LLM will see back as the tool message.
+      log.info("tool result", {
+        name: call.name,
+        ok: r.ok,
+        resultPreview: r.resultText.length > 300
+          ? r.resultText.slice(0, 300) + ` …(+${r.resultText.length - 300} more bytes)`
+          : r.resultText,
+      });
+
       // Notify client: tool finished.
       await this.conn.sessionUpdate({
         sessionId: session.id,

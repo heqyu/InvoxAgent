@@ -11,6 +11,7 @@
 // CHOICE: per-tool risk tier rather than per-tool policy. Adding a new tool
 // only requires picking its tier; the gate logic stays in one place.
 
+import { spawn } from "node:child_process";
 import { resolve } from "node:path";
 import type {
   AgentSideConnection,
@@ -210,55 +211,93 @@ async function bash(
 ): Promise<ToolExecResult> {
   const command = String(args["command"] ?? "");
   if (!command) return errorResult("missing 'command'", "execute", "bash");
-  if (!ctx.caps.terminal) {
-    return errorResult("client does not advertise terminal capability", "execute", `bash`);
-  }
   log.info("tool: bash", { command });
 
-  const isWin = process.platform === "win32";
-  const shell = isWin ? "cmd.exe" : "/bin/sh";
-  const shellArgs = isWin ? ["/c", command] : ["-c", command];
+  // CHOICE: spawn the command ourselves via node:child_process instead of
+  // ACP's terminal/* methods.
+  //
+  // Why: empirical observation against Zed on Windows showed that
+  // createTerminal({command: "cmd.exe", args: ["/c", "ls -la"]}) launched
+  // cmd.exe but its /c arg never reached the shell — every call returned
+  // just the cmd startup banner and an empty prompt. The reference agent
+  // visible in user screenshots also did not seem to use ACP terminal
+  // (its output was clearly a real ls, not a cmd banner).
+  //
+  // By using Node's spawn we:
+  //   - get full control of how the shell is invoked (shell:true uses the
+  //     OS default shell with proper command-line construction)
+  //   - capture stdout+stderr deterministically
+  //   - don't depend on the client advertising the `terminal` capability
+  //   - stay portable: same code on Windows / macOS / Linux
+  //
+  // Trade-off: the user doesn't get a live-updating terminal view in their
+  // editor — but our stage-5 fix already returned content text rather than
+  // a terminal handle, so the UX is identical to before.
 
-  let term;
-  try {
-    term = await ctx.conn.createTerminal({
-      sessionId: ctx.sessionId,
-      command: shell,
-      args: shellArgs,
+  return new Promise<ToolExecResult>((resolveResult) => {
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+
+    const child = spawn(command, {
       cwd: ctx.cwd,
-      env: [],
+      shell: true,        // ← use OS default shell to interpret pipes/quotes
+      windowsHide: true,
     });
-  } catch (e) {
-    return errorResult(`createTerminal failed: ${(e as Error).message}`, "execute", `bash: ${command}`);
-  }
 
-  try {
-    const exit = await term.waitForExit();
-    const out = await term.currentOutput();
-    const exitCode = exit.exitCode ?? null;
-    const signal = exit.signal ?? null;
-    const stdout = out.output;
+    child.stdout.on("data", (d: Buffer) => {
+      stdout += d.toString("utf8");
+    });
+    child.stderr.on("data", (d: Buffer) => {
+      stderr += d.toString("utf8");
+    });
 
-    // Both the LLM and the client UI see this same text. We previously used
-    // ToolCallContent.terminal here, but that requires the terminal to stay
-    // alive — and we release it in `finally` below, leaving the UI with a
-    // dead reference. Embedding the captured text as a `content` block
-    // matches what well-behaved ACP agents do and Zed renders it inline.
-    const display =
-      `$ ${command}\n` +
-      `exit=${exitCode ?? "?"}${signal ? ` signal=${signal}` : ""}\n` +
-      (stdout.length > 0 ? stdout : "(no output)");
-
-    return {
-      resultText: display,
-      acpContent: [{ type: "content", content: { type: "text", text: display } }],
-      kind: "execute",
-      title: `bash: ${command.slice(0, 60)}${command.length > 60 ? "…" : ""}`,
-      ok: exitCode === 0,
+    const onAbort = (): void => {
+      if (settled) return;
+      try {
+        child.kill();
+      } catch {
+        // process may have already exited
+      }
     };
-  } finally {
-    await term.release().catch(() => undefined);
-  }
+    ctx.signal.addEventListener("abort", onAbort, { once: true });
+
+    child.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      ctx.signal.removeEventListener("abort", onAbort);
+      const display =
+        `$ ${command}\n` +
+        `error: ${err.message}\n`;
+      resolveResult({
+        resultText: display,
+        acpContent: [{ type: "content", content: { type: "text", text: display } }],
+        kind: "execute",
+        title: `bash: ${command.slice(0, 60)}${command.length > 60 ? "…" : ""}`,
+        ok: false,
+      });
+    });
+
+    child.on("close", (exitCode, signal) => {
+      if (settled) return;
+      settled = true;
+      ctx.signal.removeEventListener("abort", onAbort);
+
+      const combined = stdout + (stderr ? (stdout ? "\n" : "") + stderr : "");
+      const display =
+        `$ ${command}\n` +
+        `exit=${exitCode ?? "?"}${signal ? ` signal=${signal}` : ""}\n` +
+        (combined.length > 0 ? combined : "(no output)");
+
+      resolveResult({
+        resultText: display,
+        acpContent: [{ type: "content", content: { type: "text", text: display } }],
+        kind: "execute",
+        title: `bash: ${command.slice(0, 60)}${command.length > 60 ? "…" : ""}`,
+        ok: exitCode === 0,
+      });
+    });
+  });
 }
 
 function errorResult(
