@@ -1,0 +1,23 @@
+src/tools/router.ts
+  s_dc41a57ecf88ca::t_3c4803d8029762 218
+  s_dc41a57ecf88ca::t_93c27177c1529b 216-217,219-235,237-242,244-245,248-253,255-261,263-300
+  s_dc41a57ecf88ca::t_5bfb4ea3371784 14
+src/agent/agent.ts
+  s_dc41a57ecf88ca::t_27d92706192227 238-247
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "63b5e80fa79095ba539de428dfcf94ad25970152",
+  "prompts": {},
+  "sessions": {
+    "s_dc41a57ecf88ca": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2d3ba70e-c4b3-423d-9478-f460e1b6cc7e",
+        "model": "claude-4.7-opus"
+      },
+      "human_author": "invox <invox@local>"
+    }
+  }
+}
