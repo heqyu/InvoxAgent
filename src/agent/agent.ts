@@ -1,28 +1,21 @@
 // InvoxAgent: implements the ACP `Agent` interface.
 //
-// Stage 3 scope: orchestrate the LLM-tool loop.
+// One ACP connection = one InvoxAgent. One agent owns N sessions
+// (one per session/new request). Each session has its own history,
+// its own AbortController for cancellation, and its own SessionToolState
+// (read-paths set + file content cache) shared across the session's
+// tool calls.
 //
-//   prompt():
-//     append user msg → loop up to MAX_ITERATIONS:
-//       call provider.stream(messages, tools, signal)
-//       accumulate streamed text, emit ACP agent_message_chunks
-//       collect tool_call deltas
-//       on finish:
-//         if no tool_calls: append assistant text → return end_turn
-//         if tool_calls:
-//           append assistant msg (with tool_calls)
-//           for each tool_call:
-//             emit ACP tool_call (in_progress)
-//             run tool via tools/router
-//             emit ACP tool_call_update (completed | failed)
-//             append role:tool message with result
-//           continue loop
-//     after MAX_ITERATIONS: return max_turn_requests
+// prompt() loop:
+//   append user msg → up to MAX_ITERATIONS:
+//     stream LLM → emit agent_message_chunks, collect tool_calls
+//     on finish:
+//       no tool_calls   → end_turn
+//       has tool_calls  → for each: emit tool_call, run, emit tool_call_update,
+//                          append tool result → continue
+//   exceeded → max_turn_requests
 //
-// Stage-3 user decisions (PLAN.md):
-//   - tools: read_file, write_file, bash
-//   - permission: never ask (router doesn't call requestPermission)
-//   - loop bound: MAX_ITERATIONS = 8
+// MAX_ITERATIONS defaults to 50; override via INVOX_MAX_ITERATIONS env.
 
 import { randomUUID } from "node:crypto";
 import {
@@ -42,20 +35,12 @@ import {
 } from "@zed-industries/agent-client-protocol";
 import { log } from "../log.js";
 import type { LLMMessage, LLMProvider, ParsedToolCall } from "../llm/types.js";
-import { TOOL_SPECS } from "../tools/specs.js";
-import { executeTool, type PermissionPolicy } from "../tools/router.js";
+import { FileCache } from "../tools/cache.js";
+import { kindFromTier } from "../tools/permissions.js";
+import { getTool, TOOL_SPECS } from "../tools/registry.js";
+import { executeTool } from "../tools/router.js";
+import type { PermissionPolicy, SessionToolState } from "../tools/types.js";
 
-/**
- * Maximum LLM↔tool round-trips per single user prompt.
- *
- * Override via env: INVOX_MAX_ITERATIONS=<n>. Default 50.
- *
- * Picking this value: a typical "analyze this project" prompt easily wants
- * 20-30 tool calls (read 10 files, run 5 commands, summarize). 50 covers
- * most real tasks while still bounding a runaway model. For deep refactor
- * tasks bump to 100+. Reference clients like Claude Code use ad-hoc loop
- * detection on top of a high cap, which we can add later.
- */
 function maxIterations(): number {
   const raw = process.env["INVOX_MAX_ITERATIONS"];
   if (!raw) return 50;
@@ -69,6 +54,7 @@ interface Session {
   cwd: string;
   history: LLMMessage[];
   abort: AbortController;
+  toolState: SessionToolState;
 }
 
 export class InvoxAgent implements Agent {
@@ -121,6 +107,10 @@ export class InvoxAgent implements Agent {
       cwd: params.cwd,
       history: [],
       abort: new AbortController(),
+      toolState: {
+        readPaths: new Set<string>(),
+        cache: new FileCache(),
+      },
     });
     log.info("session created", { id, cwd: params.cwd });
     return { sessionId: id };
@@ -227,18 +217,15 @@ export class InvoxAgent implements Agent {
       tool_calls: toolCalls,
     });
 
-    // Execute tools sequentially. Parallel could be a stage-5 polish, but
-    // sequential keeps logs sane and matches what most agent UIs expect.
+    // Execute tools sequentially.
     for (const call of toolCalls) {
-      // Pick a meaningful kind + title up front. Zed's UI renders the card
-      // using the kind set on the FIRST tool_call notification (the
-      // tool_call_update later only patches fields on the same id), so we
-      // need a real kind here, not "other" — otherwise Zed gives us a
-      // minimal card with no output region.
-      const startKind = guessKind(call.name);
-      const startTitle = guessTitle(call.name, call.arguments);
+      // Pick kind + title from the registered tool when known. Zed's UI
+      // picks the card layout from the FIRST tool_call notification, so
+      // setting the right kind here matters.
+      const tool = getTool(call.name);
+      const startKind = tool ? kindFromTier(tool.tier) : "other";
+      const startTitle = startTitleFor(call);
 
-      // Notify client: tool starting.
       await this.conn.sessionUpdate({
         sessionId: session.id,
         update: {
@@ -259,19 +246,18 @@ export class InvoxAgent implements Agent {
         signal: session.abort.signal,
         policy: this.policy,
         toolCallId: call.id,
+        state: session.toolState,
       });
 
-      // Visibility for diagnosing 'LLM keeps retrying tool' loops:
-      // dump exactly what the LLM will see back as the tool message.
       log.info("tool result", {
         name: call.name,
         ok: r.ok,
-        resultPreview: r.resultText.length > 300
-          ? r.resultText.slice(0, 300) + ` …(+${r.resultText.length - 300} more bytes)`
-          : r.resultText,
+        resultPreview:
+          r.resultText.length > 300
+            ? r.resultText.slice(0, 300) + ` …(+${r.resultText.length - 300} more bytes)`
+            : r.resultText,
       });
 
-      // Notify client: tool finished.
       await this.conn.sessionUpdate({
         sessionId: session.id,
         update: {
@@ -284,7 +270,6 @@ export class InvoxAgent implements Agent {
         },
       });
 
-      // Feed the tool result back to the LLM for the next iteration.
       session.history.push({
         role: "tool",
         tool_call_id: call.id,
@@ -313,53 +298,44 @@ function safeParseJSON(s: string): Record<string, unknown> | null {
 }
 
 /**
- * Map our internal tool name to ACP `ToolKind` so the client UI picks the
- * right icon and (importantly for Zed) the right card layout.
+ * Title to display while the tool is running. Prefers the LLM-supplied
+ * `description` arg; otherwise falls back to a synthesized phrase.
  */
-function guessKind(name: string): "read" | "edit" | "execute" | "other" {
-  switch (name) {
-    case "read_file":
-      return "read";
-    case "write_file":
-      return "edit";
-    case "bash":
-      return "execute";
-    default:
-      return "other";
-  }
-}
-
-/**
- * Build a human-readable title that fits a card header. Prefers the LLM's
- * own `description` arg (filled per the schema in tools/specs.ts) so the
- * card shows what the LLM intended in plain language. Falls back to a
- * sensible default per tool name.
- */
-function guessTitle(name: string, rawArgs: string): string {
-  const parsed = safeParseJSON(rawArgs);
+function startTitleFor(call: ParsedToolCall): string {
+  const parsed = safeParseJSON(call.arguments);
   const desc = typeof parsed?.["description"] === "string" ? parsed["description"].trim() : "";
   if (desc) return desc;
-  if (!parsed) return name;
-  switch (name) {
+  if (!parsed) return call.name;
+  switch (call.name) {
     case "read_file": {
       const p = String(parsed["path"] ?? "");
-      return p ? `Read ${p}` : "Read file";
+      const offset = parsed["offset"];
+      return p
+        ? offset
+          ? `Read ${p} (lines ${String(offset)}+)`
+          : `Read ${p}`
+        : "Read file";
     }
     case "write_file": {
       const p = String(parsed["path"] ?? "");
       return p ? `Write ${p}` : "Write file";
+    }
+    case "edit_file": {
+      const p = String(parsed["path"] ?? "");
+      return p ? `Edit ${p}` : "Edit file";
     }
     case "bash": {
       const c = String(parsed["command"] ?? "");
       return c ? `\`${c.slice(0, 80)}${c.length > 80 ? "…" : ""}\`` : "Run command";
     }
     default:
-      return name;
+      return call.name;
   }
 }
 
 function isAbort(err: unknown): boolean {
-  if (err && typeof err === "object" && "name" in err && (err as { name: unknown }).name === "AbortError") return true;
+  if (err && typeof err === "object" && "name" in err && (err as { name: unknown }).name === "AbortError")
+    return true;
   if (err instanceof Error && /aborted/i.test(err.message)) return true;
   return false;
 }

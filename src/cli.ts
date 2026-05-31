@@ -19,7 +19,7 @@ import { log } from "./log.js";
 import { StdioTransport } from "./transports/stdio.js";
 import type { Transport } from "./transports/types.js";
 import { WebSocketTransport } from "./transports/websocket.js";
-import type { PermissionPolicy } from "./tools/router.js";
+import type { PermissionPolicy } from "./tools/types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
