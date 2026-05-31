@@ -1,0 +1,35 @@
+.invox/sessions/6d72cb02-b07b-42ea-aed4-b70bc116ac50.json
+  s_dc41a57ecf88ca::t_fe9bfb074f85dd 1-17
+src/agent/agent.ts
+  s_dc41a57ecf88ca::t_55d08d2174681f 31-32,40
+  s_dc41a57ecf88ca::t_7b377e1096e9ff 61-63,90,120,126-174,190-211,213
+  s_dc41a57ecf88ca::t_da899a090c28c7 355-450
+  s_dc41a57ecf88ca::t_63c71aaf22e4ed 460-467
+.invox/sessions/87b1b26f-14e8-47cb-8c7b-0d2868773cf3.json
+  s_dc41a57ecf88ca::t_fe9bfb074f85dd 1-25
+examples/smoke-stage7.ts
+  s_dc41a57ecf88ca::t_af2e9c835ed5ef 1-32,34-37,43-46,48-183
+  s_dc41a57ecf88ca::t_312c726b4f2270 33,38-42,47
+.invox/sessions/c4cde62b-ef61-458b-af1a-cb4c8a38fb91.json
+  s_dc41a57ecf88ca::t_fe9bfb074f85dd 1-34
+.invox/sessions/4c75c927-201d-4f05-b9ee-949d50a18f17.json
+  s_dc41a57ecf88ca::t_fe9bfb074f85dd 1-17
+src/persistence.ts
+  s_dc41a57ecf88ca::t_8abe13da077727 1-95
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "2462d8e35558a51d2e525f4df836f74b1fa5f1dc",
+  "prompts": {},
+  "sessions": {
+    "s_dc41a57ecf88ca": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2d3ba70e-c4b3-423d-9478-f460e1b6cc7e",
+        "model": "claude-4.7-opus"
+      },
+      "human_author": "invox <invox@local>"
+    }
+  }
+}
