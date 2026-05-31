@@ -45,7 +45,24 @@ import type { LLMMessage, LLMProvider, ParsedToolCall } from "../llm/types.js";
 import { TOOL_SPECS } from "../tools/specs.js";
 import { executeTool, type PermissionPolicy } from "../tools/router.js";
 
-const MAX_ITERATIONS = 8;
+/**
+ * Maximum LLM↔tool round-trips per single user prompt.
+ *
+ * Override via env: INVOX_MAX_ITERATIONS=<n>. Default 50.
+ *
+ * Picking this value: a typical "analyze this project" prompt easily wants
+ * 20-30 tool calls (read 10 files, run 5 commands, summarize). 50 covers
+ * most real tasks while still bounding a runaway model. For deep refactor
+ * tasks bump to 100+. Reference clients like Claude Code use ad-hoc loop
+ * detection on top of a high cap, which we can add later.
+ */
+function maxIterations(): number {
+  const raw = process.env["INVOX_MAX_ITERATIONS"];
+  if (!raw) return 50;
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n) || n <= 0) return 50;
+  return n;
+}
 
 interface Session {
   id: string;
@@ -123,13 +140,14 @@ export class InvoxAgent implements Agent {
     });
     session.history.push({ role: "user", content: userText });
 
-    for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
+    const max = maxIterations();
+    for (let iter = 0; iter < max; iter++) {
       const result = await this.runOneIteration(session);
       if (result.kind === "stop") return { stopReason: result.reason };
       if (session.abort.signal.aborted) return { stopReason: "cancelled" };
       // else: tool calls were executed, history extended → continue loop
     }
-    log.warn("prompt: hit MAX_ITERATIONS", { sessionId: session.id });
+    log.warn("prompt: hit max iterations", { sessionId: session.id, max });
     return { stopReason: "max_turn_requests" };
   }
 
