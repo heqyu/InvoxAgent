@@ -2,15 +2,25 @@
 
 > An [ACP](https://agentclientprotocol.com/) (Agent Client Protocol) compatible agent server with pluggable transports.
 
-**Status:** stage 2 (OpenAI-compatible streaming over stdio). See [`PLAN.md`](./PLAN.md) for the build plan.
+**Status:** stage 3 (LLM tool-calling: fs + bash). See [`PLAN.md`](./PLAN.md) for the build plan.
 
 ## What it is
 
 `invox` is an agent that:
 
 - Speaks Zed's **Agent Client Protocol** (JSON-RPC 2.0) over stdio (and WebSocket in stage 4+)
-- Bridges to any **OpenAI-compatible** LLM endpoint (stage 2+)
-- Streams replies and routes tool calls through ACP's `fs/*` and permission flows (stage 3+)
+- Bridges to any **OpenAI-compatible** LLM endpoint
+- Streams replies and **routes LLM tool_calls through ACP** — `read_file`, `write_file`, `bash` — with a multi-step loop bounded at 8 iterations per turn
+
+## Tools the LLM can call
+
+| Tool | ACP method routed to | Client capability required |
+|---|---|---|
+| `read_file(path)` | `fs/read_text_file` | `fs.readTextFile` |
+| `write_file(path, content)` | `fs/write_text_file` (also tries to read old content for diff) | `fs.writeTextFile` |
+| `bash(command)` | `terminal/create` + `terminal/wait_for_exit` + `terminal/output` | `terminal: true` |
+
+Permission policy for v1: **never ask** — the agent trusts the LLM and runs tools directly. (Stage 5 polish may add an env-knob for stricter policies.)
 
 ## Build & verify
 
@@ -21,11 +31,14 @@ npm run build           # emits dist/
 npm run dev -- --version  # → "invox v0.0.1"
 ```
 
-### Synthetic acceptance (stage 1+)
+### Synthetic acceptance
 
 ```bash
 # Offline: forces EchoProvider (no API key needed)
 npx tsx examples/smoke-stdio.ts
+
+# Offline: tool-calling end-to-end with MockToolProvider
+npx tsx examples/smoke-tools.ts
 
 # Real LLM: against any OpenAI-compatible endpoint
 INVOX_BASE_URL=https://api.openai.com/v1 \
@@ -34,7 +47,7 @@ INVOX_API_KEY=sk-... \
 npx tsx examples/smoke-openai.ts
 ```
 
-Both end with `PASS`.
+All three end with `PASS`.
 
 ### Connect from Zed
 
@@ -74,7 +87,7 @@ Then in Zed: open the agent panel, pick **invox**, send a prompt. Stage 1 echoes
 | `INVOX_BASE_URL` | OpenAI-compatible base URL (set both this and API_KEY for real LLM) | — |
 | `INVOX_MODEL` | model name passed to provider | `gpt-4o-mini` |
 | `INVOX_API_KEY` | provider API key | — |
-| `INVOX_MOCK` | force EchoProvider regardless of other env (testing only) | `0` |
+| `INVOX_MOCK` | `1` → EchoProvider; `tools` → MockToolProvider; unset → real | unset |
 
 **Provider selection**:
 - `INVOX_MOCK=1` → `EchoProvider` (deterministic, offline)

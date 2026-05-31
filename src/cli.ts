@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { InvoxAgent } from "./agent/agent.js";
 import { EchoProvider } from "./llm/echo.js";
+import { MockToolProvider } from "./llm/mock-tools.js";
 import { OpenAIProvider } from "./llm/openai.js";
 import type { LLMProvider } from "./llm/types.js";
 import { log } from "./log.js";
@@ -151,14 +152,20 @@ async function main(): Promise<void> {
 
 /**
  * Provider selection rules:
- *   - INVOX_MOCK=1                         → EchoProvider (offline; for tests/dev)
+ *   - INVOX_MOCK=tools                     → MockToolProvider (offline tool-flow tests)
+ *   - INVOX_MOCK=1                         → EchoProvider (offline; no tools)
  *   - INVOX_API_KEY + INVOX_BASE_URL set   → OpenAIProvider
  *   - otherwise                            → EchoProvider with a warn
  *
  * INVOX_MODEL defaults to "gpt-4o-mini" if unset (only matters for OpenAIProvider).
  */
 function pickProvider(): LLMProvider {
-  if (process.env["INVOX_MOCK"] === "1") {
+  const mock = process.env["INVOX_MOCK"];
+  if (mock === "tools") {
+    log.info("provider: mock-tools (INVOX_MOCK=tools)");
+    return new MockToolProvider();
+  }
+  if (mock === "1") {
     log.info("provider: echo (INVOX_MOCK=1)");
     return new EchoProvider();
   }
