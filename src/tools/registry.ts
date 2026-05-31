@@ -6,6 +6,8 @@
 import type { ToolSpec } from "../llm/types.js";
 import { bashTool } from "./bash.js";
 import { editFileTool } from "./edit-file.js";
+import { globTool } from "./glob.js";
+import { grepTool } from "./grep.js";
 import { readFileTool } from "./read-file.js";
 import { writeFileTool } from "./write-file.js";
 import type { Tool } from "./types.js";
@@ -14,6 +16,8 @@ export const TOOLS: readonly Tool[] = [
   readFileTool,
   writeFileTool,
   editFileTool,
+  globTool,
+  grepTool,
   bashTool,
 ];
 

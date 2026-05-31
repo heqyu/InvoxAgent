@@ -32,7 +32,9 @@
   },
   "dependencies": {
     "@types/ws": "^8.18.1",
+    "@vscode/ripgrep": "^1.18.0",
     "@zed-industries/agent-client-protocol": "^0.4.5",
+    "fast-glob": "^3.3.3",
     "openai": "^6.39.1",
     "ws": "^8.21.0"
   }
