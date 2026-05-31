@@ -1,0 +1,37 @@
+src/llm/openai.ts
+  s_dc41a57ecf88ca::t_6e1edeea6fafc1 1-64
+src/agent/agent.ts
+  s_dc41a57ecf88ca::t_8e7518d8066c29 3-8,10,29,34,42,44,46,52,71,84,97-99,101-106,108-138,141-142,145-150,172-175
+src/llm/types.ts
+  s_dc41a57ecf88ca::t_f8f7d5ffdad1c1 1-36
+examples/smoke-openai.ts
+  s_dc41a57ecf88ca::t_61964d4e3c4a62 1-128
+examples/smoke-stdio.ts
+  s_dc41a57ecf88ca::t_de3e810e714100 30-34,83-86,88-90,93-131,137,139-143
+README.md
+  s_dc41a57ecf88ca::t_7abf844ca4ae25 24,27,29-34,37
+  s_dc41a57ecf88ca::t_475e1ed1977b9a 5
+  s_dc41a57ecf88ca::t_a0abc138c43816 74-82
+src/cli.ts
+  s_dc41a57ecf88ca::t_75754fb7f27df8 152-177
+  s_dc41a57ecf88ca::t_1f184749024db4 114-120,125,134
+  s_dc41a57ecf88ca::t_2a997e9c1cde3e 13-15
+src/llm/echo.ts
+  s_dc41a57ecf88ca::t_be778b1bea5485 1-34
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "37dfad9d9afc04261c6559a6c1d819487dcd3301",
+  "prompts": {},
+  "sessions": {
+    "s_dc41a57ecf88ca": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2d3ba70e-c4b3-423d-9478-f460e1b6cc7e",
+        "model": "claude-4.7-opus"
+      },
+      "human_author": "invox <invox@local>"
+    }
+  }
+}
