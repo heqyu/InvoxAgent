@@ -2,7 +2,7 @@
 
 > An [ACP](https://agentclientprotocol.com/) (Agent Client Protocol) compatible agent server with pluggable transports.
 
-**Status:** stage 3 (LLM tool-calling: fs + bash). See [`PLAN.md`](./PLAN.md) for the build plan.
+**Status:** stage 4 (stdio + WebSocket transports). See [`PLAN.md`](./PLAN.md) for the build plan.
 
 ## What it is
 
@@ -34,11 +34,14 @@ npm run dev -- --version  # → "invox v0.0.1"
 ### Synthetic acceptance
 
 ```bash
-# Offline: forces EchoProvider (no API key needed)
+# Offline: forces EchoProvider (no API key needed) — stdio transport
 npx tsx examples/smoke-stdio.ts
 
-# Offline: tool-calling end-to-end with MockToolProvider
+# Offline: tool-calling end-to-end with MockToolProvider — stdio transport
 npx tsx examples/smoke-tools.ts
+
+# Offline: full ACP over WebSocket — confirms the second transport
+npx tsx examples/smoke-ws.ts
 
 # Real LLM: against any OpenAI-compatible endpoint
 INVOX_BASE_URL=https://api.openai.com/v1 \
@@ -47,7 +50,33 @@ INVOX_API_KEY=sk-... \
 npx tsx examples/smoke-openai.ts
 ```
 
-All three end with `PASS`.
+All four end with `PASS`.
+
+### Connect from a browser / custom client (WebSocket)
+
+Start invox listening for WebSocket clients:
+
+```bash
+node dist/cli.js --ws --port 9744 --host 127.0.0.1
+# (multiple transports allowed: --stdio --ws  binds both)
+```
+
+**Wire format:** each WebSocket text frame is exactly **one JSON-RPC 2.0 envelope** — request, response, or notification. No NDJSON wrapping; WS already frames messages.
+
+Minimal browser snippet:
+
+```javascript
+const ws = new WebSocket("ws://127.0.0.1:9744");
+ws.onmessage = (ev) => console.log("← agent:", JSON.parse(ev.data));
+ws.onopen = () => {
+  ws.send(JSON.stringify({
+    jsonrpc: "2.0", id: 1, method: "initialize",
+    params: { protocolVersion: 1, clientCapabilities: { fs: {} } },
+  }));
+};
+```
+
+Multiple browsers can connect simultaneously — each gets its own session map.
 
 ### Connect from Zed
 

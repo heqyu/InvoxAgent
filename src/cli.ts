@@ -1,7 +1,8 @@
 // Entry point. Selects transport(s) per CLI flags / env, then constructs
 // `AgentSideConnection` per peer.
 //
-// Stage 1 scope: stdio only. CLI flags for ws are reserved (will be wired in stage 4).
+// Stages 1-4: stdio + WebSocket. Each peer (1 stdio, N ws clients) gets its
+// own InvoxAgent instance for isolation.
 //
 // Hard rule: nothing here writes to stdout. The stdio transport owns stdout for JSON-RPC.
 
@@ -17,6 +18,7 @@ import type { LLMProvider } from "./llm/types.js";
 import { log } from "./log.js";
 import { StdioTransport } from "./transports/stdio.js";
 import type { Transport } from "./transports/types.js";
+import { WebSocketTransport } from "./transports/websocket.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -123,7 +125,7 @@ async function main(): Promise<void> {
   const transports: Transport[] = [];
   if (args.transports.has("stdio")) transports.push(new StdioTransport());
   if (args.transports.has("ws")) {
-    log.warn("ws transport not implemented in stage 2 (lands in stage 4)");
+    transports.push(new WebSocketTransport({ host: args.wsHost, port: args.wsPort }));
   }
 
   // Wire each transport: every peer gets its own InvoxAgent instance via the
@@ -139,13 +141,12 @@ async function main(): Promise<void> {
     ),
   );
 
-  // For stdio: this main() resolves once the transport's start() resolves,
-  // which it does immediately after wiring. The Node process stays alive
-  // because stdin is being read. We await a never-resolving promise to be
-  // explicit about that intent.
-  if (args.transports.has("stdio")) {
+  // Keep main() alive while transports are bound. stdin reader (stdio) and
+  // WebSocketServer (ws) each hold an active handle, so the process won't
+  // exit naturally — but the explicit wait makes intent obvious.
+  if (transports.length > 0) {
     await new Promise<void>(() => {
-      /* stdio peer holds the process open via stdin read */
+      /* transports hold the process open via their handles */
     });
   }
 }
