@@ -43,7 +43,7 @@ import {
 import { log } from "../log.js";
 import type { LLMMessage, LLMProvider, ParsedToolCall } from "../llm/types.js";
 import { TOOL_SPECS } from "../tools/specs.js";
-import { executeTool } from "../tools/router.js";
+import { executeTool, type PermissionPolicy } from "../tools/router.js";
 
 const MAX_ITERATIONS = 8;
 
@@ -59,10 +59,12 @@ export class InvoxAgent implements Agent {
   private clientCaps: ClientCapabilities = {};
   private sessions = new Map<string, Session>();
   private provider: LLMProvider;
+  private policy: PermissionPolicy;
 
-  constructor(conn: AgentSideConnection, provider: LLMProvider) {
+  constructor(conn: AgentSideConnection, provider: LLMProvider, policy: PermissionPolicy = "never") {
     this.conn = conn;
     this.provider = provider;
+    this.policy = policy;
   }
 
   async initialize(params: InitializeRequest): Promise<InitializeResponse> {
@@ -229,6 +231,8 @@ export class InvoxAgent implements Agent {
         cwd: session.cwd,
         caps: this.clientCaps,
         signal: session.abort.signal,
+        policy: this.policy,
+        toolCallId: call.id,
       });
 
       // Notify client: tool finished.

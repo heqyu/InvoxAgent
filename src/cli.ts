@@ -19,6 +19,7 @@ import { log } from "./log.js";
 import { StdioTransport } from "./transports/stdio.js";
 import type { Transport } from "./transports/types.js";
 import { WebSocketTransport } from "./transports/websocket.js";
+import type { PermissionPolicy } from "./tools/router.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -115,10 +116,12 @@ async function main(): Promise<void> {
   }
 
   const provider = pickProvider();
+  const policy = pickPolicy();
   log.info("starting", {
     name,
     version,
     provider: provider.name,
+    policy,
     transports: [...args.transports],
   });
 
@@ -134,12 +137,20 @@ async function main(): Promise<void> {
   await Promise.all(
     transports.map((t) =>
       t.start((peer) => {
-        new AgentSideConnection((conn) => new InvoxAgent(conn, provider), peer);
+        new AgentSideConnection((conn) => new InvoxAgent(conn, provider, policy), peer);
         // The connection auto-runs once constructed. We hold no reference here
         // because the package keeps it alive via the stream readers.
       }),
     ),
   );
+
+  // Graceful shutdown when stdin closes (Zed disconnects = stdin EOF).
+  if (args.transports.has("stdio")) {
+    process.stdin.on("end", () => {
+      log.info("stdin closed, shutting down");
+      process.exit(0);
+    });
+  }
 
   // Keep main() alive while transports are bound. stdin reader (stdio) and
   // WebSocketServer (ws) each hold an active handle, so the process won't
@@ -181,6 +192,19 @@ function pickProvider(): LLMProvider {
     "provider: echo (INVOX_API_KEY or INVOX_BASE_URL missing — set both for real LLM)",
   );
   return new EchoProvider();
+}
+
+/**
+ * Permission policy selection (stage 5 polish):
+ *   - never  (default): no permission requests; agent runs tools directly
+ *   - writes: writes/execute go through session/request_permission; reads pass
+ *   - always: every tool call is gated
+ */
+function pickPolicy(): PermissionPolicy {
+  const raw = (process.env["INVOX_PERMISSIONS"] ?? "never").toLowerCase();
+  if (raw === "writes" || raw === "always" || raw === "never") return raw;
+  log.warn(`unknown INVOX_PERMISSIONS=${raw}, defaulting to "never"`);
+  return "never";
 }
 
 main().catch((err) => {

@@ -1,12 +1,15 @@
 // Tool router — translates an OpenAI-style tool_call into ACP method calls.
 //
-// PLAN §1 / stage-3 user decision: "never ask" permission policy. We do NOT
-// invoke conn.requestPermission. The agent trusts the LLM. Future polish
-// (stage 5) may add an env-knob to enable a permission gate.
+// Stage-3 user decision (default): "never ask" permission policy. Stage-5
+// adds an env-driven escalation:
 //
-// Capabilities are checked: if the client did not advertise fs.readTextFile,
-// the read_file tool returns an error result the LLM can surface, rather
-// than crashing the connection.
+//   INVOX_PERMISSIONS=never   default; agent runs tools directly
+//   INVOX_PERMISSIONS=writes  reads pass through; writes/execute go through
+//                             session/request_permission
+//   INVOX_PERMISSIONS=always  every tool call goes through request_permission
+//
+// CHOICE: per-tool risk tier rather than per-tool policy. Adding a new tool
+// only requires picking its tier; the gate logic stays in one place.
 
 import { resolve } from "node:path";
 import type {
@@ -16,12 +19,18 @@ import type {
 } from "@zed-industries/agent-client-protocol";
 import { log } from "../log.js";
 
+export type PermissionPolicy = "never" | "writes" | "always";
+
+type RiskTier = "read" | "write" | "execute";
+
 export interface ToolExecContext {
   conn: AgentSideConnection;
   sessionId: string;
   cwd: string;
   caps: ClientCapabilities;
   signal: AbortSignal;
+  policy: PermissionPolicy;
+  toolCallId: string;
 }
 
 export interface ToolExecResult {
@@ -33,9 +42,17 @@ export interface ToolExecResult {
   kind: "read" | "edit" | "execute" | "other";
   /** Human-readable title; shown in the client's UI. */
   title: string;
-  /** Whether the call succeeded (drives status: completed | failed). */
+  /** Whether the call succeeded (drives status: completed | failed | cancelled). */
   ok: boolean;
+  /** True iff the user denied the action; the LLM should be told. */
+  denied?: boolean;
 }
+
+const RISK: Record<string, RiskTier> = {
+  read_file: "read",
+  write_file: "write",
+  bash: "execute",
+};
 
 export async function executeTool(
   name: string,
@@ -49,6 +66,24 @@ export async function executeTool(
     return errorResult(`bad arguments JSON: ${(e as Error).message}`, "other", `${name}(?)`);
   }
 
+  const tier = RISK[name];
+  if (tier && needsPermission(tier, ctx.policy)) {
+    const granted = await requestPermission(name, args, ctx);
+    if (!granted) {
+      log.info("permission denied", { name });
+      return {
+        resultText: `User denied permission for ${name}.`,
+        acpContent: [
+          { type: "content", content: { type: "text", text: `Permission denied for ${name}.` } },
+        ],
+        kind: kindFromTier(tier),
+        title: `${name} (denied)`,
+        ok: false,
+        denied: true,
+      };
+    }
+  }
+
   switch (name) {
     case "read_file":
       return readFile(args, ctx);
@@ -58,6 +93,44 @@ export async function executeTool(
       return bash(args, ctx);
     default:
       return errorResult(`unknown tool: ${name}`, "other", name);
+  }
+}
+
+function needsPermission(tier: RiskTier, policy: PermissionPolicy): boolean {
+  if (policy === "always") return true;
+  if (policy === "writes") return tier === "write" || tier === "execute";
+  return false;
+}
+
+function kindFromTier(tier: RiskTier): "read" | "edit" | "execute" {
+  return tier === "read" ? "read" : tier === "write" ? "edit" : "execute";
+}
+
+async function requestPermission(
+  name: string,
+  args: Record<string, unknown>,
+  ctx: ToolExecContext,
+): Promise<boolean> {
+  try {
+    const res = await ctx.conn.requestPermission({
+      sessionId: ctx.sessionId,
+      toolCall: {
+        toolCallId: ctx.toolCallId,
+        title: `${name}(${JSON.stringify(args).slice(0, 80)})`,
+        kind: kindFromTier(RISK[name] ?? "read"),
+        rawInput: args,
+        status: "pending",
+      },
+      options: [
+        { optionId: "allow", name: "Allow", kind: "allow_once" },
+        { optionId: "deny", name: "Deny", kind: "reject_once" },
+      ],
+    });
+    if (res.outcome.outcome === "selected") return res.outcome.optionId === "allow";
+    return false; // cancelled = treat as deny
+  } catch (e) {
+    log.warn("requestPermission failed; defaulting to deny", String(e));
+    return false;
   }
 }
 
@@ -100,14 +173,13 @@ async function writeFile(
   const path = resolve(ctx.cwd, rel);
   log.info("tool: write_file", { path, bytes: content.length });
 
-  // Best-effort old-text fetch so the client can render a real diff.
   let oldText: string | null = null;
   if (ctx.caps.fs?.readTextFile) {
     try {
       const r = await ctx.conn.readTextFile({ sessionId: ctx.sessionId, path });
       oldText = r.content;
     } catch {
-      oldText = null; // file likely doesn't exist yet — that's fine
+      oldText = null;
     }
   }
 
@@ -143,8 +215,6 @@ async function bash(
   }
   log.info("tool: bash", { command });
 
-  // Spawn via shell so users can use pipes / redirects naturally.
-  // Win/posix split: cmd.exe /c on Windows, /bin/sh -c elsewhere.
   const isWin = process.platform === "win32";
   const shell = isWin ? "cmd.exe" : "/bin/sh";
   const shellArgs = isWin ? ["/c", command] : ["-c", command];

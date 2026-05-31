@@ -2,7 +2,43 @@
 
 > An [ACP](https://agentclientprotocol.com/) (Agent Client Protocol) compatible agent server with pluggable transports.
 
-**Status:** stage 4 (stdio + WebSocket transports). See [`PLAN.md`](./PLAN.md) for the build plan.
+**Status:** v0.0.1 — five stages landed (stdio + WebSocket transports, OpenAI streaming, tool calling, cancellation). See [`PLAN.md`](./PLAN.md) for the build plan.
+
+## Architecture
+
+```
+       ┌────────────┐                           ┌─────────────────┐
+       │   Zed      │── stdio ─┐         ┌───── │ Browser /       │
+       └────────────┘          │         │ ws   │ custom WS client│
+                               ▼         ▼      └─────────────────┘
+                          ┌──────────────────┐
+                          │  invox process   │
+                          │ ┌──────────────┐ │
+                          │ │ transports/  │ │  one peer = one connection
+                          │ │ stdio  ws    │ │
+                          │ └──────┬───────┘ │
+                          │        │         │
+                          │ ┌──────▼───────┐ │
+                          │ │AgentSideConn │ │  ACP / JSON-RPC 2.0
+                          │ │ (per peer)   │ │  via @zed-industries/agent-client-protocol
+                          │ └──────┬───────┘ │
+                          │        │         │
+                          │ ┌──────▼───────┐ │
+                          │ │ InvoxAgent   │ │  multi-step loop, MAX_ITER=8
+                          │ │ + sessions{} │ │
+                          │ └──┬────────┬──┘ │
+                          │    │        │    │
+                          │ ┌──▼──┐ ┌───▼──┐ │
+                          │ │ LLM │ │tools/│ │  fs/* + terminal/* via ACP client methods
+                          │ │ prov│ │router│ │  (fs.readTextFile, writeTextFile, terminal/*)
+                          │ └──┬──┘ └──────┘ │
+                          └────┼─────────────┘
+                               ▼
+                       ┌────────────────┐
+                       │ OpenAI-compat  │   any baseURL: OpenAI / DeepSeek /
+                       │   endpoint     │   Together / vLLM / Ollama / LM Studio
+                       └────────────────┘
+```
 
 ## What it is
 
@@ -43,6 +79,9 @@ npx tsx examples/smoke-tools.ts
 # Offline: full ACP over WebSocket — confirms the second transport
 npx tsx examples/smoke-ws.ts
 
+# Offline: session/cancel halts an in-flight stream
+npx tsx examples/smoke-cancel.ts
+
 # Real LLM: against any OpenAI-compatible endpoint
 INVOX_BASE_URL=https://api.openai.com/v1 \
 INVOX_MODEL=gpt-4o-mini \
@@ -50,7 +89,7 @@ INVOX_API_KEY=sk-... \
 npx tsx examples/smoke-openai.ts
 ```
 
-All four end with `PASS`.
+All five end with `PASS`.
 
 ### Connect from a browser / custom client (WebSocket)
 
@@ -117,6 +156,8 @@ Then in Zed: open the agent panel, pick **invox**, send a prompt. Stage 1 echoes
 | `INVOX_MODEL` | model name passed to provider | `gpt-4o-mini` |
 | `INVOX_API_KEY` | provider API key | — |
 | `INVOX_MOCK` | `1` → EchoProvider; `tools` → MockToolProvider; unset → real | unset |
+| `INVOX_PERMISSIONS` | `never` (default) / `writes` (gate writes+exec) / `always` (gate all tools) | `never` |
+| `INVOX_PERMISSIONS` | `never` (default) / `writes` (gate writes+exec) / `always` (gate all tools) | `never` |
 
 **Provider selection**:
 - `INVOX_MOCK=1` → `EchoProvider` (deterministic, offline)
