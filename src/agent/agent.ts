@@ -212,14 +212,22 @@ export class InvoxAgent implements Agent {
     // Execute tools sequentially. Parallel could be a stage-5 polish, but
     // sequential keeps logs sane and matches what most agent UIs expect.
     for (const call of toolCalls) {
+      // Pick a meaningful kind + title up front. Zed's UI renders the card
+      // using the kind set on the FIRST tool_call notification (the
+      // tool_call_update later only patches fields on the same id), so we
+      // need a real kind here, not "other" — otherwise Zed gives us a
+      // minimal card with no output region.
+      const startKind = guessKind(call.name);
+      const startTitle = guessTitle(call.name, call.arguments);
+
       // Notify client: tool starting.
       await this.conn.sessionUpdate({
         sessionId: session.id,
         update: {
           sessionUpdate: "tool_call",
           toolCallId: call.id,
-          title: `${call.name}(...)`,
-          kind: "other",
+          title: startTitle,
+          kind: startKind,
           status: "in_progress",
           rawInput: safeParseJSON(call.arguments) ?? { raw: call.arguments },
         },
@@ -283,6 +291,48 @@ function safeParseJSON(s: string): Record<string, unknown> | null {
     return JSON.parse(s) as Record<string, unknown>;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Map our internal tool name to ACP `ToolKind` so the client UI picks the
+ * right icon and (importantly for Zed) the right card layout.
+ */
+function guessKind(name: string): "read" | "edit" | "execute" | "other" {
+  switch (name) {
+    case "read_file":
+      return "read";
+    case "write_file":
+      return "edit";
+    case "bash":
+      return "execute";
+    default:
+      return "other";
+  }
+}
+
+/**
+ * Build a human-readable title that fits a card header. Falls back to the
+ * tool name if the args don't have an obvious string field.
+ */
+function guessTitle(name: string, rawArgs: string): string {
+  const parsed = safeParseJSON(rawArgs);
+  if (!parsed) return name;
+  switch (name) {
+    case "read_file": {
+      const p = String(parsed["path"] ?? "");
+      return p ? `Read ${p}` : "Read file";
+    }
+    case "write_file": {
+      const p = String(parsed["path"] ?? "");
+      return p ? `Write ${p}` : "Write file";
+    }
+    case "bash": {
+      const c = String(parsed["command"] ?? "");
+      return c ? `\`${c.slice(0, 80)}${c.length > 80 ? "…" : ""}\`` : "Run command";
+    }
+    default:
+      return name;
   }
 }
 
