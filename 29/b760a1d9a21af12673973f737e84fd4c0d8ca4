@@ -1,0 +1,21 @@
+src/tools/specs.ts
+  s_dc41a57ecf88ca::t_7aa3c3042c8793 7-14,18-26,42,44,66,68,86,88
+src/agent/agent.ts
+  s_dc41a57ecf88ca::t_68b2d6b94a2b56 315-318,322-323
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "29b760a1d9a21af12673973f737e84fd4c0d8ca4",
+  "prompts": {},
+  "sessions": {
+    "s_dc41a57ecf88ca": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2d3ba70e-c4b3-423d-9478-f460e1b6cc7e",
+        "model": "claude-4.7-opus"
+      },
+      "human_author": "invox <invox@local>"
+    }
+  }
+}
