@@ -28,6 +28,8 @@ import {
   type ClientCapabilities,
   type InitializeRequest,
   type InitializeResponse,
+  type LoadSessionRequest,
+  type LoadSessionResponse,
   type NewSessionRequest,
   type NewSessionResponse,
   type PromptRequest,
@@ -35,6 +37,7 @@ import {
 } from "@zed-industries/agent-client-protocol";
 import { log } from "../log.js";
 import type { LLMMessage, LLMProvider, ParsedToolCall } from "../llm/types.js";
+import { SessionStore, type PersistedSession } from "../persistence.js";
 import { FileCache } from "../tools/cache.js";
 import { kindFromTier } from "../tools/permissions.js";
 import { getTool, TOOL_SPECS } from "../tools/registry.js";
@@ -55,6 +58,9 @@ interface Session {
   history: LLMMessage[];
   abort: AbortController;
   toolState: SessionToolState;
+  /** Lazily created on first save() call so we don't hit disk for ephemeral cwd. */
+  store?: SessionStore;
+  createdAt: number;
 }
 
 export class InvoxAgent implements Agent {
@@ -81,7 +87,7 @@ export class InvoxAgent implements Agent {
     return {
       protocolVersion: PROTOCOL_VERSION,
       agentCapabilities: {
-        loadSession: false,
+        loadSession: true,
         promptCapabilities: {
           image: false,
           audio: false,
@@ -111,9 +117,59 @@ export class InvoxAgent implements Agent {
         readPaths: new Set<string>(),
         cache: new FileCache(),
       },
+      createdAt: Date.now(),
     });
     log.info("session created", { id, cwd: params.cwd });
     return { sessionId: id };
+  }
+
+  /**
+   * Resume a session that was previously persisted. Per ACP:
+   *   1. Hydrate session from disk
+   *   2. Stream the entire history back as session/update notifications
+   *      so the client rebuilds its UI
+   *   3. Resolve LoadSessionResponse only after replay is done
+   *
+   * If the sessionId isn't on disk we fail with a clear error — Zed shows
+   * "Failed to Launch / Loading or resuming sessions is not supported by
+   * this agent" only when the agent doesn't advertise loadSession; once
+   * advertised, an unknown id surfaces as a regular RPC error.
+   */
+  async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
+    const store = new SessionStore(params.cwd);
+    const snapshot = store.load(params.sessionId);
+    if (!snapshot) {
+      throw new Error(
+        `session ${params.sessionId} not found on disk under ${store.rootDir()}`,
+      );
+    }
+
+    log.info("loadSession", {
+      sessionId: snapshot.id,
+      historyLen: snapshot.history.length,
+      cwd: params.cwd,
+    });
+
+    // Recreate live state. cwd from the request wins (project may have moved).
+    const session: Session = {
+      id: snapshot.id,
+      cwd: params.cwd,
+      history: snapshot.history.slice(),
+      abort: new AbortController(),
+      toolState: {
+        readPaths: new Set<string>(),
+        cache: new FileCache(),
+      },
+      store,
+      createdAt: snapshot.createdAt,
+    };
+    this.sessions.set(session.id, session);
+
+    // Replay history → client. We translate every stored message to the
+    // session/update notification(s) Zed needs to repaint its conversation.
+    await this.replayHistory(session);
+
+    return {} as LoadSessionResponse;
   }
 
   async prompt(params: PromptRequest): Promise<PromptResponse> {
@@ -131,14 +187,30 @@ export class InvoxAgent implements Agent {
     session.history.push({ role: "user", content: userText });
 
     const max = maxIterations();
-    for (let iter = 0; iter < max; iter++) {
-      const result = await this.runOneIteration(session);
-      if (result.kind === "stop") return { stopReason: result.reason };
-      if (session.abort.signal.aborted) return { stopReason: "cancelled" };
-      // else: tool calls were executed, history extended → continue loop
+    let stopReason: "end_turn" | "cancelled" | "max_turn_requests" = "max_turn_requests";
+    try {
+      for (let iter = 0; iter < max; iter++) {
+        const result = await this.runOneIteration(session);
+        if (result.kind === "stop") {
+          stopReason = result.reason;
+          break;
+        }
+        if (session.abort.signal.aborted) {
+          stopReason = "cancelled";
+          break;
+        }
+        // else: tool calls were executed, history extended → continue loop
+      }
+      if (stopReason === "max_turn_requests") {
+        log.warn("prompt: hit max iterations", { sessionId: session.id, max });
+      }
+    } finally {
+      // Persist regardless of how we exited (end_turn / cancelled / max).
+      // This is the only place we save: every meaningful boundary the user
+      // might want to resume from.
+      this.persist(session);
     }
-    log.warn("prompt: hit max iterations", { sessionId: session.id, max });
-    return { stopReason: "max_turn_requests" };
+    return { stopReason };
   }
 
   async cancel(params: CancelNotification): Promise<void> {
@@ -280,6 +352,102 @@ export class InvoxAgent implements Agent {
 
     return { kind: "continue" };
   }
+
+  /** Save the session to disk. Quiet on failure (logged inside the store). */
+  private persist(session: Session): void {
+    if (!session.store) session.store = new SessionStore(session.cwd);
+    const snapshot: PersistedSession = {
+      version: 1,
+      id: session.id,
+      cwd: session.cwd,
+      createdAt: session.createdAt,
+      updatedAt: Date.now(),
+      history: session.history,
+    };
+    session.store.save(snapshot);
+  }
+
+  /**
+   * Replay a hydrated session's history to the client as session/update
+   * notifications, so the editor's conversation view rebuilds. Required
+   * by ACP's session/load contract.
+   *
+   * Translation rules (OAI message → ACP notifications):
+   *   - role:user                       → user_message_chunk
+   *   - role:assistant (no tool_calls)  → agent_message_chunk
+   *   - role:assistant (with tool_calls)→ agent_message_chunk for text part,
+   *                                       then one tool_call notification
+   *                                       per tool call (status:in_progress)
+   *   - role:tool (matching tool_call)  → tool_call_update for the same id
+   *                                       carrying the tool result text
+   */
+  private async replayHistory(session: Session): Promise<void> {
+    // Build a quick map: tool_call_id → its result message, so we can pair
+    // the assistant's tool_calls[] with the corresponding tool result in
+    // a single pass.
+    const toolResultById = new Map<string, LLMMessage>();
+    for (const m of session.history) {
+      if (m.role === "tool" && m.tool_call_id) toolResultById.set(m.tool_call_id, m);
+    }
+
+    for (const m of session.history) {
+      if (m.role === "user") {
+        await this.conn.sessionUpdate({
+          sessionId: session.id,
+          update: {
+            sessionUpdate: "user_message_chunk",
+            content: { type: "text", text: textOf(m.content) },
+          },
+        });
+        continue;
+      }
+
+      if (m.role === "assistant") {
+        const text = textOf(m.content);
+        if (text.length > 0) {
+          await this.conn.sessionUpdate({
+            sessionId: session.id,
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text },
+            },
+          });
+        }
+        for (const call of m.tool_calls ?? []) {
+          // tool_call (start) notification.
+          const tool = getTool(call.name);
+          await this.conn.sessionUpdate({
+            sessionId: session.id,
+            update: {
+              sessionUpdate: "tool_call",
+              toolCallId: call.id,
+              title: startTitleFor(call),
+              kind: tool ? kindFromTier(tool.tier) : "other",
+              status: "in_progress",
+              rawInput: safeParseJSON(call.arguments) ?? { raw: call.arguments },
+            },
+          });
+          // tool_call_update (completion) notification carrying the result.
+          const result = toolResultById.get(call.id);
+          const resultText = result ? textOf(result.content) : "(no recorded result)";
+          await this.conn.sessionUpdate({
+            sessionId: session.id,
+            update: {
+              sessionUpdate: "tool_call_update",
+              toolCallId: call.id,
+              status: "completed",
+              title: startTitleFor(call),
+              kind: tool ? kindFromTier(tool.tier) : "other",
+              content: [{ type: "content", content: { type: "text", text: resultText } }],
+            },
+          });
+        }
+        continue;
+      }
+      // role:tool messages are emitted alongside their parent assistant
+      // turn above; nothing to do here.
+    }
+  }
 }
 
 function extractText(blocks: PromptRequest["prompt"]): string {
@@ -287,6 +455,14 @@ function extractText(blocks: PromptRequest["prompt"]): string {
     .filter((b): b is Extract<typeof b, { type: "text" }> => b.type === "text")
     .map((b) => b.text)
     .join("\n");
+}
+
+/**
+ * LLMMessage.content can be string | null (assistants with only tool_calls).
+ * Reduce to a string for replay, never undefined / null in the stream.
+ */
+function textOf(content: string | null | undefined): string {
+  return typeof content === "string" ? content : "";
 }
 
 function safeParseJSON(s: string): Record<string, unknown> | null {
