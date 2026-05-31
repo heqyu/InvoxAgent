@@ -1,0 +1,33 @@
+{
+  "name": "invox",
+  "version": "0.0.1",
+  "description": "ACP-compatible agent server with pluggable transports (stdio + WebSocket) and OpenAI-compatible LLM backend",
+  "type": "module",
+  "bin": {
+    "invox": "./dist/cli.js"
+  },
+  "main": "./dist/cli.js",
+  "scripts": {
+    "dev": "tsx src/cli.ts",
+    "build": "tsc",
+    "start": "node dist/cli.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "acp",
+    "agent-client-protocol",
+    "zed",
+    "agent",
+    "llm",
+    "openai"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
