@@ -2,7 +2,7 @@
 
 > An [ACP](https://agentclientprotocol.com/) (Agent Client Protocol) compatible agent server with pluggable transports.
 
-**Status:** stage 1 (echo agent over stdio). See [`PLAN.md`](./PLAN.md) for the build plan.
+**Status:** stage 2 (OpenAI-compatible streaming over stdio). See [`PLAN.md`](./PLAN.md) for the build plan.
 
 ## What it is
 
@@ -21,13 +21,20 @@ npm run build           # emits dist/
 npm run dev -- --version  # → "invox v0.0.1"
 ```
 
-### Synthetic acceptance (stage 1)
+### Synthetic acceptance (stage 1+)
 
 ```bash
+# Offline: forces EchoProvider (no API key needed)
 npx tsx examples/smoke-stdio.ts
+
+# Real LLM: against any OpenAI-compatible endpoint
+INVOX_BASE_URL=https://api.openai.com/v1 \
+INVOX_MODEL=gpt-4o-mini \
+INVOX_API_KEY=sk-... \
+npx tsx examples/smoke-openai.ts
 ```
 
-Expected output ends with `[smoke] PASS` and shows ~7 streamed chunks.
+Both end with `PASS`.
 
 ### Connect from Zed
 
@@ -64,9 +71,15 @@ Then in Zed: open the agent panel, pick **invox**, send a prompt. Stage 1 echoes
 | Env var | Purpose | Default |
 |---|---|---|
 | `INVOX_LOG` | log level: `silent` / `error` / `warn` / `info` / `debug` | `info` |
-| `INVOX_BASE_URL` | OpenAI-compatible base URL (stage 2+) | — |
-| `INVOX_MODEL` | model name passed to provider (stage 2+) | — |
-| `INVOX_API_KEY` | provider API key (stage 2+) | — |
+| `INVOX_BASE_URL` | OpenAI-compatible base URL (set both this and API_KEY for real LLM) | — |
+| `INVOX_MODEL` | model name passed to provider | `gpt-4o-mini` |
+| `INVOX_API_KEY` | provider API key | — |
+| `INVOX_MOCK` | force EchoProvider regardless of other env (testing only) | `0` |
+
+**Provider selection**:
+- `INVOX_MOCK=1` → `EchoProvider` (deterministic, offline)
+- both `INVOX_API_KEY` and `INVOX_BASE_URL` set → `OpenAIProvider`
+- otherwise → `EchoProvider` with a warn log
 
 Logs go to **stderr** unconditionally — stdout is reserved for JSON-RPC framing.
 

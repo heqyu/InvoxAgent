@@ -1,18 +1,13 @@
 // InvoxAgent: implements the ACP `Agent` interface.
 //
-// Stage 1 scope (echo agent):
-//   - initialize: advertise minimal capabilities, return PROTOCOL_VERSION
-//   - newSession: mint a uuid sessionId, store cwd
-//   - authenticate: accept (no auth required for v1)
-//   - prompt: stream a hardcoded reply chunk-by-chunk via conn.sessionUpdate,
-//             then return stopReason="end_turn"
-//   - cancel: flip an AbortController flag (no real upstream to cancel yet —
-//             stages 2+ will gate the LLM call on this signal)
-//   - loadSession / setSessionMode / setSessionModel: omitted (optional in spec)
+// Stage 2 scope:
+//   - takes an LLMProvider in its constructor (provider-agnostic core)
+//   - prompt() appends user message to session history, streams provider
+//     deltas as agent_message_chunk notifications, accumulates assistant
+//     reply into history for multi-turn conversations
+//   - cancel() aborts the provider's signal, stopping upstream LLM mid-stream
 //
-// CHOICE: state lives on this instance, scoped to one connection.
-// One connection = one InvoxAgent. Multiple WS clients in stage 4 = multiple
-// InvoxAgent instances, each with isolated session maps.
+// Stages 3+ will extend prompt() with tool-call routing.
 
 import { randomUUID } from "node:crypto";
 import {
@@ -31,10 +26,12 @@ import {
   type PromptResponse,
 } from "@zed-industries/agent-client-protocol";
 import { log } from "../log.js";
+import type { LLMMessage, LLMProvider } from "../llm/types.js";
 
 interface Session {
   id: string;
   cwd: string;
+  history: LLMMessage[];
   abort: AbortController;
 }
 
@@ -42,14 +39,17 @@ export class InvoxAgent implements Agent {
   readonly conn: AgentSideConnection;
   private clientCaps: ClientCapabilities = {};
   private sessions = new Map<string, Session>();
+  private provider: LLMProvider;
 
-  constructor(conn: AgentSideConnection) {
+  constructor(conn: AgentSideConnection, provider: LLMProvider) {
     this.conn = conn;
+    this.provider = provider;
   }
 
   async initialize(params: InitializeRequest): Promise<InitializeResponse> {
     this.clientCaps = params.clientCapabilities ?? {};
     log.info("initialize", {
+      provider: this.provider.name,
       clientProtocolVersion: params.protocolVersion,
       clientCaps: this.clientCaps,
     });
@@ -68,13 +68,11 @@ export class InvoxAgent implements Agent {
           sse: false,
         },
       },
-      authMethods: [], // no auth: upstream LLM creds come from env
+      authMethods: [],
     };
   }
 
   async authenticate(_params: AuthenticateRequest): Promise<AuthenticateResponse> {
-    // No auth methods advertised → this should never be called by a spec-compliant client.
-    // Return empty success to be charitable.
     return {};
   }
 
@@ -83,6 +81,7 @@ export class InvoxAgent implements Agent {
     this.sessions.set(id, {
       id,
       cwd: params.cwd,
+      history: [],
       abort: new AbortController(),
     });
     log.info("session created", { id, cwd: params.cwd });
@@ -92,33 +91,63 @@ export class InvoxAgent implements Agent {
   async prompt(params: PromptRequest): Promise<PromptResponse> {
     const session = this.sessions.get(params.sessionId);
     if (!session) {
-      // Per JSON-RPC convention; the package will translate thrown Errors.
       throw new Error(`unknown sessionId: ${params.sessionId}`);
     }
 
+    // A new prompt = a fresh AbortController. Stale aborts from prior turns
+    // must not affect this call.
+    session.abort = new AbortController();
+
     const userText = extractText(params.prompt);
-    log.info("prompt received", { sessionId: session.id, userText });
+    log.info("prompt received", {
+      sessionId: session.id,
+      userText,
+      historyLen: session.history.length,
+    });
 
-    // Stage 1 echo: stream a fixed reply chunked across multiple updates,
-    // so the smoke test can verify streaming actually works (not just one big blob).
-    const reply = `invox echo: you said "${userText}". streaming works ✓`;
-    const chunks = chunkString(reply, 8);
+    session.history.push({ role: "user", content: userText });
 
-    for (const chunk of chunks) {
-      if (session.abort.signal.aborted) {
+    // Stream provider deltas → ACP agent_message_chunks. Accumulate the
+    // assistant reply in `assembled` so it lands in history for the next turn.
+    let assembled = "";
+    try {
+      for await (const delta of this.provider.stream({
+        messages: session.history,
+        signal: session.abort.signal,
+      })) {
+        if (session.abort.signal.aborted) {
+          // Drain on cancel: caller already aborted, exit fast.
+          break;
+        }
+        if (delta.kind === "text" && delta.text.length > 0) {
+          assembled += delta.text;
+          await this.conn.sessionUpdate({
+            sessionId: session.id,
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text: delta.text },
+            },
+          });
+        }
+      }
+    } catch (err) {
+      // AbortError from upstream provider counts as a clean cancellation.
+      if (isAbort(err)) {
+        log.info("prompt cancelled", { sessionId: session.id });
+        // Persist whatever we got so far, so the next turn has context.
+        if (assembled) session.history.push({ role: "assistant", content: assembled });
         return { stopReason: "cancelled" };
       }
-      await this.conn.sessionUpdate({
-        sessionId: session.id,
-        update: {
-          sessionUpdate: "agent_message_chunk",
-          content: { type: "text", text: chunk },
-        },
-      });
-      // small artificial delay so streaming is observable end-to-end
-      await sleep(20);
+      log.error("prompt failed", err instanceof Error ? err.message : String(err));
+      throw err;
     }
 
+    if (session.abort.signal.aborted) {
+      if (assembled) session.history.push({ role: "assistant", content: assembled });
+      return { stopReason: "cancelled" };
+    }
+
+    session.history.push({ role: "assistant", content: assembled });
     return { stopReason: "end_turn" };
   }
 
@@ -130,25 +159,18 @@ export class InvoxAgent implements Agent {
     }
     log.info("cancel", { sessionId: session.id });
     session.abort.abort();
-    // Stage 2+: this signal will be passed into the OpenAI SDK call.
   }
 }
 
 function extractText(blocks: PromptRequest["prompt"]): string {
-  // v1: only "text" content blocks. Other types (image/audio/resource_link/resource)
-  // are ignored — capabilities advertise text-only.
   return blocks
     .filter((b): b is Extract<typeof b, { type: "text" }> => b.type === "text")
     .map((b) => b.text)
     .join("\n");
 }
 
-function chunkString(s: string, size: number): string[] {
-  const out: string[] = [];
-  for (let i = 0; i < s.length; i += size) out.push(s.slice(i, i + size));
-  return out;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function isAbort(err: unknown): boolean {
+  if (err && typeof err === "object" && "name" in err && (err as { name: unknown }).name === "AbortError") return true;
+  if (err instanceof Error && /aborted/i.test(err.message)) return true;
+  return false;
 }

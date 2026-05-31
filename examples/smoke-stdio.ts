@@ -27,7 +27,11 @@ async function main(): Promise<void> {
     {
       cwd: repoRoot,
       stdio: ["pipe", "pipe", "inherit"], // stderr inherited so we see invox logs
-      env: { ...process.env, INVOX_LOG: "info" },
+      env: {
+        ...process.env,
+        INVOX_LOG: "info",
+        INVOX_MOCK: "1", // force EchoProvider regardless of ambient env
+      },
     },
   );
 
@@ -76,30 +80,67 @@ async function main(): Promise<void> {
   assert(typeof sessRes.sessionId === "string" && sessRes.sessionId.length > 0, "missing sessionId");
   console.error("[smoke] ✓ session/new ->", sessRes.sessionId);
 
-  // 3) session/prompt — expect streamed agent_message_chunks
-  const promptRes = await conn.prompt({
+  // 3) Turn 1: send "hello invox"
+  await runTurn({
+    conn,
+    updates,
     sessionId: sessRes.sessionId,
-    prompt: [{ type: "text", text: "hello invox" }],
+    userText: "hello invox",
+    expectMarker: "hello invox",
+    label: "turn 1",
   });
-  assert(promptRes.stopReason === "end_turn", `expected stopReason=end_turn, got ${promptRes.stopReason}`);
-  console.error("[smoke] ✓ session/prompt ->", promptRes.stopReason);
 
-  // 4) verify chunks arrived and assemble them
-  const chunks = updates
+  // 4) Turn 2: same session, different text → exercises multi-turn history
+  // accumulation. EchoProvider quotes the last user message, so we can verify
+  // history was indeed replayed and the *latest* message is what's echoed.
+  await runTurn({
+    conn,
+    updates,
+    sessionId: sessRes.sessionId,
+    userText: "second prompt",
+    expectMarker: "second prompt",
+    label: "turn 2",
+  });
+
+  // Done. Tear down.
+  child.kill();
+  console.error("[smoke] PASS");
+}
+
+interface RunTurnArgs {
+  conn: ClientSideConnection;
+  updates: SessionNotification[];
+  sessionId: string;
+  userText: string;
+  expectMarker: string;
+  label: string;
+}
+
+async function runTurn(args: RunTurnArgs): Promise<void> {
+  const before = args.updates.length;
+  const promptRes = await args.conn.prompt({
+    sessionId: args.sessionId,
+    prompt: [{ type: "text", text: args.userText }],
+  });
+  assert(
+    promptRes.stopReason === "end_turn",
+    `${args.label}: expected stopReason=end_turn, got ${promptRes.stopReason}`,
+  );
+
+  const newUpdates = args.updates.slice(before);
+  const chunks = newUpdates
     .filter((u) => u.update.sessionUpdate === "agent_message_chunk")
     .map((u) => {
       const upd = u.update as Extract<typeof u.update, { sessionUpdate: "agent_message_chunk" }>;
       return upd.content.type === "text" ? upd.content.text : "";
     });
-  assert(chunks.length >= 2, `expected multiple chunks (streaming), got ${chunks.length}`);
+  assert(chunks.length >= 2, `${args.label}: expected multiple chunks, got ${chunks.length}`);
   const assembled = chunks.join("");
-  assert(assembled.includes("hello invox"), `assembled reply missing user text: "${assembled}"`);
-  assert(assembled.includes("streaming works"), `assembled reply missing marker: "${assembled}"`);
-  console.error(`[smoke] ✓ received ${chunks.length} chunks, assembled: "${assembled}"`);
-
-  // Done. Tear down.
-  child.kill();
-  console.error("[smoke] PASS");
+  assert(
+    assembled.includes(args.expectMarker),
+    `${args.label}: assembled missing "${args.expectMarker}": "${assembled}"`,
+  );
+  console.error(`[smoke] ✓ ${args.label}: ${chunks.length} chunks → "${assembled}"`);
 }
 
 function assert(cond: unknown, msg: string): asserts cond {

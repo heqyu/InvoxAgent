@@ -10,6 +10,9 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { InvoxAgent } from "./agent/agent.js";
+import { EchoProvider } from "./llm/echo.js";
+import { OpenAIProvider } from "./llm/openai.js";
+import type { LLMProvider } from "./llm/types.js";
 import { log } from "./log.js";
 import { StdioTransport } from "./transports/stdio.js";
 import type { Transport } from "./transports/types.js";
@@ -108,12 +111,18 @@ async function main(): Promise<void> {
     return;
   }
 
-  log.info("starting", { name, version, transports: [...args.transports] });
+  const provider = pickProvider();
+  log.info("starting", {
+    name,
+    version,
+    provider: provider.name,
+    transports: [...args.transports],
+  });
 
   const transports: Transport[] = [];
   if (args.transports.has("stdio")) transports.push(new StdioTransport());
   if (args.transports.has("ws")) {
-    log.warn("ws transport not implemented in stage 1 (lands in stage 4)");
+    log.warn("ws transport not implemented in stage 2 (lands in stage 4)");
   }
 
   // Wire each transport: every peer gets its own InvoxAgent instance via the
@@ -122,7 +131,7 @@ async function main(): Promise<void> {
   await Promise.all(
     transports.map((t) =>
       t.start((peer) => {
-        new AgentSideConnection((conn) => new InvoxAgent(conn), peer);
+        new AgentSideConnection((conn) => new InvoxAgent(conn, provider), peer);
         // The connection auto-runs once constructed. We hold no reference here
         // because the package keeps it alive via the stream readers.
       }),
@@ -138,6 +147,32 @@ async function main(): Promise<void> {
       /* stdio peer holds the process open via stdin read */
     });
   }
+}
+
+/**
+ * Provider selection rules:
+ *   - INVOX_MOCK=1                         → EchoProvider (offline; for tests/dev)
+ *   - INVOX_API_KEY + INVOX_BASE_URL set   → OpenAIProvider
+ *   - otherwise                            → EchoProvider with a warn
+ *
+ * INVOX_MODEL defaults to "gpt-4o-mini" if unset (only matters for OpenAIProvider).
+ */
+function pickProvider(): LLMProvider {
+  if (process.env["INVOX_MOCK"] === "1") {
+    log.info("provider: echo (INVOX_MOCK=1)");
+    return new EchoProvider();
+  }
+  const apiKey = process.env["INVOX_API_KEY"];
+  const baseURL = process.env["INVOX_BASE_URL"];
+  if (apiKey && baseURL) {
+    const model = process.env["INVOX_MODEL"] ?? "gpt-4o-mini";
+    log.info("provider: openai", { baseURL, model });
+    return new OpenAIProvider({ apiKey, baseURL, model });
+  }
+  log.warn(
+    "provider: echo (INVOX_API_KEY or INVOX_BASE_URL missing — set both for real LLM)",
+  );
+  return new EchoProvider();
 }
 
 main().catch((err) => {
