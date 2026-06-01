@@ -1,0 +1,22 @@
+scripts/dev-restart.sh
+  s_dc41a57ecf88ca::t_3291a25e0f476e 1-19,26-27,29,31-37,39-46
+  s_dc41a57ecf88ca::t_684c47e41b6e5b 20-25,28,30,38
+package.json
+  s_dc41a57ecf88ca::t_333a4b7c6f39ab 14-15
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "54656c5d7dff84f362a6c897fb2cc3e76cfbb5c6",
+  "prompts": {},
+  "sessions": {
+    "s_dc41a57ecf88ca": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2d3ba70e-c4b3-423d-9478-f460e1b6cc7e",
+        "model": "claude-4.7-opus"
+      },
+      "human_author": "invox <invox@local>"
+    }
+  }
+}
