@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "id": "c4138ae1-5b87-4660-a393-053746e5697a",
+  "cwd": "G:\\OhMyProjs\\InvoxAgent",
+  "title": "hello over websocket",
+  "createdAt": 1780277457023,
+  "updatedAt": 1780277457265,
+  "history": [
+    {
+      "role": "user",
+      "content": "hello over websocket"
+    },
+    {
+      "role": "assistant",
+      "content": "invox echo: you said \"hello over websocket\". streaming works ✓"
+    }
+  ]
+}

@@ -310,6 +310,13 @@ export class InvoxAgent implements Agent {
         },
       });
 
+      log.info("tool start", {
+        name: call.name,
+        toolCallId: call.id,
+        argsPreview: previewArgs(call.arguments),
+      });
+      const toolStartedAt = Date.now();
+
       const r = await executeTool(call.name, call.arguments, {
         conn: this.conn,
         sessionId: session.id,
@@ -321,12 +328,15 @@ export class InvoxAgent implements Agent {
         state: session.toolState,
       });
 
-      log.info("tool result", {
+      log.info("tool end", {
         name: call.name,
+        toolCallId: call.id,
         ok: r.ok,
+        elapsedMs: Date.now() - toolStartedAt,
+        resultBytes: r.resultText.length,
         resultPreview:
-          r.resultText.length > 300
-            ? r.resultText.slice(0, 300) + ` …(+${r.resultText.length - 300} more bytes)`
+          r.resultText.length > 200
+            ? r.resultText.slice(0, 200) + ` …(+${r.resultText.length - 200} more bytes)`
             : r.resultText,
       });
 
@@ -478,6 +488,27 @@ function safeParseJSON(s: string): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Return a short preview of tool arguments suitable for logging — keeps
+ * tiny string args verbatim, truncates anything longer than 100 chars per
+ * field. Never throws.
+ */
+function previewArgs(rawArgs: string): unknown {
+  const parsed = safeParseJSON(rawArgs);
+  if (!parsed) {
+    return rawArgs.length > 100 ? rawArgs.slice(0, 100) + "…" : rawArgs;
+  }
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(parsed)) {
+    if (typeof v === "string" && v.length > 100) {
+      out[k] = v.slice(0, 100) + `…(+${v.length - 100})`;
+    } else {
+      out[k] = v;
+    }
+  }
+  return out;
 }
 
 /**
