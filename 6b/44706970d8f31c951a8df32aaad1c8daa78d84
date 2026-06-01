@@ -1,0 +1,33 @@
+src/tools/bash.ts
+  s_315a765a18b8cb::t_60eea900087c06 16-26,34-35
+  s_77172ae25e903e::t_b170f013194cf8 1,3-15,27-31,38-43,85-116,141-185,193-197,260-268,308-310,322-323,331-333,342
+  s_315a765a18b8cb::t_5361d03990bf89 344-350
+  s_315a765a18b8cb::t_f277deee8e317f 186-192,198-209,211,213-223,225-259
+  s_315a765a18b8cb::t_04a3b879648412 117-140
+  s_315a765a18b8cb::t_06e7d48d8f878a 210,212,224
+  s_315a765a18b8cb::t_c6f9fdae826851 274-279
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "6b44706970d8f31c951a8df32aaad1c8daa78d84",
+  "prompts": {},
+  "sessions": {
+    "s_315a765a18b8cb": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ae997de1-53cc-4c73-b1ce-3490649d48c2",
+        "model": "claude-4.7-opus"
+      },
+      "human_author": "invox <invox@local>"
+    },
+    "s_77172ae25e903e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ce331afb-22e4-4201-ab3a-076896c8ca40",
+        "model": "claude-4.7-opus"
+      },
+      "human_author": "invox <invox@local>"
+    }
+  }
+}
