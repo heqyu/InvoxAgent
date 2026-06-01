@@ -1,0 +1,61 @@
+{
+  // VS Code debugger configurations for invox.
+  //
+  // Two profiles:
+  //   1. "Attach to invox (Zed)"
+  //      Use this when Zed has spawned an invox process configured with
+  //      --inspect (i.e. via the agent_servers.invox-debug block in Zed's
+  //      settings.json). Run > Start Debugging while Zed is open and
+  //      invox is running, then breakpoints in src/**/*.ts hit when Zed
+  //      sends prompts.
+  //
+  //   2. "Run invox standalone"
+  //      Launches invox directly under VS Code's debugger (no Zed
+  //      involved). Stdio is connected to the integrated terminal —
+  //      useful for unit-testing your changes by typing JSON-RPC by
+  //      hand or by piping a smoke test.
+  //
+  // Note: skipFiles narrows the step-into surface. Without it, "step in"
+  // dives into Node internals and the @zed-industries/agent-client-protocol
+  // package on every call, which makes debugging slow.
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "node",
+      "request": "attach",
+      "name": "Attach to invox (Zed)",
+      "address": "127.0.0.1",
+      "port": 9229,
+      // sourceMaps off because tsx runs TypeScript directly via ESM loader —
+      // there's no compiled JS-with-sourcemap on disk. The Node inspector
+      // sees real .ts files, so we just point at them.
+      "sourceMaps": false,
+      "skipFiles": [
+        "<node_internals>/**",
+        "**/node_modules/**"
+      ],
+      // Restart attach automatically when Zed re-spawns invox after a
+      // process exit (e.g. you killed it with `npm run restart`).
+      "restart": true,
+      "cwd": "${workspaceFolder}",
+      "outFiles": []
+    },
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "Run invox standalone",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["--import", "tsx"],
+      "program": "${workspaceFolder}/src/cli.ts",
+      "console": "integratedTerminal",
+      "skipFiles": [
+        "<node_internals>/**",
+        "**/node_modules/**"
+      ],
+      "env": {
+        "INVOX_LOG": "debug",
+        "INVOX_MOCK": "1"
+      }
+    }
+  ]
+}
