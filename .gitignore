@@ -6,3 +6,11 @@ dist/
 .DS_Store
 .idea/
 .vscode/
+
+# Session histories — per-project, contain user conversation, never commit
+.invox/
+
+# Stray scratch files from manual Zed sessions / sandbox tests
+sorting.txt
+convert_time.ps1
+convert_time.py
