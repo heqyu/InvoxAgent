@@ -7,22 +7,34 @@
 //     model has finished streaming arguments — accumulating per-index args
 //     to dodge the PLAN §3 pitfall)
 //   - finish delta: emitted exactly once, signaling stream end + reason
+//
+import type OpenAI from "openai";
 
 export type Role = "system" | "user" | "assistant" | "tool";
 
+/**
+ * User message content.
+ * - string: plain text (most common)
+ * - ChatCompletionContentPart[]: multi-modal (text + image_url)
+ *
+ * This is exactly OpenAI's type — no custom wrappers, no converters.
+ */
+export type UserContent =
+  | string
+  | OpenAI.Chat.Completions.ChatCompletionContentPart[];
+
 export interface LLMMessage {
   role: Role;
-  content: string;
-  // Stage 3 additions:
-  tool_call_id?: string; // present on role:"tool"
-  tool_calls?: ParsedToolCall[]; // present on role:"assistant" if it requested tools
-  name?: string; // optional, for role:"tool"
+  /** system/assistant/tool: always string. user: string or content-part array. */
+  content: string | UserContent;
+  tool_call_id?: string;
+  tool_calls?: ParsedToolCall[];
+  name?: string;
 }
 
 export interface ParsedToolCall {
   id: string;
   name: string;
-  /** Raw JSON string as emitted by the model. Parsed by the tool router. */
   arguments: string;
 }
 
@@ -33,7 +45,6 @@ export type LLMDelta =
 
 export type FinishReason = "stop" | "tool_calls" | "length" | "other";
 
-/** OpenAI function-tool spec, as accepted by chat.completions.create({ tools }) */
 export interface ToolSpec {
   type: "function";
   function: {

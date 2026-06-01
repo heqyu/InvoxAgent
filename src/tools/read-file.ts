@@ -100,6 +100,8 @@ async function execute(
   // Mark for read-before-edit gate.
   ctx.state.readPaths.add(path);
 
+  const locations = [{ path }];
+
   if (fullContent.length === 0) {
     const msg = "(File is empty)";
     return {
@@ -107,6 +109,7 @@ async function execute(
       acpContent: [{ type: "content", content: { type: "text", text: msg } }],
       kind: "read",
       title: titleFor(args, rel),
+      locations,
       ok: true,
     };
   }
@@ -157,13 +160,17 @@ async function execute(
     acpContent: [{ type: "content", content: { type: "text", text: display } }],
     kind: "read",
     title: titleFor(args, rel),
+    locations,
     ok: true,
   };
 }
 
 function titleFor(args: Record<string, unknown>, rel: string): string {
-  const desc = typeof args["description"] === "string" ? args["description"].trim() : "";
-  if (desc) return desc;
+  // Title is path-first so Zed's tool card matches the "Read <path>" /
+  // "Go to File" affordance shown for first-party agents. The LLM's
+  // free-form `description` is intentionally NOT used as the title —
+  // a translated/paraphrased title would hide the path and break the
+  // jump-to-file UX. The description still flows into the result body.
   const offset = args["offset"];
   return offset ? `Read ${rel} (lines ${String(offset)}+)` : `Read ${rel}`;
 }

@@ -1,0 +1,11 @@
+[
+  {
+    "adapter": "JavaScript",
+    "label": "Attach to Node",
+    "type": "node",
+    "request": "attach",
+    "address": "localhost",
+    "port": 9229,
+    "skipFiles": ["<node_internals>/**"],
+  },
+]

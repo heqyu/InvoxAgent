@@ -60,12 +60,22 @@ const TITLE_MAX_LEN = 60;
 export function titleFromHistory(history: LLMMessage[]): string {
   for (const m of history) {
     if (m.role !== "user") continue;
-    const raw = typeof m.content === "string" ? m.content : "";
+    const raw =
+      typeof m.content === "string" ? m.content : userContentPreview(m.content);
     const t = raw.trim().replace(/\s+/g, " ");
     if (!t) continue;
     return t.length <= TITLE_MAX_LEN ? t : t.slice(0, TITLE_MAX_LEN - 1) + "…";
   }
   return "(empty)";
+}
+
+import type { UserContent } from "./llm/types.js";
+
+function userContentPreview(content: string | UserContent): string {
+  if (typeof content === "string") return content;
+  return content
+    .map((p) => (p.type === "text" ? p.text : `[${p.type}]`))
+    .join(" ");
 }
 
 export class SessionStore {

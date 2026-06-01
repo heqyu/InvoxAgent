@@ -16,6 +16,7 @@ import type {
   LLMProvider,
   LLMRequest,
   ParsedToolCall,
+  UserContent,
 } from "./types.js";
 
 export class MockToolProvider implements LLMProvider {
@@ -48,7 +49,7 @@ export class MockToolProvider implements LLMProvider {
     }
 
     // Phase 2: tool result is in. Summarize it.
-    const toolResult = req.messages.at(-1)?.content ?? "";
+    const toolResult = contentToString(req.messages.at(-1)?.content);
     const summary = `Done. The file is ${toolResult.length} bytes long.`;
     for (const piece of chunkString(summary, 8)) {
       if (req.signal.aborted) return;
@@ -62,9 +63,18 @@ export class MockToolProvider implements LLMProvider {
 function lastUserContent(msgs: LLMMessage[]): string {
   for (let i = msgs.length - 1; i >= 0; i--) {
     const m = msgs[i];
-    if (m && m.role === "user") return m.content;
+    if (m && m.role === "user") return contentToString(m.content);
   }
   return "";
+}
+
+function contentToString(content: string | UserContent | undefined): string {
+  if (!content) return "";
+  if (typeof content === "string") return content;
+  // UserContent = string | ChatCompletionContentPart[]
+  return (content as Array<{ type: string; text?: string }>)
+    .map((p) => (p.type === "text" ? (p.text ?? "") : `[${p.type}]`))
+    .join(" ");
 }
 
 function extractPath(s: string): string | null {

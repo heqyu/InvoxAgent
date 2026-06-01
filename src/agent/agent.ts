@@ -16,7 +16,7 @@
 //   exceeded → max_turn_requests
 //
 // MAX_ITERATIONS defaults to 50; override via INVOX_MAX_ITERATIONS env.
-
+import OpenAI from "openai";
 import { randomUUID } from "node:crypto";
 import {
   PROTOCOL_VERSION,
@@ -26,6 +26,7 @@ import {
   type AuthenticateResponse,
   type CancelNotification,
   type ClientCapabilities,
+  type ContentBlock,
   type InitializeRequest,
   type InitializeResponse,
   type LoadSessionRequest,
@@ -36,8 +37,18 @@ import {
   type PromptResponse,
 } from "@zed-industries/agent-client-protocol";
 import { log } from "../log.js";
-import type { LLMMessage, LLMProvider, ParsedToolCall } from "../llm/types.js";
-import { SessionStore, sessionTtlDays, titleFromHistory, type PersistedSession } from "../persistence.js";
+import type {
+  LLMMessage,
+  LLMProvider,
+  ParsedToolCall,
+  UserContent,
+} from "../llm/types.js";
+import {
+  SessionStore,
+  sessionTtlDays,
+  titleFromHistory,
+  type PersistedSession,
+} from "../persistence.js";
 import { FileCache } from "../tools/cache.js";
 import { kindFromTier } from "../tools/permissions.js";
 import { getTool, TOOL_SPECS } from "../tools/registry.js";
@@ -58,7 +69,6 @@ interface Session {
   history: LLMMessage[];
   abort: AbortController;
   toolState: SessionToolState;
-  /** Lazily created on first save() call so we don't hit disk for ephemeral cwd. */
   store?: SessionStore;
   createdAt: number;
 }
@@ -70,7 +80,11 @@ export class InvoxAgent implements Agent {
   private provider: LLMProvider;
   private policy: PermissionPolicy;
 
-  constructor(conn: AgentSideConnection, provider: LLMProvider, policy: PermissionPolicy = "never") {
+  constructor(
+    conn: AgentSideConnection,
+    provider: LLMProvider,
+    policy: PermissionPolicy = "never",
+  ) {
     this.conn = conn;
     this.provider = provider;
     this.policy = policy;
@@ -89,7 +103,7 @@ export class InvoxAgent implements Agent {
       agentCapabilities: {
         loadSession: true,
         promptCapabilities: {
-          image: false,
+          image: true, // now we support image_url via OpenAI content-part array
           audio: false,
           embeddedContext: false,
         },
@@ -102,7 +116,9 @@ export class InvoxAgent implements Agent {
     };
   }
 
-  async authenticate(_params: AuthenticateRequest): Promise<AuthenticateResponse> {
+  async authenticate(
+    _params: AuthenticateRequest,
+  ): Promise<AuthenticateResponse> {
     return {};
   }
 
@@ -111,7 +127,7 @@ export class InvoxAgent implements Agent {
     this.sessions.set(id, {
       id,
       cwd: params.cwd,
-      history: [],
+      history: [SYSTEM_MESSAGE],
       abort: new AbortController(),
       toolState: {
         readPaths: new Set<string>(),
@@ -123,18 +139,6 @@ export class InvoxAgent implements Agent {
     return { sessionId: id };
   }
 
-  /**
-   * Resume a session that was previously persisted. Per ACP:
-   *   1. Hydrate session from disk
-   *   2. Stream the entire history back as session/update notifications
-   *      so the client rebuilds its UI
-   *   3. Resolve LoadSessionResponse only after replay is done
-   *
-   * If the sessionId isn't on disk we fail with a clear error — Zed shows
-   * "Failed to Launch / Loading or resuming sessions is not supported by
-   * this agent" only when the agent doesn't advertise loadSession; once
-   * advertised, an unknown id surfaces as a regular RPC error.
-   */
   async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
     const store = new SessionStore(params.cwd);
     const snapshot = store.load(params.sessionId);
@@ -150,7 +154,6 @@ export class InvoxAgent implements Agent {
       cwd: params.cwd,
     });
 
-    // Recreate live state. cwd from the request wins (project may have moved).
     const session: Session = {
       id: snapshot.id,
       cwd: params.cwd,
@@ -165,11 +168,8 @@ export class InvoxAgent implements Agent {
     };
     this.sessions.set(session.id, session);
 
-    // Replay history → client. We translate every stored message to the
-    // session/update notification(s) Zed needs to repaint its conversation.
     await this.replayHistory(session);
-
-    return {} as LoadSessionResponse;
+    return {};
   }
 
   async prompt(params: PromptRequest): Promise<PromptResponse> {
@@ -178,16 +178,17 @@ export class InvoxAgent implements Agent {
 
     session.abort = new AbortController();
 
-    const userText = extractText(params.prompt);
+    const userContent = buildUserContent(params.prompt);
     log.info("prompt received", {
       sessionId: session.id,
-      userText,
+      userText: userContentPreview(userContent),
       historyLen: session.history.length,
     });
-    session.history.push({ role: "user", content: userText });
+    session.history.push({ role: "user", content: userContent });
 
     const max = maxIterations();
-    let stopReason: "end_turn" | "cancelled" | "max_turn_requests" = "max_turn_requests";
+    let stopReason: "end_turn" | "cancelled" | "max_turn_requests" =
+      "max_turn_requests";
     try {
       for (let iter = 0; iter < max; iter++) {
         const result = await this.runOneIteration(session);
@@ -199,37 +200,39 @@ export class InvoxAgent implements Agent {
           stopReason = "cancelled";
           break;
         }
-        // else: tool calls were executed, history extended → continue loop
       }
       if (stopReason === "max_turn_requests") {
         log.warn("prompt: hit max iterations", { sessionId: session.id, max });
       }
     } finally {
-      // Persist regardless of how we exited (end_turn / cancelled / max).
-      // This is the only place we save: every meaningful boundary the user
-      // might want to resume from.
       this.persist(session);
     }
     return { stopReason };
   }
 
-  async cancel(params: CancelNotification): Promise<void> {
-    const session = this.sessions.get(params.sessionId);
-    if (!session) {
-      log.warn("cancel: unknown sessionId", { sessionId: params.sessionId });
-      return;
-    }
-    log.info("cancel", { sessionId: session.id });
-    session.abort.abort();
+  async cancel(_params: CancelNotification): Promise<void> {
+    // not implemented yet
   }
 
+  // ── private ──────────────────────────────────────────────────────────
+
   /**
-   * One LLM call → handle its tool_calls (if any) → return whether the turn
-   * should end. The caller loops on `kind === "continue"`.
+   * Build user message content from ACP ContentBlocks.
+   *
+   * Returns OpenAI-compatible `UserContent` directly:
+   *   - text blocks        → { type: "text", text }
+   *   - resource_link       → { type: "text", text: "File: <path>" }  (we tell the LLM the path)
+   *   - image (with data)  → { type: "image_url", image_url: { url: "data:..." } }
+   *   - image (with uri)   → { type: "image_url", image_url: { url: uri } }
+   *   - resource (text)    → inlined as text
+   *
+   * If the result is a single text part, collapse to plain string.
    */
   private async runOneIteration(
     session: Session,
-  ): Promise<{ kind: "stop"; reason: "end_turn" | "cancelled" } | { kind: "continue" }> {
+  ): Promise<
+    { kind: "stop"; reason: "end_turn" | "cancelled" } | { kind: "continue" }
+  > {
     let assistantText = "";
     const toolCalls: ParsedToolCall[] = [];
     let finishReason: "stop" | "tool_calls" | "length" | "other" = "other";
@@ -264,39 +267,39 @@ export class InvoxAgent implements Agent {
       }
     } catch (err) {
       if (isAbort(err)) {
-        if (assistantText) session.history.push({ role: "assistant", content: assistantText });
+        if (assistantText)
+          session.history.push({ role: "assistant", content: assistantText });
         return { kind: "stop", reason: "cancelled" };
       }
-      log.error("provider stream failed", err instanceof Error ? err.message : String(err));
+      log.error(
+        "provider stream failed",
+        err instanceof Error ? err.message : String(err),
+      );
       throw err;
     }
 
     if (session.abort.signal.aborted) {
-      if (assistantText) session.history.push({ role: "assistant", content: assistantText });
+      if (assistantText)
+        session.history.push({ role: "assistant", content: assistantText });
       return { kind: "stop", reason: "cancelled" };
     }
 
     if (toolCalls.length === 0 || finishReason !== "tool_calls") {
-      // Plain text reply, no tools requested → end of turn.
       session.history.push({ role: "assistant", content: assistantText });
       return { kind: "stop", reason: "end_turn" };
     }
 
-    // Persist the assistant turn (text + the tool_calls it requested) before executing.
     session.history.push({
       role: "assistant",
       content: assistantText,
       tool_calls: toolCalls,
     });
 
-    // Execute tools sequentially.
     for (const call of toolCalls) {
-      // Pick kind + title from the registered tool when known. Zed's UI
-      // picks the card layout from the FIRST tool_call notification, so
-      // setting the right kind here matters.
       const tool = getTool(call.name);
       const startKind = tool ? kindFromTier(tool.tier) : "other";
       const startTitle = startTitleFor(call);
+      const startLocations = startLocationsFor(call);
 
       await this.conn.sessionUpdate({
         sessionId: session.id,
@@ -307,6 +310,7 @@ export class InvoxAgent implements Agent {
           kind: startKind,
           status: "in_progress",
           rawInput: safeParseJSON(call.arguments) ?? { raw: call.arguments },
+          ...(startLocations ? { locations: startLocations } : {}),
         },
       });
 
@@ -336,7 +340,8 @@ export class InvoxAgent implements Agent {
         resultBytes: r.resultText.length,
         resultPreview:
           r.resultText.length > 200
-            ? r.resultText.slice(0, 200) + ` …(+${r.resultText.length - 200} more bytes)`
+            ? r.resultText.slice(0, 200) +
+              ` …(+${r.resultText.length - 200} more bytes)`
             : r.resultText,
       });
 
@@ -349,6 +354,7 @@ export class InvoxAgent implements Agent {
           title: r.title,
           kind: r.kind,
           content: r.acpContent,
+          ...(r.locations ? { locations: r.locations } : {}),
         },
       });
 
@@ -363,13 +369,9 @@ export class InvoxAgent implements Agent {
     return { kind: "continue" };
   }
 
-  /** Save the session to disk. Quiet on failure (logged inside the store). */
   private persist(session: Session): void {
     if (!session.store) {
       session.store = new SessionStore(session.cwd);
-      // First time we see this cwd in this process — prune old sessions
-      // opportunistically. Cheap (just stats updatedAt fields), so doing
-      // it inline doesn't slow down the first prompt noticeably.
       session.store.prune(sessionTtlDays());
     }
     const snapshot: PersistedSession = {
@@ -384,27 +386,11 @@ export class InvoxAgent implements Agent {
     session.store.save(snapshot);
   }
 
-  /**
-   * Replay a hydrated session's history to the client as session/update
-   * notifications, so the editor's conversation view rebuilds. Required
-   * by ACP's session/load contract.
-   *
-   * Translation rules (OAI message → ACP notifications):
-   *   - role:user                       → user_message_chunk
-   *   - role:assistant (no tool_calls)  → agent_message_chunk
-   *   - role:assistant (with tool_calls)→ agent_message_chunk for text part,
-   *                                       then one tool_call notification
-   *                                       per tool call (status:in_progress)
-   *   - role:tool (matching tool_call)  → tool_call_update for the same id
-   *                                       carrying the tool result text
-   */
   private async replayHistory(session: Session): Promise<void> {
-    // Build a quick map: tool_call_id → its result message, so we can pair
-    // the assistant's tool_calls[] with the corresponding tool result in
-    // a single pass.
     const toolResultById = new Map<string, LLMMessage>();
     for (const m of session.history) {
-      if (m.role === "tool" && m.tool_call_id) toolResultById.set(m.tool_call_id, m);
+      if (m.role === "tool" && m.tool_call_id)
+        toolResultById.set(m.tool_call_id, m);
     }
 
     for (const m of session.history) {
@@ -413,14 +399,14 @@ export class InvoxAgent implements Agent {
           sessionId: session.id,
           update: {
             sessionUpdate: "user_message_chunk",
-            content: { type: "text", text: textOf(m.content) },
+            content: { type: "text", text: userContentPreview(m.content) },
           },
         });
         continue;
       }
 
       if (m.role === "assistant") {
-        const text = textOf(m.content);
+        const text = typeof m.content === "string" ? m.content : "";
         if (text.length > 0) {
           await this.conn.sessionUpdate({
             sessionId: session.id,
@@ -431,8 +417,8 @@ export class InvoxAgent implements Agent {
           });
         }
         for (const call of m.tool_calls ?? []) {
-          // tool_call (start) notification.
           const tool = getTool(call.name);
+          const replayLocations = startLocationsFor(call);
           await this.conn.sessionUpdate({
             sessionId: session.id,
             update: {
@@ -441,12 +427,18 @@ export class InvoxAgent implements Agent {
               title: startTitleFor(call),
               kind: tool ? kindFromTier(tool.tier) : "other",
               status: "in_progress",
-              rawInput: safeParseJSON(call.arguments) ?? { raw: call.arguments },
+              rawInput: safeParseJSON(call.arguments) ?? {
+                raw: call.arguments,
+              },
+              ...(replayLocations ? { locations: replayLocations } : {}),
             },
           });
-          // tool_call_update (completion) notification carrying the result.
           const result = toolResultById.get(call.id);
-          const resultText = result ? textOf(result.content) : "(no recorded result)";
+          const resultText = result
+            ? typeof result.content === "string"
+              ? result.content
+              : JSON.stringify(result.content)
+            : "(no recorded result)";
           await this.conn.sessionUpdate({
             sessionId: session.id,
             update: {
@@ -455,32 +447,125 @@ export class InvoxAgent implements Agent {
               status: "completed",
               title: startTitleFor(call),
               kind: tool ? kindFromTier(tool.tier) : "other",
-              content: [{ type: "content", content: { type: "text", text: resultText } }],
+              content: [
+                {
+                  type: "content",
+                  content: { type: "text", text: resultText },
+                },
+              ],
+              ...(replayLocations ? { locations: replayLocations } : {}),
             },
           });
         }
         continue;
       }
-      // role:tool messages are emitted alongside their parent assistant
-      // turn above; nothing to do here.
     }
   }
 }
 
-function extractText(blocks: PromptRequest["prompt"]): string {
-  return blocks
-    .filter((b): b is Extract<typeof b, { type: "text" }> => b.type === "text")
-    .map((b) => b.text)
-    .join("\n");
-}
+// ── System message ───────────────────────────────────────────────────
+
+const SYSTEM_PROMPT =
+  `You are a helpful coding assistant embedded in Zed (a code editor).\n` +
+  `\n` +
+  `When the user sends a message you may receive multiple content blocks:\n` +
+  `- text: plain user text\n` +
+  `- resource_link (file): the user attached a file — use the Read tool to read it before answering\n` +
+  `- image: the user attached an image — refer to it in your answer\n` +
+  `\n` +
+  `Always prefer using tools to answer questions about the codebase. ` +
+  `If a file is referenced but not yet read, read it first.`;
+const SYSTEM_MESSAGE: LLMMessage = {
+  role: "system",
+  content: SYSTEM_PROMPT,
+};
+
+// ── Prompt content builder ──────────────────────────────────────────
 
 /**
- * LLMMessage.content can be string | null (assistants with only tool_calls).
- * Reduce to a string for replay, never undefined / null in the stream.
+ * Convert ACP ContentBlocks into OpenAI-compatible `UserContent`.
+ *
+ * Strategy:
+ *   - Collect all parts into an array of ChatCompletionContentPart.
+ *   - If the result is a single plain-text part, collapse to a string
+ *     (simpler for logs and for providers that don't support arrays).
  */
-function textOf(content: string | null | undefined): string {
-  return typeof content === "string" ? content : "";
+function buildUserContent(blocks: ContentBlock[]): UserContent {
+  const parts: OpenAI.Chat.Completions.ChatCompletionContentPart[] = [];
+
+  for (const block of blocks) {
+    switch (block.type) {
+      case "text":
+        parts.push({ type: "text", text: block.text });
+        break;
+
+      case "resource_link": {
+        // Tell the LLM which file was attached by name/path.
+        // The actual file content is NOT inlined — the LLM should call Read tool.
+        const label = block.name ?? block.uri ?? "attached file";
+        const path = uriToPath(block.uri);
+        parts.push({
+          type: "text",
+          text: `[File: ${label}]${path ? ` (${path})` : ""}`,
+        });
+        break;
+      }
+
+      case "image": {
+        // Inline data URI or pass through the URI.
+        const url =
+          block.data && block.mimeType
+            ? `data:${block.mimeType};base64,${block.data}`
+            : (block.uri ?? "");
+        if (url) {
+          parts.push({ type: "image_url", image_url: { url } });
+        }
+        break;
+      }
+
+      case "resource": {
+        // Inline text resource directly.
+        const txt = "text" in block.resource ? block.resource.text : undefined;
+        if (txt) parts.push({ type: "text", text: txt });
+        break;
+      }
+
+      default:
+        // Ignore unknown block types.
+        break;
+    }
+  }
+
+  // Collapse: single text part → plain string
+  if (parts.length === 1 && parts[0]!.type === "text") {
+    return parts[0]!.text;
+  }
+
+  return parts as OpenAI.Chat.Completions.ChatCompletionContentPart[];
 }
+
+function uriToPath(uri: string): string {
+  if (!uri.startsWith("file://")) return uri;
+  let p = uri.slice("file://".length);
+  // Windows drive letter: /C:/... → C:/...
+  if (p.length > 2 && p[0] === "/" && p[2] === ":") p = p.slice(1);
+  // Strip fragment (#L10) and query (?symbol=...)
+  const hash = p.indexOf("#");
+  if (hash !== -1) p = p.slice(0, hash);
+  const q = p.indexOf("?");
+  if (q !== -1) p = p.slice(0, q);
+  return p;
+}
+
+/** Plain-text preview for logging (strips image data). */
+function userContentPreview(content: string | UserContent): string {
+  if (typeof content === "string") return content;
+  return content
+    .map((p) => (p.type === "text" ? p.text : `[${p.type}]`))
+    .join(" ");
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────
 
 function safeParseJSON(s: string): Record<string, unknown> | null {
   try {
@@ -490,11 +575,6 @@ function safeParseJSON(s: string): Record<string, unknown> | null {
   }
 }
 
-/**
- * Return a short preview of tool arguments suitable for logging — keeps
- * tiny string args verbatim, truncates anything longer than 100 chars per
- * field. Never throws.
- */
 function previewArgs(rawArgs: string): unknown {
   const parsed = safeParseJSON(rawArgs);
   if (!parsed) {
@@ -511,44 +591,72 @@ function previewArgs(rawArgs: string): unknown {
   return out;
 }
 
-/**
- * Title to display while the tool is running. Prefers the LLM-supplied
- * `description` arg; otherwise falls back to a synthesized phrase.
- */
 function startTitleFor(call: ParsedToolCall): string {
   const parsed = safeParseJSON(call.arguments);
-  const desc = typeof parsed?.["description"] === "string" ? parsed["description"].trim() : "";
-  if (desc) return desc;
-  if (!parsed) return call.name;
-  switch (call.name) {
-    case "read_file": {
-      const p = String(parsed["path"] ?? "");
-      const offset = parsed["offset"];
-      return p
-        ? offset
-          ? `Read ${p} (lines ${String(offset)}+)`
-          : `Read ${p}`
-        : "Read file";
+  // For file-touching tools we deliberately ignore the LLM-supplied
+  // `description` and put the path in the title — Zed renders the title
+  // next to a "Go to File" affordance, so a translated/paraphrased
+  // description would hide the click-target. The description still
+  // reaches the user via the tool result body.
+  if (parsed) {
+    switch (call.name) {
+      case "read_file": {
+        const p = String(parsed["path"] ?? "");
+        const offset = parsed["offset"];
+        return p
+          ? offset
+            ? `Read ${p} (lines ${String(offset)}+)`
+            : `Read ${p}`
+          : "Read file";
+      }
+      case "write_file": {
+        const p = String(parsed["path"] ?? "");
+        return p ? `Write ${p}` : "Write file";
+      }
+      case "edit_file": {
+        const p = String(parsed["path"] ?? "");
+        return p ? `Edit ${p}` : "Edit file";
+      }
+      case "bash": {
+        const c = String(parsed["command"] ?? "");
+        return c
+          ? `\`${c.slice(0, 80)}${c.length > 80 ? "…" : ""}\``
+          : "Run command";
+      }
     }
-    case "write_file": {
-      const p = String(parsed["path"] ?? "");
-      return p ? `Write ${p}` : "Write file";
-    }
-    case "edit_file": {
-      const p = String(parsed["path"] ?? "");
-      return p ? `Edit ${p}` : "Edit file";
-    }
-    case "bash": {
-      const c = String(parsed["command"] ?? "");
-      return c ? `\`${c.slice(0, 80)}${c.length > 80 ? "…" : ""}\`` : "Run command";
-    }
-    default:
-      return call.name;
   }
+  // Non-file tools fall back to the LLM's free-form description.
+  const desc =
+    typeof parsed?.["description"] === "string"
+      ? parsed["description"].trim()
+      : "";
+  if (desc) return desc;
+  return call.name;
+}
+
+/**
+ * Build ACP `locations` for the initial tool_call notification, so Zed's
+ * "Go to File" / follow-along UI lights up while the tool is still
+ * running (not just after completion). Only the file-touching tools
+ * have a meaningful path at call-time.
+ */
+function startLocationsFor(call: ParsedToolCall): { path: string }[] | undefined {
+  const parsed = safeParseJSON(call.arguments);
+  if (!parsed) return undefined;
+  if (call.name === "read_file" || call.name === "write_file" || call.name === "edit_file") {
+    const p = typeof parsed["path"] === "string" ? parsed["path"].trim() : "";
+    if (p) return [{ path: p }];
+  }
+  return undefined;
 }
 
 function isAbort(err: unknown): boolean {
-  if (err && typeof err === "object" && "name" in err && (err as { name: unknown }).name === "AbortError")
+  if (
+    err &&
+    typeof err === "object" &&
+    "name" in err &&
+    (err as { name: unknown }).name === "AbortError"
+  )
     return true;
   if (err instanceof Error && /aborted/i.test(err.message)) return true;
   return false;

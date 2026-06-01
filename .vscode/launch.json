@@ -21,41 +21,14 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "type": "node",
+      "name": "Attach by Process ID",
+      "processId": "${command:PickProcess}",
       "request": "attach",
-      "name": "Attach to invox (Zed)",
-      "address": "127.0.0.1",
-      "port": 9229,
-      // sourceMaps off because tsx runs TypeScript directly via ESM loader —
-      // there's no compiled JS-with-sourcemap on disk. The Node inspector
-      // sees real .ts files, so we just point at them.
-      "sourceMaps": false,
       "skipFiles": [
-        "<node_internals>/**",
-        "**/node_modules/**"
+        "<node_internals>/**"
       ],
-      // Restart attach automatically when Zed re-spawns invox after a
-      // process exit (e.g. you killed it with `npm run restart`).
-      "restart": true,
-      "cwd": "${workspaceFolder}",
-      "outFiles": []
-    },
-    {
-      "type": "node",
-      "request": "launch",
-      "name": "Run invox standalone",
-      "runtimeExecutable": "node",
-      "runtimeArgs": ["--import", "tsx"],
-      "program": "${workspaceFolder}/src/cli.ts",
-      "console": "integratedTerminal",
-      "skipFiles": [
-        "<node_internals>/**",
-        "**/node_modules/**"
-      ],
-      "env": {
-        "INVOX_LOG": "debug",
-        "INVOX_MOCK": "1"
-      }
+      "type": "node"
     }
+   
   ]
 }

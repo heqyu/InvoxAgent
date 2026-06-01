@@ -6,14 +6,29 @@
 // observable. Format preserved from stage 1 so the existing smoke assertions
 // pass unchanged.
 
-import type { LLMDelta, LLMProvider, LLMRequest } from "./types.js";
+import type {
+  LLMDelta,
+  LLMProvider,
+  LLMRequest,
+  UserContent,
+} from "./types.js";
+
+function contentToString(content: string | UserContent | undefined): string {
+  if (!content) return "";
+  if (typeof content === "string") return content;
+  // UserContent = string | ChatCompletionContentPart[]
+  // Walk the array without naming the OpenAI namespace.
+  return (content as Array<{ type: string; text?: string }>)
+    .map((p) => (p.type === "text" ? (p.text ?? "") : `[${p.type}]`))
+    .join(" ");
+}
 
 export class EchoProvider implements LLMProvider {
   readonly name = "echo";
 
   async *stream(req: LLMRequest): AsyncIterable<LLMDelta> {
     const lastUser = [...req.messages].reverse().find((m) => m.role === "user");
-    const text = lastUser?.content ?? "";
+    const text = contentToString(lastUser?.content);
     const reply = `invox echo: you said "${text}". streaming works ✓`;
     for (const piece of chunkString(reply, 8)) {
       if (req.signal.aborted) return;

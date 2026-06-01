@@ -183,13 +183,15 @@ async function execute(
     ],
     kind: "edit",
     title: titleFor(args, rel),
+    locations: [{ path }],
     ok: true,
   };
 }
 
-function titleFor(args: Record<string, unknown>, rel: string): string {
-  const desc = typeof args["description"] === "string" ? args["description"].trim() : "";
-  if (desc) return desc;
+function titleFor(_args: Record<string, unknown>, rel: string): string {
+  // Path-first title — see read-file.ts for rationale (keeps "Go to File"
+  // glance-able and prevents an LLM-translated description from hiding
+  // the path).
   return `Edited ${rel}`;
 }
 

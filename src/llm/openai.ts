@@ -17,7 +17,7 @@
 //   trace — full request payload (messages + tools) and full response.
 //           NEVER set this in production (leaks secrets if your prompts
 //           include API keys, tokens, etc.).
-
+//
 import OpenAI from "openai";
 import { log } from "../log.js";
 import type {
@@ -27,6 +27,7 @@ import type {
   LLMProvider,
   LLMRequest,
   ParsedToolCall,
+  UserContent,
 } from "./types.js";
 
 export interface OpenAIProviderConfig {
@@ -98,7 +99,10 @@ export class OpenAIProvider implements LLMProvider {
     });
 
     // tool_call accumulator: index → partial call
-    const partials = new Map<number, { id: string; name: string; argsBuf: string }>();
+    const partials = new Map<
+      number,
+      { id: string; name: string; argsBuf: string }
+    >();
     let finishReason: FinishReason = "other";
     let textBytes = 0;
     let chunks = 0;
@@ -193,7 +197,11 @@ export class OpenAIProvider implements LLMProvider {
     for (const idx of indices) {
       const p = partials.get(idx);
       if (!p) continue;
-      const call: ParsedToolCall = { id: p.id, name: p.name, arguments: p.argsBuf };
+      const call: ParsedToolCall = {
+        id: p.id,
+        name: p.name,
+        arguments: p.argsBuf,
+      };
       yield { kind: "tool_call", call };
     }
 
@@ -201,16 +209,26 @@ export class OpenAIProvider implements LLMProvider {
   }
 }
 
-function toOpenAIMessage(m: LLMMessage): OpenAI.Chat.Completions.ChatCompletionMessageParam {
+/**
+ * Convert internal LLMMessage → OpenAI ChatCompletionMessageParam.
+ *
+ * - system/assistant/tool: content is always string. Pass directly.
+ * - user: content may be string or ChatCompletionContentPart[] (image_url).
+ *   Pass through as-is — it's already in OpenAI format.
+ */
+function toOpenAIMessage(
+  m: LLMMessage,
+): OpenAI.Chat.Completions.ChatCompletionMessageParam {
   switch (m.role) {
     case "system":
-      return { role: "system", content: m.content };
+      return { role: "system", content: m.content as string };
     case "user":
-      return { role: "user", content: m.content };
+      // m.content is UserContent = string | ChatCompletionContentPart[]
+      return { role: "user", content: m.content as UserContent };
     case "assistant":
       return {
         role: "assistant",
-        content: m.content,
+        content: m.content as string,
         ...(m.tool_calls && m.tool_calls.length > 0
           ? {
               tool_calls: m.tool_calls.map((tc) => ({
@@ -226,12 +244,14 @@ function toOpenAIMessage(m: LLMMessage): OpenAI.Chat.Completions.ChatCompletionM
       return {
         role: "tool",
         tool_call_id: m.tool_call_id,
-        content: m.content,
+        content: m.content as string,
       };
   }
 }
 
-function mapFinishReason(r: string): "stop" | "tool_calls" | "length" | "other" {
+function mapFinishReason(
+  r: string,
+): "stop" | "tool_calls" | "length" | "other" {
   if (r === "stop") return "stop";
   if (r === "tool_calls" || r === "function_call") return "tool_calls";
   if (r === "length") return "length";

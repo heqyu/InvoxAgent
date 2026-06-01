@@ -4,6 +4,7 @@ import type {
   AgentSideConnection,
   ClientCapabilities,
   ToolCallContent,
+  ToolCallLocation,
 } from "@zed-industries/agent-client-protocol";
 import type { ToolSpec } from "../llm/types.js";
 import type { FileCache } from "./cache.js";
@@ -47,6 +48,12 @@ export interface ToolExecResult {
   kind: "read" | "edit" | "execute" | "other";
   /** Human-readable title; shown in the client's UI. */
   title: string;
+  /**
+   * File locations affected by this tool call. Enables "follow-along" /
+   * "Go to File" affordances in clients (Zed renders these as clickable
+   * jump targets next to the tool card).
+   */
+  locations?: ToolCallLocation[];
   /** Whether the call succeeded (drives status: completed | failed | cancelled). */
   ok: boolean;
   /** True iff the user denied the action; the LLM should be told. */

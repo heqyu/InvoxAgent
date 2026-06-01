@@ -104,13 +104,13 @@ async function execute(
     ],
     kind: "edit",
     title: titleFor(args, rel, fileExisted),
+    locations: [{ path }],
     ok: true,
   };
 }
 
-function titleFor(args: Record<string, unknown>, rel: string, existed: boolean): string {
-  const desc = typeof args["description"] === "string" ? args["description"].trim() : "";
-  if (desc) return desc;
+function titleFor(_args: Record<string, unknown>, rel: string, existed: boolean): string {
+  // Path-first title — see read-file.ts for rationale.
   return existed ? `Wrote ${rel}` : `Created ${rel}`;
 }
 
