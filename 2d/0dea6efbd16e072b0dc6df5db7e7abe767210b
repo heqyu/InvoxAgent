@@ -1,0 +1,30 @@
+src/tools/read-file.ts
+  s_8264d14bdecf80::t_229ee5263739ed 65
+  s_8264d14bdecf80::t_ab65c47f626675 5
+src/tools/edit-file.ts
+  s_8264d14bdecf80::t_0815ecc70b7569 92
+  s_8264d14bdecf80::t_effac2b7b1d9ba 13
+src/tools/fs-utils.ts
+  s_8264d14bdecf80::t_efd0fd498657c7 6-8,10-11,15-44,47-56,62-72,80-83,88
+examples/smoke-fspath.mjs
+  s_8264d14bdecf80::t_2acfaa3855fa7e 1-63
+src/tools/write-file.ts
+  s_8264d14bdecf80::t_353399d85bdb23 63
+  s_8264d14bdecf80::t_db4f3087b6211f 12
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "2d0dea6efbd16e072b0dc6df5db7e7abe767210b",
+  "prompts": {},
+  "sessions": {
+    "s_8264d14bdecf80": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "df335149-145c-43a5-9004-4cd1dfdb4c22",
+        "model": "claude-4.6-sonnet"
+      },
+      "human_author": "invox <invox@local>"
+    }
+  }
+}
