@@ -9,7 +9,7 @@ import { log } from "../log.js";
 import type { ToolSpec } from "../llm/types.js";
 import {
   isInsideWorkspace,
-  readFileDirect,
+  readFileWithCache,
   writeFileDirect,
 } from "./fs-utils.js";
 import {
@@ -118,56 +118,22 @@ async function execute(
     outsideWorkspace: !inside,
   });
 
-  // Auto-read if the file hasn't been read yet (cache miss or readPaths gap).
-  // This ensures the LLM always works from up-to-date content.
+  // Auto-read via shared helper (handles cache + workspace boundary + ACP/direct fs).
   const hasBeenRead = ctx.state.readPaths.has(path);
-  const cached = ctx.state.cache.get(path);
   let currentText: string;
-
-  if (cached) {
-    log.debug("Edit: current text from cache", {
+  try {
+    currentText = await readFileWithCache(path, ctx);
+  } catch (e) {
+    log.debug("Edit: auto-read FAILED", {
       path,
-      cachedBytes: cached.content.length,
+      error: (e as Error).message,
     });
-    currentText = cached.content;
-  } else {
-    // Not in cache — read it now (same path whether first time or evicted).
-    try {
-      if (inside) {
-        log.debug("Edit: auto-reading via ACP", { path });
-        const r = await ctx.conn.readTextFile({
-          sessionId: ctx.sessionId,
-          path,
-        });
-        currentText = r.content;
-        log.debug("Edit: ACP auto-read succeeded", {
-          path,
-          bytes: currentText.length,
-        });
-      } else {
-        log.warn("tool: Edit: reading OUTSIDE workspace", { path });
-        log.debug("Edit: auto-reading via direct fs", { path });
-        currentText = await readFileDirect(path);
-        log.debug("Edit: direct fs auto-read succeeded", {
-          path,
-          bytes: currentText.length,
-        });
-      }
-      ctx.state.cache.set(path, currentText);
-    } catch (e) {
-      log.debug("Edit: auto-read FAILED", {
-        path,
-        error: (e as Error).message,
-      });
-      return errorResult(
-        `read for edit failed: ${(e as Error).message}`,
-        "edit",
-        `Edit: ${rel}`,
-      );
-    }
+    return errorResult(
+      `read for edit failed: ${(e as Error).message}`,
+      "edit",
+      `Edit: ${rel}`,
+    );
   }
-
-  // Mark as read (for consistency / downstream tool gates).
   if (!hasBeenRead) {
     log.info("Edit: auto-read before edit", { path });
     ctx.state.readPaths.add(path);

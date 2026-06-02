@@ -3,7 +3,7 @@
 import { resolve } from "node:path";
 import { log } from "../log.js";
 import type { ToolSpec } from "../llm/types.js";
-import { isInsideWorkspace, readFileDirect } from "./fs-utils.js";
+import { readFileWithCache } from "./fs-utils.js";
 import {
   errorResult,
   type Tool,
@@ -75,72 +75,20 @@ async function execute(
     : undefined;
   const effectiveLimit = limit ?? DEFAULT_READ_LIMIT;
 
-  // Cache lookup: stores the FULL file content. Slicing per offset/limit
-  // is done by us in-memory after the lookup, so different (offset, limit)
-  // calls on the same path all benefit from one cache entry.
+  // Read with cache (shared helper handles workspace boundary + ACP/direct fs).
   let fullContent: string;
-  const cached = ctx.state.cache.get(path);
-  if (cached) {
-    log.debug("Read: cache hit", {
+  try {
+    fullContent = await readFileWithCache(path, ctx);
+  } catch (e) {
+    log.debug("Read: read FAILED", {
       path,
-      cachedBytes: cached.content.length,
+      error: (e as Error).message,
     });
-    fullContent = cached.content;
-  } else {
-    const inside = isInsideWorkspace(path, ctx.cwd);
-    log.debug("Read: cache miss, checking workspace boundary", {
-      path,
-      insideWorkspace: inside,
-    });
-    try {
-      if (inside) {
-        // Inside workspace — delegate to ACP so Zed can track the read and
-        // provide editor integration (e.g. "Go to File").
-        if (!ctx.caps.fs?.readTextFile) {
-          log.debug("Read: ACP fs.readTextFile capability missing", {
-            path,
-          });
-          return errorResult(
-            "client does not advertise fs.readTextFile capability",
-            "read",
-            `Read: ${rel}`,
-          );
-        }
-        log.debug("Read: reading via ACP", {
-          path,
-          sessionId: ctx.sessionId,
-        });
-        const res = await ctx.conn.readTextFile({
-          sessionId: ctx.sessionId,
-          path,
-        });
-        fullContent = res.content;
-        log.debug("Read: ACP read succeeded", {
-          path,
-          bytes: fullContent.length,
-        });
-      } else {
-        // Outside workspace — read directly via Node.js fs.
-        log.warn("tool: Read: reading OUTSIDE workspace", { path });
-        log.debug("Read: reading via direct fs", { path });
-        fullContent = await readFileDirect(path);
-        log.debug("Read: direct fs read succeeded", {
-          path,
-          bytes: fullContent.length,
-        });
-      }
-      ctx.state.cache.set(path, fullContent);
-    } catch (e) {
-      log.debug("Read: read FAILED", {
-        path,
-        error: (e as Error).message,
-      });
-      return errorResult(
-        `read failed: ${(e as Error).message}`,
-        "read",
-        `Read: ${rel}`,
-      );
-    }
+    return errorResult(
+      `read failed: ${(e as Error).message}`,
+      "read",
+      `Read: ${rel}`,
+    );
   }
 
   // Mark for read-before-edit gate.
