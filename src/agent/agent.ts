@@ -375,16 +375,16 @@ export class InvoxAgent implements Agent {
     };
     this.sessions.set(session.id, session);
 
-    // Send last turn usage BEFORE replayHistory so the user sees it
-    // immediately instead of waiting for all history messages to replay.
+    await this.replayHistory(session);
+
+    // Send last turn usage AFTER replayHistory so the agent_thought_chunk
+    // renders at the bottom of the thread (after the last message), which
+    // is where users expect to see it.
     if (session.lastTurnUsage) {
       const lu = session.lastTurnUsage;
       const used = lu.maxPrompt + lu.output;
 
-      // Send usage_update for the toolbar chip. We intentionally skip the
-      // agent_thought_chunk — during loadSession it renders at the top of
-      // the thread (no active turn to attach to). The data is preserved in
-      // session.lastTurnUsage and will appear in the next prompt() turn.
+      // 1. usage_update for the toolbar chip
       await this.conn.sessionUpdate({
         sessionId: session.id,
         update: {
@@ -393,9 +393,30 @@ export class InvoxAgent implements Agent {
           size: contextWindowFor(lu.model),
         },
       });
-    }
 
-    await this.replayHistory(session);
+      // 2. agent_thought_chunk so the usage text appears in the thread
+      const ctxFmt = humanizeTokens(used);
+      const sizeFmt = humanizeTokens(contextWindowFor(lu.model));
+      const elapsedSec = lu.elapsedMs
+        ? (lu.elapsedMs / 1000).toFixed(1)
+        : "0.0";
+      const cacheHint =
+        lu.maxCached > 0 && lu.maxPrompt > 0
+          ? ` · cache ${Math.round((lu.maxCached / lu.maxPrompt) * 100)}%`
+          : "";
+      const text =
+        `🪙 Context: ${ctxFmt} / ${sizeFmt}` +
+        ` · ${lu.calls} turns · ${elapsedSec}s` +
+        cacheHint +
+        ` · ${lu.model}`;
+      await this.conn.sessionUpdate({
+        sessionId: session.id,
+        update: {
+          sessionUpdate: "agent_thought_chunk",
+          content: { type: "text", text },
+        },
+      });
+    }
 
     return {
       models: this.modelStateFor(session),
