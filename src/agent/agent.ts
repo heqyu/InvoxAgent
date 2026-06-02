@@ -115,6 +115,27 @@ interface Session {
      *  the full history, so the sum of prompt_tokens across calls is NOT
      *  the context usage). */
     maxPrompt: number;
+    /** Tokens served from prompt cache across all calls this turn. */
+    cached: number;
+    /** Cache tokens from the call that produced maxPrompt (aligned pair). */
+    maxCached: number;
+  };
+  /** Wall-clock ms when prompt() started — used to compute turn elapsed. */
+  turnStartedAt: number;
+  /**
+   * Persisted snapshot of the last completed turn's usage. Survives restarts
+   * so the user can see what the previous turn cost after reloadSession.
+   */
+  lastTurnUsage?: {
+    input: number;
+    output: number;
+    total: number;
+    calls: number;
+    maxPrompt: number;
+    maxCached: number;
+    cached: number;
+    elapsedMs: number;
+    model: string;
   };
 }
 
@@ -281,6 +302,7 @@ export class InvoxAgent implements Agent {
         thinking: "off",
       },
       turnUsage: emptyUsage(),
+      turnStartedAt: 0,
     };
     this.sessions.set(id, session);
     log.info("session created", { id, cwd: params.cwd });
@@ -348,10 +370,33 @@ export class InvoxAgent implements Agent {
           : undefined,
       configValues: restoredConfigValues,
       turnUsage: emptyUsage(),
+      turnStartedAt: 0,
+      lastTurnUsage: snapshot.lastTurnUsage,
     };
     this.sessions.set(session.id, session);
 
+    // Send last turn usage BEFORE replayHistory so the user sees it
+    // immediately instead of waiting for all history messages to replay.
+    if (session.lastTurnUsage) {
+      const lu = session.lastTurnUsage;
+      const used = lu.maxPrompt + lu.output;
+
+      // Send usage_update for the toolbar chip. We intentionally skip the
+      // agent_thought_chunk — during loadSession it renders at the top of
+      // the thread (no active turn to attach to). The data is preserved in
+      // session.lastTurnUsage and will appear in the next prompt() turn.
+      await this.conn.sessionUpdate({
+        sessionId: session.id,
+        update: {
+          sessionUpdate: "usage_update",
+          used,
+          size: contextWindowFor(lu.model),
+        },
+      });
+    }
+
     await this.replayHistory(session);
+
     return {
       models: this.modelStateFor(session),
       configOptions: this.configOptionsFor(session),
@@ -514,6 +559,7 @@ export class InvoxAgent implements Agent {
     // Reset turn-level token accounting. We deliberately do NOT carry usage
     // across turns — the per-turn box matches what the user just asked for.
     session.turnUsage = emptyUsage();
+    session.turnStartedAt = Date.now();
 
     const userContent = buildUserContent(params.prompt);
     log.info("prompt received", {
@@ -522,7 +568,10 @@ export class InvoxAgent implements Agent {
       historyLen: session.history.length,
       model: session.selectedModel ?? this.models.defaultModelId,
     });
-    session.history.push({ role: "user", content: userContent });
+    session.history.push({
+      role: "user",
+      content: userContent,
+    });
 
     const max = maxIterations();
     let stopReason: "end_turn" | "cancelled" | "max_turn_requests" =
@@ -782,6 +831,9 @@ export class InvoxAgent implements Agent {
       ...(Object.keys(session.configValues).length > 0
         ? { configValues: { ...session.configValues } }
         : {}),
+      ...(session.lastTurnUsage
+        ? { lastTurnUsage: session.lastTurnUsage }
+        : {}),
     };
     session.store.save(snapshot);
   }
@@ -882,8 +934,19 @@ export class InvoxAgent implements Agent {
     session.turnUsage.output += usage.output;
     session.turnUsage.total += usage.total;
     session.turnUsage.calls += 1;
+    session.turnUsage.cached += usage.cached;
+    // maxPrompt and maxCached must come from the SAME call so the cache
+    // percentage is meaningful relative to the context footprint shown in
+    // the bar. When a new max is found, reset maxCached to this call's
+    // value; on a tie, take the better of the two.
     if (usage.input > session.turnUsage.maxPrompt) {
       session.turnUsage.maxPrompt = usage.input;
+      session.turnUsage.maxCached = usage.cached;
+    } else if (usage.input === session.turnUsage.maxPrompt) {
+      session.turnUsage.maxCached = Math.max(
+        session.turnUsage.maxCached,
+        usage.cached,
+      );
     }
   }
 
@@ -925,11 +988,6 @@ export class InvoxAgent implements Agent {
     // full history, so the SUM of prompt_tokens across calls (u.input) is a
     // billing metric, not the actual context window occupancy.
     const used = u.maxPrompt + u.output;
-    // `usage_update` is a stable SessionUpdate variant in
-    // @agentclientprotocol/sdk@0.23. Wire shape matches agent-client-protocol-schema
-    // 0.13's UsageUpdate { used, size, cost? }. Zed only renders the
-    // resulting token chip when the `acp-beta` feature flag is on, but
-    // sending it is harmless when the flag is off (silently dropped).
     await this.conn.sessionUpdate({
       sessionId: session.id,
       update: {
@@ -939,20 +997,28 @@ export class InvoxAgent implements Agent {
       },
     });
 
-    // ── 2. Visible-today fallback: agent_thought_chunk + _meta extension ──
-    // Format mirrors Zed's native token-meter tooltip ("Context  used / max")
-    // so the line is recognizable even rendered as plain text in the
-    // "Thinking" block. The 🪙 prefix keeps it grep-friendly.
+    // ── 2. Compute elapsed time for this turn ──
+    const elapsedMs =
+      session.turnStartedAt > 0 ? Date.now() - session.turnStartedAt : 0;
+    const elapsedSec = (elapsedMs / 1000).toFixed(1);
+
+    // ── 3. Visible-today fallback: agent_thought_chunk + _meta extension ──
     const ctxFmt = humanizeTokens(used);
     const sizeFmt = humanizeTokens(contextWindow);
-    const billedFmt = humanizeTokens(u.input);
+    // Show cache hit ratio for the largest-context call. maxCached and
+    // maxPrompt come from the same call (aligned in accumulateUsage), so
+    // the ratio is meaningful. Clamp to 100% to guard against provider
+    // bugs that report cached > prompt.
+    const cacheHint =
+      u.maxCached > 0 && u.maxPrompt > 0
+        ? ` · cache ${Math.round((u.maxCached / u.maxPrompt) * 100)}%`
+        : "";
     const text =
       `🪙 Context: ${ctxFmt} / ${sizeFmt}` +
-      ` · ${u.maxPrompt} prompt + ${u.output} out` +
-      ` · billed: ${billedFmt} in + ${u.output} out` +
-      ` · ${u.calls} call(s)` +
+      ` · ${u.calls} turns · ${elapsedSec}s` +
+      cacheHint +
       (partial ? ` · ${stopReason}` : "") +
-      ` · model=${model}`;
+      ` · ${model}`;
     await this.conn.sessionUpdate({
       sessionId: session.id,
       _meta: {
@@ -963,6 +1029,8 @@ export class InvoxAgent implements Agent {
             total: u.total,
             calls: u.calls,
             maxPrompt: u.maxPrompt,
+            maxCached: u.maxCached,
+            cached: u.cached,
           },
           model,
           contextWindow,
@@ -974,6 +1042,19 @@ export class InvoxAgent implements Agent {
         content: { type: "text", text },
       },
     });
+
+    // ── 4. Persist lastTurnUsage so it survives restarts ──
+    session.lastTurnUsage = {
+      input: u.input,
+      output: u.output,
+      total: u.total,
+      calls: u.calls,
+      maxPrompt: u.maxPrompt,
+      maxCached: u.maxCached,
+      cached: u.cached,
+      elapsedMs,
+      model,
+    };
   }
 
   private async replayHistory(session: Session): Promise<void> {
@@ -1289,8 +1370,18 @@ function emptyUsage(): {
   total: number;
   calls: number;
   maxPrompt: number;
+  maxCached: number;
+  cached: number;
 } {
-  return { input: 0, output: 0, total: 0, calls: 0, maxPrompt: 0 };
+  return {
+    input: 0,
+    output: 0,
+    total: 0,
+    calls: 0,
+    maxPrompt: 0,
+    maxCached: 0,
+    cached: 0,
+  };
 }
 
 /**

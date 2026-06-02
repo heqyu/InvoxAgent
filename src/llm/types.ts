@@ -63,6 +63,9 @@ export interface UsageInfo {
   /** input + output as reported by the provider; may differ from the sum if
    *  the provider counts cache/system overhead separately. */
   total: number;
+  /** Tokens served from prompt cache (prefix caching). 0 when the provider
+   *  does not report this detail. */
+  cached: number;
 }
 
 export interface ToolSpec {

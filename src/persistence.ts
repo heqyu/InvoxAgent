@@ -64,6 +64,21 @@ export interface PersistedSession {
    * keys this build doesn't recognize).
    */
   configValues?: Record<string, string>;
+  /**
+   * Snapshot of the last completed turn's usage. Preserved across restarts
+   * so the user can see what the previous turn cost after session reload.
+   */
+  lastTurnUsage?: {
+    input: number;
+    output: number;
+    total: number;
+    calls: number;
+    maxPrompt: number;
+    maxCached: number;
+    cached: number;
+    elapsedMs: number;
+    model: string;
+  };
 }
 
 const DEFAULT_TTL_DAYS = 30;

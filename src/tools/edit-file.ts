@@ -7,7 +7,17 @@
 import { resolve } from "node:path";
 import { log } from "../log.js";
 import type { ToolSpec } from "../llm/types.js";
-import { errorResult, type Tool, type ToolExecContext, type ToolExecResult } from "./types.js";
+import {
+  isInsideWorkspace,
+  readFileDirect,
+  writeFileDirect,
+} from "./fs-utils.js";
+import {
+  errorResult,
+  type Tool,
+  type ToolExecContext,
+  type ToolExecResult,
+} from "./types.js";
 
 const DESCRIPTION_FIELD = {
   type: "string",
@@ -39,7 +49,8 @@ const spec: ToolSpec = {
         },
         old_string: {
           type: "string",
-          description: "Exact text to replace, copied verbatim from read_file output.",
+          description:
+            "Exact text to replace, copied verbatim from read_file output.",
         },
         new_string: {
           type: "string",
@@ -63,8 +74,10 @@ async function execute(
   ctx: ToolExecContext,
 ): Promise<ToolExecResult> {
   const rel = String(args["path"] ?? "");
-  const oldString = typeof args["old_string"] === "string" ? args["old_string"] : "";
-  const newString = typeof args["new_string"] === "string" ? args["new_string"] : "";
+  const oldString =
+    typeof args["old_string"] === "string" ? args["old_string"] : "";
+  const newString =
+    typeof args["new_string"] === "string" ? args["new_string"] : "";
   const replaceAll = args["replace_all"] === true;
 
   if (!rel) return errorResult("missing 'path'", "edit", "edit_file");
@@ -75,24 +88,40 @@ async function execute(
       `edit_file: ${rel}`,
     );
   }
-  if (!ctx.caps.fs?.readTextFile || !ctx.caps.fs?.writeTextFile) {
+
+  const path = resolve(ctx.cwd, rel);
+  const inside = isInsideWorkspace(path, ctx.cwd);
+  log.debug("edit_file: resolved path", {
+    rel,
+    resolved: path,
+    cwd: ctx.cwd,
+    insideWorkspace: inside,
+  });
+
+  if (inside && (!ctx.caps.fs?.readTextFile || !ctx.caps.fs?.writeTextFile)) {
+    log.debug("edit_file: ACP fs capabilities missing", {
+      path,
+      hasReadTextFile: !!ctx.caps.fs?.readTextFile,
+      hasWriteTextFile: !!ctx.caps.fs?.writeTextFile,
+    });
     return errorResult(
       "client must advertise both fs.readTextFile and fs.writeTextFile for edit_file",
       "edit",
       `edit_file: ${rel}`,
     );
   }
-
-  const path = resolve(ctx.cwd, rel);
   log.info("tool: edit_file", {
     path,
     replaceAll,
     oldLen: oldString.length,
     newLen: newString.length,
+    outsideWorkspace: !inside,
   });
 
   // Read-before-edit gate.
-  if (!ctx.state.readPaths.has(path)) {
+  const hasBeenRead = ctx.state.readPaths.has(path);
+  log.debug("edit_file: read-before-edit gate", { path, hasBeenRead });
+  if (!hasBeenRead) {
     return errorResult(
       `must call read_file on ${rel} before edit_file (so you see the exact text to replace)`,
       "edit",
@@ -100,17 +129,43 @@ async function execute(
     );
   }
 
-  // Get current text — prefer cache, fall back to ACP read.
+  // Get current text — prefer cache, fall back to read (ACP or direct fs).
   let currentText: string;
   const cached = ctx.state.cache.get(path);
   if (cached) {
+    log.debug("edit_file: current text from cache", {
+      path,
+      cachedBytes: cached.content.length,
+    });
     currentText = cached.content;
   } else {
     try {
-      const r = await ctx.conn.readTextFile({ sessionId: ctx.sessionId, path });
-      currentText = r.content;
+      if (inside) {
+        log.debug("edit_file: re-reading via ACP for edit", { path });
+        const r = await ctx.conn.readTextFile({
+          sessionId: ctx.sessionId,
+          path,
+        });
+        currentText = r.content;
+        log.debug("edit_file: ACP re-read succeeded", {
+          path,
+          bytes: currentText.length,
+        });
+      } else {
+        log.warn("tool: edit_file: reading OUTSIDE workspace", { path });
+        log.debug("edit_file: re-reading via direct fs for edit", { path });
+        currentText = await readFileDirect(path);
+        log.debug("edit_file: direct fs re-read succeeded", {
+          path,
+          bytes: currentText.length,
+        });
+      }
       ctx.state.cache.set(path, currentText);
     } catch (e) {
+      log.debug("edit_file: re-read FAILED", {
+        path,
+        error: (e as Error).message,
+      });
       return errorResult(
         `read for edit failed: ${(e as Error).message}`,
         "edit",
@@ -124,10 +179,19 @@ async function execute(
   let occurrenceCount: number;
   if (replaceAll) {
     if (!currentText.includes(oldString)) {
-      return errorResult(`old_string not found in ${rel}`, "edit", `edit_file: ${rel}`);
+      log.debug("edit_file: old_string not found (replace_all)", { path });
+      return errorResult(
+        `old_string not found in ${rel}`,
+        "edit",
+        `edit_file: ${rel}`,
+      );
     }
     occurrenceCount = currentText.split(oldString).length - 1;
     newText = currentText.split(oldString).join(newString);
+    log.debug("edit_file: replace_all matched", {
+      path,
+      occurrences: occurrenceCount,
+    });
   } else {
     const firstIdx = currentText.indexOf(oldString);
     if (firstIdx < 0) {
@@ -149,7 +213,9 @@ async function execute(
     }
     occurrenceCount = 1;
     newText =
-      currentText.slice(0, firstIdx) + newString + currentText.slice(firstIdx + oldString.length);
+      currentText.slice(0, firstIdx) +
+      newString +
+      currentText.slice(firstIdx + oldString.length);
   }
 
   if (newText === currentText) {
@@ -160,16 +226,44 @@ async function execute(
     );
   }
 
-  // Write back through ACP (Zed handles dirty buffer + editor reload).
+  // Write back (ACP for workspace files, direct fs for external).
   try {
-    await ctx.conn.writeTextFile({ sessionId: ctx.sessionId, path, content: newText });
+    if (inside) {
+      log.debug("edit_file: writing via ACP", { path, bytes: newText.length });
+      await ctx.conn.writeTextFile({
+        sessionId: ctx.sessionId,
+        path,
+        content: newText,
+      });
+      log.debug("edit_file: ACP write succeeded", { path });
+    } else {
+      log.warn("tool: edit_file: writing OUTSIDE workspace", { path });
+      log.debug("edit_file: writing via direct fs", {
+        path,
+        bytes: newText.length,
+      });
+      await writeFileDirect(path, newText);
+      log.debug("edit_file: direct fs write succeeded", { path });
+    }
   } catch (e) {
-    return errorResult(`edit write failed: ${(e as Error).message}`, "edit", `edit_file: ${rel}`);
+    log.debug("edit_file: write FAILED", { path, error: (e as Error).message });
+    return errorResult(
+      `edit write failed: ${(e as Error).message}`,
+      "edit",
+      `edit_file: ${rel}`,
+    );
   }
 
   // Update cache to the post-edit content. We deliberately do NOT invalidate;
   // we replace, since we know exactly what's on disk now.
   ctx.state.cache.set(path, newText);
+  log.debug("edit_file: completed", {
+    path,
+    occurrences: occurrenceCount,
+    oldBytes: currentText.length,
+    newBytes: newText.length,
+    outsideWorkspace: !inside,
+  });
 
   return {
     resultText: `edited ${rel}: replaced ${occurrenceCount} occurrence(s)`,

@@ -3,7 +3,13 @@
 import { resolve } from "node:path";
 import { log } from "../log.js";
 import type { ToolSpec } from "../llm/types.js";
-import { errorResult, type Tool, type ToolExecContext, type ToolExecResult } from "./types.js";
+import { isInsideWorkspace, readFileDirect } from "./fs-utils.js";
+import {
+  errorResult,
+  type Tool,
+  type ToolExecContext,
+  type ToolExecResult,
+} from "./types.js";
 
 const DESCRIPTION_FIELD = {
   type: "string",
@@ -42,8 +48,7 @@ const spec: ToolSpec = {
         },
         limit: {
           type: "integer",
-          description:
-            `Maximum lines to return. Optional; default ${DEFAULT_READ_LIMIT}.`,
+          description: `Maximum lines to return. Optional; default ${DEFAULT_READ_LIMIT}.`,
         },
         description: DESCRIPTION_FIELD,
       },
@@ -58,17 +63,16 @@ async function execute(
 ): Promise<ToolExecResult> {
   const rel = String(args["path"] ?? "");
   if (!rel) return errorResult("missing 'path'", "read", "read_file");
-  if (!ctx.caps.fs?.readTextFile) {
-    return errorResult(
-      "client does not advertise fs.readTextFile capability",
-      "read",
-      `read_file: ${rel}`,
-    );
-  }
   const path = resolve(ctx.cwd, rel);
 
-  const offset = isPositiveInt(args["offset"]) ? Number(args["offset"]) : undefined;
-  const limit = isPositiveInt(args["limit"]) ? Number(args["limit"]) : undefined;
+  log.debug("read_file: resolved path", { rel, resolved: path, cwd: ctx.cwd });
+
+  const offset = isPositiveInt(args["offset"])
+    ? Number(args["offset"])
+    : undefined;
+  const limit = isPositiveInt(args["limit"])
+    ? Number(args["limit"])
+    : undefined;
   const effectiveLimit = limit ?? DEFAULT_READ_LIMIT;
 
   // Cache lookup: stores the FULL file content. Slicing per offset/limit
@@ -77,18 +81,60 @@ async function execute(
   let fullContent: string;
   const cached = ctx.state.cache.get(path);
   if (cached) {
-    log.info("tool: read_file (cache hit)", { path, offset, limit: effectiveLimit });
+    log.debug("read_file: cache hit", {
+      path,
+      cachedBytes: cached.content.length,
+    });
     fullContent = cached.content;
   } else {
-    log.info("tool: read_file", { path, offset, limit: effectiveLimit });
+    const inside = isInsideWorkspace(path, ctx.cwd);
+    log.debug("read_file: cache miss, checking workspace boundary", {
+      path,
+      insideWorkspace: inside,
+    });
     try {
-      // We always pull the whole file into the cache. ACP supports `line`
-      // and `limit` server-side, but caching only-the-slice would defeat
-      // the purpose: the next read of a different range would miss.
-      const res = await ctx.conn.readTextFile({ sessionId: ctx.sessionId, path });
-      fullContent = res.content;
+      if (inside) {
+        // Inside workspace — delegate to ACP so Zed can track the read and
+        // provide editor integration (e.g. "Go to File").
+        if (!ctx.caps.fs?.readTextFile) {
+          log.debug("read_file: ACP fs.readTextFile capability missing", {
+            path,
+          });
+          return errorResult(
+            "client does not advertise fs.readTextFile capability",
+            "read",
+            `read_file: ${rel}`,
+          );
+        }
+        log.debug("read_file: reading via ACP", {
+          path,
+          sessionId: ctx.sessionId,
+        });
+        const res = await ctx.conn.readTextFile({
+          sessionId: ctx.sessionId,
+          path,
+        });
+        fullContent = res.content;
+        log.debug("read_file: ACP read succeeded", {
+          path,
+          bytes: fullContent.length,
+        });
+      } else {
+        // Outside workspace — read directly via Node.js fs.
+        log.warn("tool: read_file: reading OUTSIDE workspace", { path });
+        log.debug("read_file: reading via direct fs", { path });
+        fullContent = await readFileDirect(path);
+        log.debug("read_file: direct fs read succeeded", {
+          path,
+          bytes: fullContent.length,
+        });
+      }
       ctx.state.cache.set(path, fullContent);
     } catch (e) {
+      log.debug("read_file: read FAILED", {
+        path,
+        error: (e as Error).message,
+      });
       return errorResult(
         `read failed: ${(e as Error).message}`,
         "read",
@@ -99,6 +145,11 @@ async function execute(
 
   // Mark for read-before-edit gate.
   ctx.state.readPaths.add(path);
+  log.debug("read_file: completed", {
+    path,
+    totalLines: fullContent.split("\n").length,
+    bytes: fullContent.length,
+  });
 
   const locations = [{ path }];
 
@@ -117,7 +168,8 @@ async function execute(
   const allLines = fullContent.split("\n");
   // If file ends with \n, split produces a trailing "" — drop it so we
   // don't show a phantom blank last line.
-  if (allLines.length > 0 && allLines[allLines.length - 1] === "") allLines.pop();
+  if (allLines.length > 0 && allLines[allLines.length - 1] === "")
+    allLines.pop();
 
   const startLine = offset ?? 1;
   const startIdx = Math.max(0, startLine - 1);
@@ -153,7 +205,8 @@ async function execute(
   }
 
   const display =
-    (headerParts.length > 0 ? headerParts.join("\n") + "\n" : "") + numbered.join("\n");
+    (headerParts.length > 0 ? headerParts.join("\n") + "\n" : "") +
+    numbered.join("\n");
 
   return {
     resultText: display,
@@ -176,7 +229,9 @@ function titleFor(args: Record<string, unknown>, rel: string): string {
 }
 
 function isPositiveInt(v: unknown): boolean {
-  return typeof v === "number" && Number.isFinite(v) && v > 0 && Math.floor(v) === v;
+  return (
+    typeof v === "number" && Number.isFinite(v) && v > 0 && Math.floor(v) === v
+  );
 }
 
 export const readFileTool: Tool = {

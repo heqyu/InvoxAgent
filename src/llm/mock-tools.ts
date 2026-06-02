@@ -61,7 +61,7 @@ export class MockToolProvider implements LLMProvider {
     // OpenAIProvider would produce from `stream_options.include_usage`.
     yield {
       kind: "usage",
-      usage: { input: 42, output: 7, total: 49 },
+      usage: { input: 42, output: 7, total: 49, cached: 0 },
     };
     yield { kind: "finish", reason: "stop" };
   }

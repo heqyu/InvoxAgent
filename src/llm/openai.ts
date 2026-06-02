@@ -134,6 +134,7 @@ export class OpenAIProvider implements LLMProvider {
       prompt_tokens?: number;
       completion_tokens?: number;
       total_tokens?: number;
+      prompt_tokens_details?: { cached_tokens?: number };
     } | null = null;
 
     try {
@@ -210,6 +211,7 @@ export class OpenAIProvider implements LLMProvider {
           total:
             usageRaw.total_tokens ??
             (usageRaw.prompt_tokens ?? 0) + (usageRaw.completion_tokens ?? 0),
+          cached: usageRaw.prompt_tokens_details?.cached_tokens ?? 0,
         }
       : null;
 
