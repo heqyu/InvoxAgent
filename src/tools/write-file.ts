@@ -3,13 +3,13 @@
 // Soft read-before-overwrite hint when the file already exists but the LLM
 // hasn't read it. Cache is updated post-write so subsequent reads hit.
 
-import { resolve } from "node:path";
 import { log } from "../log.js";
 import type { ToolSpec } from "../llm/types.js";
 import {
   isInsideWorkspace,
   readFileDirect,
   writeFileDirect,
+  resolveToolPath,
 } from "./fs-utils.js";
 import {
   errorResult,
@@ -60,7 +60,7 @@ async function execute(
   const rel = String(args["path"] ?? "");
   const content = String(args["content"] ?? "");
   if (!rel) return errorResult("missing 'path'", "edit", "Write");
-  const path = resolve(ctx.cwd, rel);
+  const path = resolveToolPath(ctx.cwd, rel);
   const inside = isInsideWorkspace(path, ctx.cwd);
   log.debug("Write: resolved path", {
     rel,

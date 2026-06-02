@@ -1,9 +1,8 @@
 // Read: line-numbered, paginated reads with cache.
 
-import { resolve } from "node:path";
 import { log } from "../log.js";
 import type { ToolSpec } from "../llm/types.js";
-import { readFileWithCache } from "./fs-utils.js";
+import { readFileWithCache, resolveToolPath } from "./fs-utils.js";
 import {
   errorResult,
   type Tool,
@@ -63,7 +62,7 @@ async function execute(
 ): Promise<ToolExecResult> {
   const rel = String(args["path"] ?? "");
   if (!rel) return errorResult("missing 'path'", "read", "Read");
-  const path = resolve(ctx.cwd, rel);
+  const path = resolveToolPath(ctx.cwd, rel);
 
   log.debug("Read: resolved path", { rel, resolved: path, cwd: ctx.cwd });
 

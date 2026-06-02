@@ -4,13 +4,13 @@
 // the cache (populated by Read) when available; otherwise re-reads via
 // ACP since the read flag is set.
 
-import { resolve } from "node:path";
 import { log } from "../log.js";
 import type { ToolSpec } from "../llm/types.js";
 import {
   isInsideWorkspace,
   readFileWithCache,
   writeFileDirect,
+  resolveToolPath,
 } from "./fs-utils.js";
 import {
   errorResult,
@@ -89,7 +89,7 @@ async function execute(
     );
   }
 
-  const path = resolve(ctx.cwd, rel);
+  const path = resolveToolPath(ctx.cwd, rel);
   const inside = isInsideWorkspace(path, ctx.cwd);
   log.debug("Edit: resolved path", {
     rel,
