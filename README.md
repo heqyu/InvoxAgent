@@ -58,6 +58,7 @@
 | `Bash(command)` | `terminal/create` + `terminal/wait_for_exit` + `terminal/output` | `terminal: true` |
 | `Glob(pattern)` | client-side glob (fast-glob) | — |
 | `Grep(pattern)` | client-side ripgrep | — |
+| `Skill(name, params)` | client-side skill template rendering | — |
 
 Permission policy for v1: **never ask** — the agent trusts the LLM and runs tools directly. (Stage 5 polish may add an env-knob for stricter policies.)
 
@@ -242,6 +243,72 @@ The System Prompt menu defaults to a built-in trio (`default` / `concise` / `rev
 Invalid / missing files fall back to the built-in templates with a warn-level log. The first entry of the list is the per-session default; switch via the dropdown to update the live session.
 
 Switching a dropdown is **forward-only** — it does not rewrite past assistant messages. Only the next user turn sees the new prompt / reasoning level. Use a fresh session if you want a clean slate.
+
+## Skills (reusable workflow templates)
+
+The `Skill` tool lets the LLM invoke named prompt templates. Each skill is a `SKILL.md` file inside a named directory.
+
+Skills are loaded from `.claude/skills/` directories:
+
+| Source | Path | Scope |
+|---|---|---|
+| User-level | `~/.claude/skills/<name>/SKILL.md` | All projects |
+| Project-level | `<project>/.claude/skills/<name>/SKILL.md` | This project (overrides user-level) |
+
+### How it works
+
+1. The LLM calls `Skill({ name: "explain", params: { arguments: "function add(a,b){...}" }, description: "Explain code" })`
+2. The tool loads `<project>/.claude/skills/explain/SKILL.md`
+3. Replaces `$ARGUMENTS` with the provided value
+4. Returns the rendered instructions as tool output
+5. The LLM follows the instructions using its existing tools (Read, Edit, Bash, etc.)
+
+Calling `Skill({ name: "list" })` returns the catalog of all available skills.
+
+### Creating a skill
+
+```bash
+# Project-level
+mkdir -p .claude/skills/explain
+cat > .claude/skills/explain/SKILL.md << 'EOF'
+Explain the following code:
+
+$ARGUMENTS
+
+Provide:
+1. Overview
+2. Key components
+3. Data flow
+4. Potential issues
+EOF
+
+# Now usable as: Skill({ name: "explain", params: { arguments: "..." } })
+```
+
+### Placeholder syntax
+
+| Placeholder | Replaced by | Example |
+|---|---|---|
+| `$ARGUMENTS` | `params.arguments` (string), or `JSON.stringify(params)` if no `.arguments` key | Claude Code compatible |
+| `{{key}}` | `params[key]` verbatim | Named parameter injection |
+
+Example skill using named params:
+
+```markdown
+<!-- .claude/skills/review/SKILL.md -->
+Review `{{path}}` for bugs.
+
+Check:
+- Security
+- Performance
+- Error handling
+```
+
+```
+Skill({ name: "review", params: { path: "src/main.ts" } })
+```
+
+Skills are cached per cwd. The LLM can call `Skill({ name: "list" })` to discover available skills at any time.
 
 ## Design
 

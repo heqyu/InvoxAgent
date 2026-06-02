@@ -1339,6 +1339,10 @@ function startTitleFor(call: ParsedToolCall): string {
           ? `\`${c.slice(0, 80)}${c.length > 80 ? "…" : ""}\``
           : "Run command";
       }
+      case "Skill": {
+        const n = String(parsed["name"] ?? "");
+        return n ? `Skill: ${n}` : "Run skill";
+      }
     }
   }
   // Non-file tools fall back to the LLM's free-form description.

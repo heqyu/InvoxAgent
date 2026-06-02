@@ -81,7 +81,10 @@ function parseArgs(argv: string[]): Args {
 
 function pkg(): { name: string; version: string } {
   const p = join(__dirname, "..", "package.json");
-  return JSON.parse(readFileSync(p, "utf8")) as { name: string; version: string };
+  return JSON.parse(readFileSync(p, "utf8")) as {
+    name: string;
+    version: string;
+  };
 }
 
 function printHelp(): void {
@@ -143,7 +146,9 @@ async function main(): Promise<void> {
   const transports: Transport[] = [];
   if (args.transports.has("stdio")) transports.push(new StdioTransport());
   if (args.transports.has("ws")) {
-    transports.push(new WebSocketTransport({ host: args.wsHost, port: args.wsPort }));
+    transports.push(
+      new WebSocketTransport({ host: args.wsHost, port: args.wsPort }),
+    );
   }
 
   // Wire each transport: every peer gets its own InvoxAgent instance via the
@@ -295,7 +300,8 @@ const BUILTIN_SYSTEM_PROMPTS: SystemPromptDef[] = [
   {
     id: "review",
     name: "Strict Review",
-    description: "Adversarial code reviewer — quotes file paths and flags risks.",
+    description:
+      "Adversarial code reviewer — quotes file paths and flags risks.",
     prompt:
       `You are a senior code reviewer in Zed. Adopt a skeptical, evidence-first stance.\n` +
       `Always quote file paths and line numbers. Flag risks before suggesting changes. ` +
@@ -325,14 +331,23 @@ function loadPromptTemplates(): SystemPromptDef[] {
         typeof (entry as { name?: unknown }).name !== "string" ||
         typeof (entry as { prompt?: unknown }).prompt !== "string"
       ) {
-        log.warn("INVOX_PROMPT_TEMPLATES_FILE: skipping invalid entry", { entry });
+        log.warn("INVOX_PROMPT_TEMPLATES_FILE: skipping invalid entry", {
+          entry,
+        });
         continue;
       }
-      const e = entry as { id: string; name: string; description?: string; prompt: string };
+      const e = entry as {
+        id: string;
+        name: string;
+        description?: string;
+        prompt: string;
+      };
       out.push({
         id: e.id,
         name: e.name,
-        ...(typeof e.description === "string" ? { description: e.description } : {}),
+        ...(typeof e.description === "string"
+          ? { description: e.description }
+          : {}),
         prompt: e.prompt,
       });
     }
@@ -345,15 +360,21 @@ function loadPromptTemplates(): SystemPromptDef[] {
     }
     return out;
   } catch (err) {
-    log.warn("INVOX_PROMPT_TEMPLATES_FILE: load failed; using built-in templates", {
-      file,
-      err: err instanceof Error ? err.message : String(err),
-    });
+    log.warn(
+      "INVOX_PROMPT_TEMPLATES_FILE: load failed; using built-in templates",
+      {
+        file,
+        err: err instanceof Error ? err.message : String(err),
+      },
+    );
     return BUILTIN_SYSTEM_PROMPTS;
   }
 }
 
 main().catch((err) => {
-  log.error("fatal", err instanceof Error ? err.stack ?? err.message : String(err));
+  log.error(
+    "fatal",
+    err instanceof Error ? (err.stack ?? err.message) : String(err),
+  );
   process.exit(1);
 });

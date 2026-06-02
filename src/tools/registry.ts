@@ -9,6 +9,7 @@ import { editFileTool } from "./edit-file.js";
 import { globTool } from "./glob.js";
 import { grepTool } from "./grep.js";
 import { readFileTool } from "./read-file.js";
+import { skillTool } from "./skill.js";
 import { writeFileTool } from "./write-file.js";
 import type { Tool } from "./types.js";
 
@@ -19,6 +20,7 @@ export const TOOLS: readonly Tool[] = [
   globTool,
   grepTool,
   bashTool,
+  skillTool,
 ];
 
 const TOOL_BY_NAME = new Map<string, Tool>(TOOLS.map((t) => [t.name, t]));
