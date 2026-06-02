@@ -27,6 +27,7 @@
   ],
   "license": "MIT",
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.10.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
@@ -35,6 +36,7 @@
     "@agentclientprotocol/sdk": "^0.23.0",
     "@types/ws": "^8.18.1",
     "@vscode/ripgrep": "^1.18.0",
+    "better-sqlite3": "^12.10.0",
     "fast-glob": "^3.3.3",
     "openai": "^6.39.1",
     "ws": "^8.21.0"

@@ -27,6 +27,8 @@ import {
   type CancelNotification,
   type ClientCapabilities,
   type ContentBlock,
+  type DeleteSessionRequest,
+  type DeleteSessionResponse,
   type InitializeRequest,
   type InitializeResponse,
   type LoadSessionRequest,
@@ -54,6 +56,7 @@ import type {
 import {
   SessionStore,
   sessionTtlDays,
+  syncWithZedThreads,
   titleFromHistory,
   type PersistedSession,
 } from "../persistence.js";
@@ -155,6 +158,9 @@ export class InvoxAgent implements Agent {
   private availableModelIds: Set<string>;
   private configs: AgentConfigOptions;
   private systemPromptById: Map<string, SystemPromptDef>;
+  /** Tracks whether syncWithZedThreads has already run for this agent
+   *  lifetime. We want it to fire exactly once, not per-session. */
+  private syncedZed = false;
 
   constructor(
     conn: AgentSideConnection,
@@ -176,7 +182,9 @@ export class InvoxAgent implements Agent {
             available: [{ modelId: provider.name, name: provider.name }],
             defaultModelId: provider.name,
           };
-    this.availableModelIds = new Set(this.models.available.map((m) => m.modelId));
+    this.availableModelIds = new Set(
+      this.models.available.map((m) => m.modelId),
+    );
     if (!this.availableModelIds.has(this.models.defaultModelId)) {
       // Defensive: ensure default is reachable. Not expected to fire in
       // normal use because cli.ts unshifts the default.
@@ -194,7 +202,9 @@ export class InvoxAgent implements Agent {
             ],
             defaultSystemPromptId: "default",
           };
-    this.systemPromptById = new Map(this.configs.systemPrompts.map((p) => [p.id, p]));
+    this.systemPromptById = new Map(
+      this.configs.systemPrompts.map((p) => [p.id, p]),
+    );
     if (!this.systemPromptById.has(this.configs.defaultSystemPromptId)) {
       // Same defensive fallback as availableModelIds: surface a sane default
       // if the caller's config disagrees with itself.
@@ -215,6 +225,9 @@ export class InvoxAgent implements Agent {
       protocolVersion: PROTOCOL_VERSION,
       agentCapabilities: {
         loadSession: true,
+        sessionCapabilities: {
+          delete: {},
+        },
         promptCapabilities: {
           image: true, // now we support image_url via OpenAI content-part array
           audio: false,
@@ -236,12 +249,17 @@ export class InvoxAgent implements Agent {
   }
 
   async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
+    this.maybeSyncZedThreads(params.cwd);
     const id = randomUUID();
     const defaultPromptId = this.configs.defaultSystemPromptId;
     const session: Session = {
       id,
       cwd: params.cwd,
-      history: [systemMessageForPrompt(this.systemPromptById.get(defaultPromptId)!.prompt)],
+      history: [
+        systemMessageForPrompt(
+          this.systemPromptById.get(defaultPromptId)!.prompt,
+        ),
+      ],
       abort: new AbortController(),
       toolState: {
         readPaths: new Set<string>(),
@@ -264,6 +282,7 @@ export class InvoxAgent implements Agent {
   }
 
   async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
+    this.maybeSyncZedThreads(params.cwd);
     const store = new SessionStore(params.cwd);
     const snapshot = store.load(params.sessionId);
     if (!snapshot) {
@@ -313,7 +332,8 @@ export class InvoxAgent implements Agent {
       // current menu. If the user has since narrowed INVOX_MODELS, fall
       // through to default rather than honor an unavailable id.
       selectedModel:
-        snapshot.selectedModel && this.availableModelIds.has(snapshot.selectedModel)
+        snapshot.selectedModel &&
+        this.availableModelIds.has(snapshot.selectedModel)
           ? snapshot.selectedModel
           : undefined,
       configValues: restoredConfigValues,
@@ -326,6 +346,47 @@ export class InvoxAgent implements Agent {
       models: this.modelStateFor(session),
       configOptions: this.configOptionsFor(session),
     };
+  }
+
+  /**
+   * Handle ACP `session/delete`. Called by the client (e.g. Zed) when the
+   * user deletes a thread from the session list. We remove the persisted
+   * JSON file from `<cwd>/.invox/sessions/<id>.json` so the two sides
+   * stay in sync.
+   */
+  async unstable_deleteSession(
+    params: DeleteSessionRequest,
+  ): Promise<DeleteSessionResponse> {
+    // Try all known sessions first (in-memory).
+    const session = this.sessions.get(params.sessionId);
+    if (session) {
+      const s = new SessionStore(session.cwd);
+      s.delete(params.sessionId);
+      this.sessions.delete(params.sessionId);
+      log.info("deleteSession (in-memory)", {
+        sessionId: params.sessionId,
+        cwd: session.cwd,
+      });
+    } else {
+      // Session not in memory — attempt to delete from disk using the cwd
+      // from the session file itself. We don't know cwd at this point, so
+      // we scan the store root. This is only reached when the agent was
+      // restarted between the load and the delete.
+      const scanRoots = [process.cwd()];
+      const envOverride = process.env["INVOX_SESSION_DIR"];
+      if (envOverride) scanRoots.unshift(envOverride);
+      for (const root of scanRoots) {
+        const s = new SessionStore(root);
+        if (s.delete(params.sessionId)) {
+          log.info("deleteSession (disk scan)", {
+            sessionId: params.sessionId,
+            root: s.rootDir(),
+          });
+          break;
+        }
+      }
+    }
+    return {};
   }
 
   /**
@@ -493,16 +554,17 @@ export class InvoxAgent implements Agent {
     // redundantly with the SessionUpdate::UsageUpdate path. Carrying
     // both maximizes the chance the bottom-bar token chip lights up.
     const u = session.turnUsage;
-    const response: PromptResponse = u.calls > 0
-      ? {
-          stopReason,
-          usage: {
-            totalTokens: u.total,
-            inputTokens: u.input,
-            outputTokens: u.output,
-          },
-        }
-      : { stopReason };
+    const response: PromptResponse =
+      u.calls > 0
+        ? {
+            stopReason,
+            usage: {
+              totalTokens: u.total,
+              inputTokens: u.input,
+              outputTokens: u.output,
+            },
+          }
+        : { stopReason };
     return response;
   }
 
@@ -539,7 +601,9 @@ export class InvoxAgent implements Agent {
         signal: session.abort.signal,
         tools: TOOL_SPECS,
         model: session.selectedModel ?? this.models.defaultModelId,
-        reasoningEffort: thinkingToReasoningEffort(session.configValues.thinking),
+        reasoningEffort: thinkingToReasoningEffort(
+          session.configValues.thinking,
+        ),
       })) {
         if (session.abort.signal.aborted) break;
         switch (delta.kind) {
@@ -670,6 +734,25 @@ export class InvoxAgent implements Agent {
     return { kind: "continue" };
   }
 
+  /**
+   * Run syncWithZedThreads exactly once per agent lifetime.
+   * Called from newSession / loadSession — the two entry points that
+   * carry a cwd.
+   */
+  private maybeSyncZedThreads(cwd: string): void {
+    if (this.syncedZed) return;
+    this.syncedZed = true;
+    try {
+      const store = new SessionStore(cwd);
+      syncWithZedThreads(store.rootDir(), cwd);
+    } catch (e) {
+      log.warn("maybeSyncZedThreads failed", {
+        cwd,
+        error: (e as Error).message,
+      });
+    }
+  }
+
   private persist(session: Session): void {
     if (!session.store) {
       session.store = new SessionStore(session.cwd);
@@ -683,7 +766,9 @@ export class InvoxAgent implements Agent {
       createdAt: session.createdAt,
       updatedAt: Date.now(),
       history: session.history,
-      ...(session.selectedModel ? { selectedModel: session.selectedModel } : {}),
+      ...(session.selectedModel
+        ? { selectedModel: session.selectedModel }
+        : {}),
       ...(Object.keys(session.configValues).length > 0
         ? { configValues: { ...session.configValues } }
         : {}),
@@ -748,7 +833,9 @@ export class InvoxAgent implements Agent {
         // `string` for forward-compat).
         category: "system_prompt",
         type: "select",
-        currentValue: session.configValues.system_prompt ?? this.configs.defaultSystemPromptId,
+        currentValue:
+          session.configValues.system_prompt ??
+          this.configs.defaultSystemPromptId,
         options: this.configs.systemPrompts.map((p) => ({
           value: p.id,
           name: p.name,
@@ -852,7 +939,12 @@ export class InvoxAgent implements Agent {
       sessionId: session.id,
       _meta: {
         "invox/usage": {
-          turn: { input: u.input, output: u.output, total: u.total, calls: u.calls },
+          turn: {
+            input: u.input,
+            output: u.output,
+            total: u.total,
+            calls: u.calls,
+          },
           model,
           contextWindow,
           stopReason,
@@ -1143,10 +1235,16 @@ function startTitleFor(call: ParsedToolCall): string {
  * running (not just after completion). Only the file-touching tools
  * have a meaningful path at call-time.
  */
-function startLocationsFor(call: ParsedToolCall): { path: string }[] | undefined {
+function startLocationsFor(
+  call: ParsedToolCall,
+): { path: string }[] | undefined {
   const parsed = safeParseJSON(call.arguments);
   if (!parsed) return undefined;
-  if (call.name === "read_file" || call.name === "write_file" || call.name === "edit_file") {
+  if (
+    call.name === "read_file" ||
+    call.name === "write_file" ||
+    call.name === "edit_file"
+  ) {
     const p = typeof parsed["path"] === "string" ? parsed["path"].trim() : "";
     if (p) return [{ path: p }];
   }

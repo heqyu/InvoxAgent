@@ -29,6 +29,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import Database from "better-sqlite3";
 import { log } from "./log.js";
 import type { LLMMessage } from "./llm/types.js";
 
@@ -120,6 +121,20 @@ export class SessionStore {
     return existsSync(this.pathFor(sessionId));
   }
 
+  /** Delete a session file from disk. Returns true if deleted, false if not found. */
+  delete(sessionId: string): boolean {
+    const target = this.pathFor(sessionId);
+    try {
+      if (!existsSync(target)) return false;
+      unlinkSync(target);
+      return true;
+    } catch (e) {
+      const err = e as NodeJS.ErrnoException;
+      log.warn("session delete failed", { sessionId, error: err.message });
+      return false;
+    }
+  }
+
   /** Persist a session. Creates parent dirs. Atomic via tmp+rename. */
   save(snapshot: PersistedSession): void {
     const target = this.pathFor(snapshot.id);
@@ -207,6 +222,132 @@ export class SessionStore {
     }
     return pruned;
   }
+}
+
+/**
+ * Locate all Zed `db.sqlite` files under `$LOCALAPPDATA/Zed/db/` (Windows),
+ * `$XDG_DATA_HOME/Zed/db/` (Linux), or
+ * `~/Library/Application Support/Zed/db/` (macOS).
+ *
+ * Returns absolute paths sorted newest-first by mtime.
+ */
+function zedDbPaths(): string[] {
+  const localAppData = process.env["LOCALAPPDATA"];
+  const xdgData = process.env["XDG_DATA_HOME"];
+  const home = process.env["HOME"] ?? process.env["USERPROFILE"];
+
+  const dbDirs: string[] = [];
+  if (localAppData) dbDirs.push(join(localAppData, "Zed", "db"));
+  if (xdgData) dbDirs.push(join(xdgData, "Zed", "db"));
+  if (home) {
+    dbDirs.push(join(home, "Library", "Application Support", "Zed", "db"));
+    dbDirs.push(join(home, ".local", "share", "Zed", "db"));
+  }
+
+  const result: string[] = [];
+  for (const dir of dbDirs) {
+    if (!existsSync(dir)) continue;
+    try {
+      const entries = readdirSync(dir);
+      for (const entry of entries) {
+        const dbFile = join(dir, entry, "db.sqlite");
+        if (existsSync(dbFile)) result.push(dbFile);
+      }
+    } catch {
+      // Skip unreadable directories.
+    }
+  }
+  return result;
+}
+
+/**
+ * Delete session files that Zed no longer tracks.
+ *
+ * Zed stores ACP session IDs in `sidebar_threads.session_id` inside its
+ * per-channel `db.sqlite` databases (e.g. `db/0-stable/db.sqlite`).
+ * When the user archives or deletes a thread, the row is either marked
+ * `archived=1` or removed entirely — but the agent is never notified via
+ * ACP `session/delete`.
+ *
+ * This function cross-references on-disk `.json` session files against
+ * every `sidebar_threads` row whose `folder_paths` contains `cwd`, and
+ * removes any session file whose ID is absent from the database.
+ *
+ * Returns the number of orphaned files deleted.
+ */
+export function syncWithZedThreads(root: string, cwd: string): number {
+  // Collect all session IDs currently on disk.
+  let diskIds: string[];
+  try {
+    diskIds = readdirSync(root)
+      .filter((f) => f.endsWith(".json"))
+      .map((f) => f.replace(/\.json$/, ""));
+  } catch (e) {
+    const err = e as NodeJS.ErrnoException;
+    if (err.code === "ENOENT") return 0;
+    log.warn("syncWithZedThreads: readdir failed", { error: err.message });
+    return 0;
+  }
+
+  if (diskIds.length === 0) return 0;
+
+  // Collect all session_ids known to Zed for this project.
+  const zedSessionIds = new Set<string>();
+  const dbPaths = zedDbPaths();
+
+  for (const dbPath of dbPaths) {
+    try {
+      const db = new Database(dbPath, { readonly: true });
+      try {
+        // sidebar_threads.session_id is the ACP session ID.
+        // folder_paths contains the project root (may be comma-separated).
+        const rows = db
+          .prepare(
+            `SELECT session_id FROM sidebar_threads
+             WHERE session_id IS NOT NULL AND session_id != ''
+               AND folder_paths LIKE ?`,
+          )
+          .all(`%${cwd}%`) as { session_id: string }[];
+        for (const r of rows) zedSessionIds.add(r.session_id);
+      } finally {
+        db.close();
+      }
+    } catch (e) {
+      // Table may not exist in this database — skip silently.
+    }
+  }
+
+  if (zedSessionIds.size === 0) {
+    log.warn("syncWithZedThreads: no Zed threads found", {
+      cwd,
+      dbsScanned: dbPaths.length,
+    });
+    return 0;
+  }
+
+  // Delete sessions whose ID is NOT in Zed's thread list.
+  let deleted = 0;
+  for (const id of diskIds) {
+    if (!zedSessionIds.has(id)) {
+      try {
+        unlinkSync(join(root, `${id}.json`));
+        deleted += 1;
+      } catch {
+        // Best-effort — don't crash on a single failure.
+      }
+    }
+  }
+
+  if (deleted > 0) {
+    log.info("syncWithZedThreads", {
+      cwd,
+      dbsScanned: dbPaths.length,
+      diskIds: diskIds.length,
+      zedIds: zedSessionIds.size,
+      deleted,
+    });
+  }
+  return deleted;
 }
 
 /**

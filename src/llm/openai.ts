@@ -109,10 +109,10 @@ export class OpenAIProvider implements LLMProvider {
       throw err;
     }
 
-    log.debug("llm: stream opened", {
-      callId,
-      elapsedMs: Date.now() - startedAt,
-    });
+    // log.debug("llm: stream opened", {
+    //   callId,
+    //   elapsedMs: Date.now() - startedAt,
+    // });
 
     // tool_call accumulator: index → partial call
     const partials = new Map<
@@ -130,7 +130,11 @@ export class OpenAIProvider implements LLMProvider {
      * also has an empty `choices` array). We capture it here and emit one
      * `LLMDelta { kind: "usage" }` after the stream drains.
      */
-    let usageRaw: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | null = null;
+    let usageRaw: {
+      prompt_tokens?: number;
+      completion_tokens?: number;
+      total_tokens?: number;
+    } | null = null;
 
     try {
       for await (const chunk of stream) {
@@ -138,10 +142,10 @@ export class OpenAIProvider implements LLMProvider {
         const now = Date.now();
         if (firstByteAt === 0) {
           firstByteAt = now;
-          log.debug("llm: first chunk", {
-            callId,
-            ttfbMs: now - startedAt,
-          });
+          // log.debug("llm: first chunk", {
+          //   callId,
+          //   ttfbMs: now - startedAt,
+          // });
         }
         // Stall heuristic: gap > 5s between chunks is unusual for chat
         // completions and worth surfacing.
@@ -203,7 +207,9 @@ export class OpenAIProvider implements LLMProvider {
       ? {
           input: usageRaw.prompt_tokens ?? 0,
           output: usageRaw.completion_tokens ?? 0,
-          total: usageRaw.total_tokens ?? (usageRaw.prompt_tokens ?? 0) + (usageRaw.completion_tokens ?? 0),
+          total:
+            usageRaw.total_tokens ??
+            (usageRaw.prompt_tokens ?? 0) + (usageRaw.completion_tokens ?? 0),
         }
       : null;
 

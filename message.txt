@@ -7,6 +7,7 @@ message 组装：
         ## when receive user message, 根据消息类型做不同的处理
         ### filePath: you should use `Read` tool to read the file content
         ### symbol: 如果有这工具的话 you should use `Symbol` tool to search for the symbol's information.
+        ### image_url: you should use `Image` tool to read the image content and analyze it.
         "
     }，
     {
@@ -23,6 +24,10 @@ message 组装：
             {
                 "type": "image_url",
                 "url": ""
+            },
+            {
+                "type": "symbol",
+                "symbol": ""
             }
         ]
     }
