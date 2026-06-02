@@ -105,7 +105,17 @@ interface Session {
    * the client right before the turn ends as an `agent_thought_chunk`
    * with an `invox/usage` _meta extension.
    */
-  turnUsage: { input: number; output: number; total: number; calls: number };
+  turnUsage: {
+    input: number;
+    output: number;
+    total: number;
+    calls: number;
+    /** Largest prompt_tokens seen in any single LLM call this turn —
+     *  represents the actual context-window footprint (each call re-sends
+     *  the full history, so the sum of prompt_tokens across calls is NOT
+     *  the context usage). */
+    maxPrompt: number;
+  };
 }
 
 /** Configuration injected at construction time describing the model menu the
@@ -872,6 +882,9 @@ export class InvoxAgent implements Agent {
     session.turnUsage.output += usage.output;
     session.turnUsage.total += usage.total;
     session.turnUsage.calls += 1;
+    if (usage.input > session.turnUsage.maxPrompt) {
+      session.turnUsage.maxPrompt = usage.input;
+    }
   }
 
   /**
@@ -908,7 +921,10 @@ export class InvoxAgent implements Agent {
 
     // ── 1. Official usage_update (gated by Zed's acp-beta feature flag) ──
     const contextWindow = contextWindowFor(model);
-    const used = u.input + u.output;
+    // Use maxPrompt as the context footprint — each LLM call re-sends the
+    // full history, so the SUM of prompt_tokens across calls (u.input) is a
+    // billing metric, not the actual context window occupancy.
+    const used = u.maxPrompt + u.output;
     // `usage_update` is a stable SessionUpdate variant in
     // @agentclientprotocol/sdk@0.23. Wire shape matches agent-client-protocol-schema
     // 0.13's UsageUpdate { used, size, cost? }. Zed only renders the
@@ -927,11 +943,13 @@ export class InvoxAgent implements Agent {
     // Format mirrors Zed's native token-meter tooltip ("Context  used / max")
     // so the line is recognizable even rendered as plain text in the
     // "Thinking" block. The 🪙 prefix keeps it grep-friendly.
-    const usedFmt = humanizeTokens(used);
+    const ctxFmt = humanizeTokens(used);
     const sizeFmt = humanizeTokens(contextWindow);
+    const billedFmt = humanizeTokens(u.input);
     const text =
-      `🪙 Context: ${usedFmt} / ${sizeFmt}` +
-      ` · ${u.input} in + ${u.output} out` +
+      `🪙 Context: ${ctxFmt} / ${sizeFmt}` +
+      ` · ${u.maxPrompt} prompt + ${u.output} out` +
+      ` · billed: ${billedFmt} in + ${u.output} out` +
       ` · ${u.calls} call(s)` +
       (partial ? ` · ${stopReason}` : "") +
       ` · model=${model}`;
@@ -944,6 +962,7 @@ export class InvoxAgent implements Agent {
             output: u.output,
             total: u.total,
             calls: u.calls,
+            maxPrompt: u.maxPrompt,
           },
           model,
           contextWindow,
@@ -1269,8 +1288,9 @@ function emptyUsage(): {
   output: number;
   total: number;
   calls: number;
+  maxPrompt: number;
 } {
-  return { input: 0, output: 0, total: 0, calls: 0 };
+  return { input: 0, output: 0, total: 0, calls: 0, maxPrompt: 0 };
 }
 
 /**

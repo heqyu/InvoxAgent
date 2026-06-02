@@ -213,6 +213,9 @@ export class OpenAIProvider implements LLMProvider {
         }
       : null;
 
+    // Always log the RAW usage chunk from the provider so we can cross-check
+    // against the OpenAI dashboard (or any upstream billing portal). This is
+    // the ground-truth data before any Invox mapping/accumulation.
     log.info("llm: response", {
       callId,
       elapsedMs: Date.now() - startedAt,
@@ -221,6 +224,11 @@ export class OpenAIProvider implements LLMProvider {
       textBytes,
       toolCalls: partials.size,
       finishReason,
+      // Raw provider usage (prompt_tokens / completion_tokens / total_tokens)
+      // — compare this against the upstream billing dashboard to verify
+      // whether Invox's displayed numbers are accurate.
+      rawUsage: usageRaw ?? "(provider did not return usage)",
+      // Mapped internal usage (what accumulates into turnUsage).
       ...(usage ? { usage } : {}),
     });
 
