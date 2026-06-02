@@ -18,7 +18,7 @@
 // each gets its own InvoxAgent instance via the cli.ts `onPeer` callback.
 
 import { WebSocketServer, type WebSocket } from "ws";
-import type { AnyMessage, Stream } from "@zed-industries/agent-client-protocol";
+import type { AnyMessage, Stream } from "@agentclientprotocol/sdk";
 import { log } from "../log.js";
 import type { Transport } from "./types.js";
 

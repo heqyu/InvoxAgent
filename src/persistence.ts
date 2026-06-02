@@ -45,6 +45,24 @@ export interface PersistedSession {
   updatedAt: number;
   /** OpenAI-shape conversation history (matches Session.history). */
   history: LLMMessage[];
+  /**
+   * The model the user picked for this session via `setSessionModel`.
+   * Optional and additive — older session JSONs lack this field, in which
+   * case the agent falls back to the default model. Schema version stays
+   * at 1: this is a backward-compatible extension.
+   */
+  selectedModel?: string;
+  /**
+   * Per-session ACP `setSessionConfigOption` values, keyed by configId.
+   * Currently in use:
+   *   - `system_prompt` — id of the active system prompt template
+   *   - `thinking`      — "off" | "low" | "medium" | "high"
+   *
+   * Optional + additive same as `selectedModel`. Unknown keys are
+   * dropped on load (forward-compat — a richer build may have written
+   * keys this build doesn't recognize).
+   */
+  configValues?: Record<string, string>;
 }
 
 const DEFAULT_TTL_DAYS = 30;

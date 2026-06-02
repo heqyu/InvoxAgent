@@ -31,16 +31,24 @@ import {
   type InitializeResponse,
   type LoadSessionRequest,
   type LoadSessionResponse,
+  type ModelInfo,
   type NewSessionRequest,
   type NewSessionResponse,
   type PromptRequest,
   type PromptResponse,
-} from "@zed-industries/agent-client-protocol";
+  type SessionConfigOption,
+  type SessionModelState,
+  type SetSessionConfigOptionRequest,
+  type SetSessionConfigOptionResponse,
+  type SetSessionModelRequest,
+  type SetSessionModelResponse,
+} from "@agentclientprotocol/sdk";
 import { log } from "../log.js";
 import type {
   LLMMessage,
   LLMProvider,
   ParsedToolCall,
+  UsageInfo,
   UserContent,
 } from "../llm/types.js";
 import {
@@ -71,6 +79,70 @@ interface Session {
   toolState: SessionToolState;
   store?: SessionStore;
   createdAt: number;
+  /**
+   * Model id picked via `unstable_setSessionModel`. Undefined → fall back
+   * to the agent's default model (the first entry of `availableModels`,
+   * which is itself derived from `INVOX_MODEL`).
+   */
+  selectedModel?: string;
+  /**
+   * Per-session configuration option values, keyed by configId. Drives
+   * the dropdowns surfaced via ACP `setSessionConfigOption`. Values are
+   * always strings (we only emit `select` kinds for now).
+   *
+   * Reserved keys (managed by InvoxAgent, see DEFAULT_CONFIG_IDS):
+   *   - "system_prompt" — id of the active system prompt template
+   *   - "thinking"      — "off" | "low" | "medium" | "high" (mapped to
+   *                        OpenAI's reasoning_effort field at request time)
+   */
+  configValues: Record<string, string>;
+  /**
+   * Token accounting accumulated across all LLM calls within the current
+   * `prompt()` turn. Reset at the top of every prompt() call. Surfaced to
+   * the client right before the turn ends as an `agent_thought_chunk`
+   * with an `invox/usage` _meta extension.
+   */
+  turnUsage: { input: number; output: number; total: number; calls: number };
+}
+
+/** Configuration injected at construction time describing the model menu the
+ *  user can choose from in their client. The first entry is the default. */
+export interface AgentModelConfig {
+  /** Models advertised to the client. MUST be non-empty. */
+  available: ModelInfo[];
+  /** Default model id; must appear in `available`. Used when a session has
+   *  not yet pinned a model via `setSessionModel`. */
+  defaultModelId: string;
+}
+
+/**
+ * One row in the system-prompt menu rendered as an ACP `select`-kind
+ * `SessionConfigOption` (id="system_prompt"). Picking a row replaces
+ * `Session.history[0]` with `prompt`.
+ */
+export interface SystemPromptDef {
+  /** Unique stable id; used as the SessionConfigSelectOption.value. */
+  id: string;
+  /** Human-readable label rendered in the dropdown. */
+  name: string;
+  /** Optional description shown as hover text by the client. */
+  description?: string;
+  /** The actual text injected as the `system` message at history[0]. */
+  prompt: string;
+}
+
+/**
+ * Bundles every dropdown invox advertises beyond the model selector.
+ * Currently: system-prompt template + thinking/reasoning level.
+ *
+ * The thinking option is hard-coded (off/low/medium/high mapping to
+ * OpenAI's `reasoning_effort`) — there's no env knob because the values
+ * are fixed by the upstream API surface.
+ */
+export interface AgentConfigOptions {
+  systemPrompts: SystemPromptDef[];
+  /** Must be one of `systemPrompts[*].id`. */
+  defaultSystemPromptId: string;
 }
 
 export class InvoxAgent implements Agent {
@@ -79,15 +151,56 @@ export class InvoxAgent implements Agent {
   private sessions = new Map<string, Session>();
   private provider: LLMProvider;
   private policy: PermissionPolicy;
+  private models: AgentModelConfig;
+  private availableModelIds: Set<string>;
+  private configs: AgentConfigOptions;
+  private systemPromptById: Map<string, SystemPromptDef>;
 
   constructor(
     conn: AgentSideConnection,
     provider: LLMProvider,
     policy: PermissionPolicy = "never",
+    models?: AgentModelConfig,
+    configs?: AgentConfigOptions,
   ) {
     this.conn = conn;
     this.provider = provider;
     this.policy = policy;
+    // Sensible fallback when callers (e.g. unit tests) don't pass a config:
+    // synthesize a single-entry menu from the provider name so types stay
+    // coherent. CLI always passes a real config.
+    this.models =
+      models && models.available.length > 0
+        ? models
+        : {
+            available: [{ modelId: provider.name, name: provider.name }],
+            defaultModelId: provider.name,
+          };
+    this.availableModelIds = new Set(this.models.available.map((m) => m.modelId));
+    if (!this.availableModelIds.has(this.models.defaultModelId)) {
+      // Defensive: ensure default is reachable. Not expected to fire in
+      // normal use because cli.ts unshifts the default.
+      this.availableModelIds.add(this.models.defaultModelId);
+    }
+
+    // configs default: the original SYSTEM_PROMPT as a single "default" row.
+    // CLI always passes a richer config, but unit tests can omit.
+    this.configs =
+      configs && configs.systemPrompts.length > 0
+        ? configs
+        : {
+            systemPrompts: [
+              { id: "default", name: "Default", prompt: DEFAULT_SYSTEM_PROMPT },
+            ],
+            defaultSystemPromptId: "default",
+          };
+    this.systemPromptById = new Map(this.configs.systemPrompts.map((p) => [p.id, p]));
+    if (!this.systemPromptById.has(this.configs.defaultSystemPromptId)) {
+      // Same defensive fallback as availableModelIds: surface a sane default
+      // if the caller's config disagrees with itself.
+      const first = this.configs.systemPrompts[0]!;
+      this.configs.defaultSystemPromptId = first.id;
+    }
   }
 
   async initialize(params: InitializeRequest): Promise<InitializeResponse> {
@@ -124,19 +237,30 @@ export class InvoxAgent implements Agent {
 
   async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
     const id = randomUUID();
-    this.sessions.set(id, {
+    const defaultPromptId = this.configs.defaultSystemPromptId;
+    const session: Session = {
       id,
       cwd: params.cwd,
-      history: [SYSTEM_MESSAGE],
+      history: [systemMessageForPrompt(this.systemPromptById.get(defaultPromptId)!.prompt)],
       abort: new AbortController(),
       toolState: {
         readPaths: new Set<string>(),
         cache: new FileCache(),
       },
       createdAt: Date.now(),
-    });
+      configValues: {
+        system_prompt: defaultPromptId,
+        thinking: "off",
+      },
+      turnUsage: emptyUsage(),
+    };
+    this.sessions.set(id, session);
     log.info("session created", { id, cwd: params.cwd });
-    return { sessionId: id };
+    return {
+      sessionId: id,
+      models: this.modelStateFor(session),
+      configOptions: this.configOptionsFor(session),
+    };
   }
 
   async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
@@ -152,7 +276,27 @@ export class InvoxAgent implements Agent {
       sessionId: snapshot.id,
       historyLen: snapshot.history.length,
       cwd: params.cwd,
+      selectedModel: snapshot.selectedModel,
+      configValues: snapshot.configValues,
     });
+
+    // Restore configValues, dropping any keys whose values are no longer
+    // valid (e.g. user narrowed INVOX_PROMPT_TEMPLATES_FILE since last save).
+    const restoredConfigValues: Record<string, string> = {
+      system_prompt: this.configs.defaultSystemPromptId,
+      thinking: "off",
+    };
+    if (snapshot.configValues) {
+      for (const [k, v] of Object.entries(snapshot.configValues)) {
+        if (k === "system_prompt" && this.systemPromptById.has(v)) {
+          restoredConfigValues[k] = v;
+        } else if (k === "thinking" && THINKING_VALUES.has(v)) {
+          restoredConfigValues[k] = v;
+        }
+        // Unknown configIds are silently dropped — forward-compat for old
+        // clients that wrote values from a richer build.
+      }
+    }
 
     const session: Session = {
       id: snapshot.id,
@@ -165,11 +309,130 @@ export class InvoxAgent implements Agent {
       },
       store,
       createdAt: snapshot.createdAt,
+      // Restore the picked model only if the disk value still appears in our
+      // current menu. If the user has since narrowed INVOX_MODELS, fall
+      // through to default rather than honor an unavailable id.
+      selectedModel:
+        snapshot.selectedModel && this.availableModelIds.has(snapshot.selectedModel)
+          ? snapshot.selectedModel
+          : undefined,
+      configValues: restoredConfigValues,
+      turnUsage: emptyUsage(),
     };
     this.sessions.set(session.id, session);
 
     await this.replayHistory(session);
+    return {
+      models: this.modelStateFor(session),
+      configOptions: this.configOptionsFor(session),
+    };
+  }
+
+  /**
+   * Handle ACP `session/set_model`. Renamed to `unstable_setSessionModel`
+   * in the @agentclientprotocol/sdk@0.23 API (the protocol method name on
+   * the wire is unchanged; only the JS handler name carries the
+   * `unstable_` prefix because the spec still gates this behind
+   * `unstable_session_model`).
+   */
+  async unstable_setSessionModel(
+    params: SetSessionModelRequest,
+  ): Promise<SetSessionModelResponse> {
+    const session = this.sessions.get(params.sessionId);
+    if (!session) throw new Error(`unknown sessionId: ${params.sessionId}`);
+    if (!this.availableModelIds.has(params.modelId)) {
+      throw new Error(
+        `unknown modelId: ${params.modelId} (available: ${[...this.availableModelIds].join(", ")})`,
+      );
+    }
+    session.selectedModel = params.modelId;
+    log.info("setSessionModel", {
+      sessionId: session.id,
+      modelId: params.modelId,
+    });
+    // Persist immediately so a crash before the next prompt() doesn't lose
+    // the user's choice.
+    this.persist(session);
     return {};
+  }
+
+  /**
+   * Handle ACP `session/set_config_option`. Powers the custom dropdowns
+   * advertised via NewSessionResponse.configOptions:
+   *
+   *   - `system_prompt` — replaces `Session.history[0]` with the chosen
+   *     template's prompt. Existing user/assistant messages remain
+   *     unchanged; the new prompt only influences turns that haven't
+   *     started yet (next user message onward).
+   *
+   *   - `thinking` — stored as a string; the value is mapped to OpenAI's
+   *     `reasoning_effort` field at request time in `runOneIteration`.
+   *
+   * Per ACP spec the response carries the FULL refreshed list — even if
+   * only one option changed — so the client can re-render the whole
+   * toolbar without a separate notification. We also persist immediately
+   * to survive a crash before the next prompt().
+   */
+  async setSessionConfigOption(
+    params: SetSessionConfigOptionRequest,
+  ): Promise<SetSessionConfigOptionResponse> {
+    const session = this.sessions.get(params.sessionId);
+    if (!session) throw new Error(`unknown sessionId: ${params.sessionId}`);
+
+    // We only emit `select`-kind options, so the value MUST be a string.
+    // The protocol's union admits `boolean` too, but rejecting it here
+    // keeps the failure mode loud rather than silently coercing.
+    if (typeof params.value !== "string") {
+      throw new Error(
+        `configId ${params.configId}: only string-valued (select) options are supported`,
+      );
+    }
+    const value: string = params.value;
+
+    if (params.configId === "model") {
+      // Re-expose model switching through the config option path so it
+      // works when configOptions replaces the native model_selector in Zed's
+      // toolbar (they're mutually exclusive — see thread_view.rs:3811).
+      if (!this.availableModelIds.has(value)) {
+        throw new Error(
+          `unknown model value: ${value} (available: ${[...this.availableModelIds].join(", ")})`,
+        );
+      }
+      session.selectedModel = value;
+      // Reflect the change in configValues so configOptionsFor() returns
+      // the new currentValue immediately.
+      session.configValues.model = value;
+    } else if (params.configId === "system_prompt") {
+      const def = this.systemPromptById.get(value);
+      if (!def) {
+        throw new Error(
+          `unknown system_prompt value: ${value} (available: ${[...this.systemPromptById.keys()].join(", ")})`,
+        );
+      }
+      session.configValues.system_prompt = value;
+      // Replace history[0] in place — by construction of newSession /
+      // loadSession that slot is always a system message.
+      session.history[0] = systemMessageForPrompt(def.prompt);
+    } else if (params.configId === "thinking") {
+      if (!THINKING_VALUES.has(value)) {
+        throw new Error(
+          `unknown thinking value: ${value} (allowed: ${[...THINKING_VALUES].join(", ")})`,
+        );
+      }
+      session.configValues.thinking = value;
+    } else {
+      throw new Error(`unknown configId: ${params.configId}`);
+    }
+
+    log.info("setSessionConfigOption", {
+      sessionId: session.id,
+      configId: params.configId,
+      value,
+    });
+    this.persist(session);
+    return {
+      configOptions: this.configOptionsFor(session),
+    };
   }
 
   async prompt(params: PromptRequest): Promise<PromptResponse> {
@@ -177,12 +440,16 @@ export class InvoxAgent implements Agent {
     if (!session) throw new Error(`unknown sessionId: ${params.sessionId}`);
 
     session.abort = new AbortController();
+    // Reset turn-level token accounting. We deliberately do NOT carry usage
+    // across turns — the per-turn box matches what the user just asked for.
+    session.turnUsage = emptyUsage();
 
     const userContent = buildUserContent(params.prompt);
     log.info("prompt received", {
       sessionId: session.id,
       userText: userContentPreview(userContent),
       historyLen: session.history.length,
+      model: session.selectedModel ?? this.models.defaultModelId,
     });
     session.history.push({ role: "user", content: userContent });
 
@@ -205,9 +472,38 @@ export class InvoxAgent implements Agent {
         log.warn("prompt: hit max iterations", { sessionId: session.id, max });
       }
     } finally {
+      // Always emit a usage summary (even on cancel / max iterations) so the
+      // user sees what the partial turn cost. Best-effort: a failure to send
+      // must not hide the underlying stopReason.
+      try {
+        await this.reportTurnUsage(session, stopReason);
+      } catch (err) {
+        log.warn(
+          "prompt: usage report failed",
+          err instanceof Error ? err.message : String(err),
+        );
+      }
       this.persist(session);
     }
-    return { stopReason };
+    // Build a PromptResponse with the optional `usage` field. In
+    // @agentclientprotocol/sdk@0.23 this is a typed field on PromptResponse
+    // (used to require an `as unknown as` cast under the deprecated
+    // @zed-industries package). Zed's acp_thread.rs:2504 pulls these
+    // tokens into thread.token_usage when AcpBetaFeatureFlag is on,
+    // redundantly with the SessionUpdate::UsageUpdate path. Carrying
+    // both maximizes the chance the bottom-bar token chip lights up.
+    const u = session.turnUsage;
+    const response: PromptResponse = u.calls > 0
+      ? {
+          stopReason,
+          usage: {
+            totalTokens: u.total,
+            inputTokens: u.input,
+            outputTokens: u.output,
+          },
+        }
+      : { stopReason };
+    return response;
   }
 
   async cancel(_params: CancelNotification): Promise<void> {
@@ -242,6 +538,8 @@ export class InvoxAgent implements Agent {
         messages: session.history,
         signal: session.abort.signal,
         tools: TOOL_SPECS,
+        model: session.selectedModel ?? this.models.defaultModelId,
+        reasoningEffort: thinkingToReasoningEffort(session.configValues.thinking),
       })) {
         if (session.abort.signal.aborted) break;
         switch (delta.kind) {
@@ -259,6 +557,9 @@ export class InvoxAgent implements Agent {
             break;
           case "tool_call":
             toolCalls.push(delta.call);
+            break;
+          case "usage":
+            this.accumulateUsage(session, delta.usage);
             break;
           case "finish":
             finishReason = delta.reason;
@@ -382,8 +683,186 @@ export class InvoxAgent implements Agent {
       createdAt: session.createdAt,
       updatedAt: Date.now(),
       history: session.history,
+      ...(session.selectedModel ? { selectedModel: session.selectedModel } : {}),
+      ...(Object.keys(session.configValues).length > 0
+        ? { configValues: { ...session.configValues } }
+        : {}),
     };
     session.store.save(snapshot);
+  }
+
+  /** Build the SessionModelState handed back on session/new + session/load. */
+  private modelStateFor(session: Session): SessionModelState {
+    return {
+      availableModels: this.models.available,
+      currentModelId: session.selectedModel ?? this.models.defaultModelId,
+    };
+  }
+
+  /**
+   * Build the SessionConfigOption[] surfaced on session/new and
+   * session/load — these are what the client's bottom toolbar renders as
+   * extra dropdowns (e.g. "System Prompt", "Thinking").
+   *
+   * Categories: `system_prompt` is given as `other` (the spec-reserved
+   * "system_prompt" category isn't on the wire enum yet); `thinking`
+   * uses the spec-defined `thought_level` category so clients can pick
+   * a matching icon.
+   */
+  private configOptionsFor(session: Session): SessionConfigOption[] {
+    const opts: SessionConfigOption[] = [];
+
+    // ── Model selector ────────────────────────────────────────────────────
+    // When configOptions is populated, Zed's bottom toolbar switches from
+    // the native model_selector to config_options_view (they're mutually
+    // exclusive in thread_view.rs). We therefore re-expose model selection
+    // as a first-class `SessionConfigOption` with category "model" so the
+    // user doesn't lose the ability to switch models.
+    if (this.models.available.length > 1) {
+      opts.push({
+        id: "model",
+        name: "Model",
+        description: "LLM model used for the next turn.",
+        category: "model",
+        type: "select",
+        // Derive from selectedModel so both paths (setSessionConfigOption
+        // and unstable_setSessionModel) stay in sync.
+        currentValue: session.selectedModel ?? this.models.defaultModelId,
+        options: this.models.available.map((m) => ({
+          value: m.modelId,
+          name: m.name ?? m.modelId,
+        })),
+      });
+    }
+
+    // ── System Prompt selector ────────────────────────────────────────────
+    // Only advertise when there is actually a choice to make; a single-
+    // template install would just clutter the UI.
+    if (this.configs.systemPrompts.length > 1) {
+      opts.push({
+        id: "system_prompt",
+        name: "System Prompt",
+        description: "Switch the system prompt template for the next turn.",
+        // ACP's stable categories are `mode` / `model` / `thought_level`;
+        // `system_prompt` falls through to free-form (the union admits
+        // `string` for forward-compat).
+        category: "system_prompt",
+        type: "select",
+        currentValue: session.configValues.system_prompt ?? this.configs.defaultSystemPromptId,
+        options: this.configs.systemPrompts.map((p) => ({
+          value: p.id,
+          name: p.name,
+          ...(p.description ? { description: p.description } : {}),
+        })),
+      });
+    }
+
+    // ── Thinking / reasoning level ────────────────────────────────────────
+    opts.push({
+      id: "thinking",
+      name: "Thinking",
+      description:
+        "Reasoning effort sent to the upstream model (OpenAI: reasoning_effort). " +
+        "Off disables thinking entirely; higher values cost more tokens but produce better answers on complex tasks.",
+      category: "thought_level",
+      type: "select",
+      currentValue: session.configValues.thinking ?? "off",
+      options: [
+        { value: "off", name: "Off", description: "No reasoning effort." },
+        { value: "low", name: "Low" },
+        { value: "medium", name: "Medium" },
+        { value: "high", name: "High" },
+      ],
+    });
+
+    return opts;
+  }
+
+  /** Merge one provider-reported usage block into the session's per-turn
+   *  totals. Called from runOneIteration on `usage` deltas. */
+  private accumulateUsage(session: Session, usage: UsageInfo): void {
+    session.turnUsage.input += usage.input;
+    session.turnUsage.output += usage.output;
+    session.turnUsage.total += usage.total;
+    session.turnUsage.calls += 1;
+  }
+
+  /**
+   * Send the per-turn token usage report.
+   *
+   * **Two channels at once** for maximum compatibility:
+   *
+   * 1. `usage_update` — the official ACP variant from
+   *    `agent-client-protocol-schema@0.13`'s `unstable_session_usage`
+   *    feature. Zed renders this as a small chip next to the model dropdown
+   *    (the UI shown in the user's screenshot) when the `acp-beta`
+   *    feature flag is on. Schema:
+   *    `{ sessionUpdate: "usage_update", used, size, cost? }`.
+   *    The npm package `@zed-industries/agent-client-protocol@0.4.5`
+   *    doesn't have this variant in its TS union yet, so we cast through
+   *    `unknown` — the wire format is stable JSON and Zed's
+   *    `acp_thread.rs` SessionUpdate::UsageUpdate handler picks it up.
+   *
+   * 2. `agent_thought_chunk` (with `_meta.invox/usage`) — the legacy
+   *    fallback. Zed renders this in the collapsed "Thinking" block, so
+   *    the user sees the count even with `acp-beta` off.
+   *
+   * Both are silenced when the provider didn't yield usage at all
+   * (e.g. EchoProvider).
+   */
+  private async reportTurnUsage(
+    session: Session,
+    stopReason: "end_turn" | "cancelled" | "max_turn_requests",
+  ): Promise<void> {
+    const u = session.turnUsage;
+    if (u.calls === 0) return;
+    const model = session.selectedModel ?? this.models.defaultModelId;
+    const partial = stopReason !== "end_turn";
+
+    // ── 1. Official usage_update (gated by Zed's acp-beta feature flag) ──
+    const contextWindow = contextWindowFor(model);
+    const used = u.input + u.output;
+    // `usage_update` is a stable SessionUpdate variant in
+    // @agentclientprotocol/sdk@0.23. Wire shape matches agent-client-protocol-schema
+    // 0.13's UsageUpdate { used, size, cost? }. Zed only renders the
+    // resulting token chip when the `acp-beta` feature flag is on, but
+    // sending it is harmless when the flag is off (silently dropped).
+    await this.conn.sessionUpdate({
+      sessionId: session.id,
+      update: {
+        sessionUpdate: "usage_update",
+        used,
+        size: contextWindow,
+      },
+    });
+
+    // ── 2. Visible-today fallback: agent_thought_chunk + _meta extension ──
+    // Format mirrors Zed's native token-meter tooltip ("Context  used / max")
+    // so the line is recognizable even rendered as plain text in the
+    // "Thinking" block. The 🪙 prefix keeps it grep-friendly.
+    const usedFmt = humanizeTokens(used);
+    const sizeFmt = humanizeTokens(contextWindow);
+    const text =
+      `🪙 Context: ${usedFmt} / ${sizeFmt}` +
+      ` · ${u.input} in + ${u.output} out` +
+      ` · ${u.calls} call(s)` +
+      (partial ? ` · ${stopReason}` : "") +
+      ` · model=${model}`;
+    await this.conn.sessionUpdate({
+      sessionId: session.id,
+      _meta: {
+        "invox/usage": {
+          turn: { input: u.input, output: u.output, total: u.total, calls: u.calls },
+          model,
+          contextWindow,
+          stopReason,
+        },
+      },
+      update: {
+        sessionUpdate: "agent_thought_chunk",
+        content: { type: "text", text },
+      },
+    });
   }
 
   private async replayHistory(session: Session): Promise<void> {
@@ -465,7 +944,12 @@ export class InvoxAgent implements Agent {
 
 // ── System message ───────────────────────────────────────────────────
 
-const SYSTEM_PROMPT =
+/**
+ * The built-in default system prompt — used when no `INVOX_PROMPT_TEMPLATES_FILE`
+ * is configured, or as the `default` entry of any custom template list. Kept
+ * exported so cli.ts can stitch it into DEFAULT_SYSTEM_PROMPTS.
+ */
+export const DEFAULT_SYSTEM_PROMPT =
   `You are a helpful coding assistant embedded in Zed (a code editor).\n` +
   `\n` +
   `When the user sends a message you may receive multiple content blocks:\n` +
@@ -475,10 +959,29 @@ const SYSTEM_PROMPT =
   `\n` +
   `Always prefer using tools to answer questions about the codebase. ` +
   `If a file is referenced but not yet read, read it first.`;
-const SYSTEM_MESSAGE: LLMMessage = {
-  role: "system",
-  content: SYSTEM_PROMPT,
-};
+
+/** Build the OpenAI-shape system message for a given prompt body. */
+function systemMessageForPrompt(prompt: string): LLMMessage {
+  return { role: "system", content: prompt };
+}
+
+/** Allowed values for the `thinking` config option. Must match the
+ *  options advertised in `configOptionsFor`. */
+const THINKING_VALUES = new Set(["off", "low", "medium", "high"]);
+
+/**
+ * Map the user-facing `thinking` value to the OpenAI SDK's
+ * `reasoning_effort` enum. "off" means no reasoning at all (yields
+ * undefined so the field is omitted from the request); the rest pass
+ * through verbatim.
+ */
+function thinkingToReasoningEffort(
+  value: string | undefined,
+): "minimal" | "low" | "medium" | "high" | "none" | undefined {
+  if (!value || value === "off") return undefined;
+  if (value === "low" || value === "medium" || value === "high") return value;
+  return undefined;
+}
 
 // ── Prompt content builder ──────────────────────────────────────────
 
@@ -661,3 +1164,114 @@ function isAbort(err: unknown): boolean {
   if (err instanceof Error && /aborted/i.test(err.message)) return true;
   return false;
 }
+
+/** Fresh per-turn token accumulator. */
+function emptyUsage(): {
+  input: number;
+  output: number;
+  total: number;
+  calls: number;
+} {
+  return { input: 0, output: 0, total: 0, calls: 0 };
+}
+
+/**
+ * Render an integer token count the way Zed does in its token-meter tooltip:
+ * "1234" → "1.2k", "1234567" → "1.2M". Shorter than the raw number, easier
+ * to scan inside a single-line thought chunk.
+ */
+function humanizeTokens(n: number): string {
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) {
+    const k = n / 1000;
+    return k >= 100 ? `${Math.round(k)}k` : `${k.toFixed(1)}k`;
+  }
+  const m = n / 1_000_000;
+  return m >= 100 ? `${Math.round(m)}M` : `${m.toFixed(1)}M`;
+}
+
+/**
+ * Best-effort context-window lookup for a model id. Used as the `size` field
+ * on the ACP `usage_update` notification (matches the rendering
+ * `Input: <used> / <size>` in clients like Zed).
+ *
+ * Resolution order:
+ *   1. `INVOX_CONTEXT_WINDOW_<MODELID>` env (uppercased, dots/dashes/slashes
+ *      → underscores). Lets users override per model — e.g. for
+ *      `qwen/qwen3-coder-30b` set `INVOX_CONTEXT_WINDOW_QWEN_QWEN3_CODER_30B=131072`.
+ *   2. `INVOX_CONTEXT_WINDOW_DEFAULT` env — fallback for unknown ids.
+ *   3. A small built-in table for popular families (gpt-4o, deepseek, qwen, …).
+ *   4. Final fallback: 128_000 (~ what most current frontier models offer;
+ *      better than 0 which would make Zed render "0/0").
+ *
+ * Returns a u64-safe integer.
+ */
+function contextWindowFor(modelId: string): number {
+  // 1. Per-model env override
+  const envKey = `INVOX_CONTEXT_WINDOW_${modelId.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`;
+  const envOverride = process.env[envKey];
+  if (envOverride) {
+    const n = Number.parseInt(envOverride, 10);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  // 2. Global default override
+  const defaultEnv = process.env["INVOX_CONTEXT_WINDOW_DEFAULT"];
+  if (defaultEnv) {
+    const n = Number.parseInt(defaultEnv, 10);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  // 3. Built-in heuristics. Order matters — first match wins.
+  const id = modelId.toLowerCase();
+  for (const [pattern, size] of CONTEXT_WINDOW_TABLE) {
+    if (id.includes(pattern)) return size;
+  }
+  // 4. Final fallback. 128k is a safe modern default that won't make Zed
+  // render a meaningless `used / 0` ratio.
+  return 128_000;
+}
+
+/**
+ * Substring → context-window pairs. We match by substring rather than exact
+ * id so user-supplied display names (e.g. "qwen/qwen3-coder-30b") still
+ * resolve. Sizes are vendor-published max context for the family.
+ */
+const CONTEXT_WINDOW_TABLE: ReadonlyArray<readonly [string, number]> = [
+  // OpenAI
+  ["gpt-4o-mini", 128_000],
+  ["gpt-4o", 128_000],
+  ["gpt-4.1", 1_000_000],
+  ["gpt-4-turbo", 128_000],
+  ["gpt-4", 8_192],
+  ["gpt-3.5", 16_385],
+  ["o1-mini", 128_000],
+  ["o1", 200_000],
+  ["o3-mini", 200_000],
+  ["o3", 200_000],
+  // Anthropic (via OAI-compat proxies)
+  ["claude-3-5-sonnet", 200_000],
+  ["claude-3-5-haiku", 200_000],
+  ["claude-3-opus", 200_000],
+  ["claude-sonnet-4", 200_000],
+  ["claude-opus-4", 200_000],
+  ["claude", 200_000],
+  // Open weights — common deployments
+  ["deepseek-r1", 128_000],
+  ["deepseek-v3", 128_000],
+  ["deepseek-coder", 128_000],
+  ["deepseek", 128_000],
+  ["qwen3-coder", 256_000],
+  ["qwen3", 128_000],
+  ["qwen2.5", 128_000],
+  ["qwen", 128_000],
+  ["llama-3.3", 128_000],
+  ["llama-3.1", 128_000],
+  ["llama", 8_192],
+  // Xiaomi MiMo. v2.5 / v2.5-pro both ship 1M tokens; the older 7B-RL series
+  // is 32k. Match the v2.5 family first by substring.
+  ["mimo-v2.5", 1_000_000],
+  ["mimo", 32_768],
+  ["mistral-large", 128_000],
+  ["mistral", 32_768],
+  ["gemini-2", 1_000_000],
+  ["gemini", 1_000_000],
+];

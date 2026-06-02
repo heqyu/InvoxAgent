@@ -25,7 +25,7 @@ import {
   ClientSideConnection,
   type Client,
   type SessionNotification,
-} from "@zed-industries/agent-client-protocol";
+} from "@agentclientprotocol/sdk";
 import { Readable, Writable } from "node:stream";
 
 const here = dirname(fileURLToPath(import.meta.url));

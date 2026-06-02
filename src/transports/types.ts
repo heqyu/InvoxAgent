@@ -15,7 +15,7 @@
 // one peer (the launching client), but ws has 0..N. The `onPeer` callback
 // is the unified shape that handles both.
 
-import type { Stream } from "@zed-industries/agent-client-protocol";
+import type { Stream } from "@agentclientprotocol/sdk";
 
 export interface Transport {
   readonly name: "stdio" | "ws";

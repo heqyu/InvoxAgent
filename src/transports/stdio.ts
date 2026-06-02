@@ -10,8 +10,8 @@
 // that `ndJsonStream` consumes. No manual byte-pump loop, no chunk-boundary bugs.
 
 import { Readable, Writable } from "node:stream";
-import { ndJsonStream } from "@zed-industries/agent-client-protocol";
-import type { Stream } from "@zed-industries/agent-client-protocol";
+import { ndJsonStream } from "@agentclientprotocol/sdk";
+import type { Stream } from "@agentclientprotocol/sdk";
 import { log } from "../log.js";
 import type { Transport } from "./types.js";
 

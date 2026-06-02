@@ -5,7 +5,7 @@ import type {
   ClientCapabilities,
   ToolCallContent,
   ToolCallLocation,
-} from "@zed-industries/agent-client-protocol";
+} from "@agentclientprotocol/sdk";
 import type { ToolSpec } from "../llm/types.js";
 import type { FileCache } from "./cache.js";
 

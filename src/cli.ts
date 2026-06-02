@@ -6,11 +6,18 @@
 //
 // Hard rule: nothing here writes to stdout. The stdio transport owns stdout for JSON-RPC.
 
-import { AgentSideConnection } from "@zed-industries/agent-client-protocol";
+import { AgentSideConnection } from "@agentclientprotocol/sdk";
+import type { ModelInfo } from "@agentclientprotocol/sdk";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { InvoxAgent } from "./agent/agent.js";
+import {
+  DEFAULT_SYSTEM_PROMPT,
+  InvoxAgent,
+  type AgentConfigOptions,
+  type AgentModelConfig,
+  type SystemPromptDef,
+} from "./agent/agent.js";
 import { EchoProvider } from "./llm/echo.js";
 import { MockToolProvider } from "./llm/mock-tools.js";
 import { OpenAIProvider } from "./llm/openai.js";
@@ -94,10 +101,12 @@ FLAGS:
   -h, --help       Print this help and exit
 
 ENVIRONMENT:
-  INVOX_LOG        silent | error | warn | info | debug   (default: info)
-  INVOX_BASE_URL   OpenAI-compatible base URL              (stage 2+)
-  INVOX_MODEL      Model name to send to provider          (stage 2+)
-  INVOX_API_KEY    Provider API key                        (stage 2+)
+  INVOX_LOG                       silent | error | warn | info | debug   (default: info)
+  INVOX_BASE_URL                  OpenAI-compatible base URL                              (stage 2+)
+  INVOX_MODEL                     Default model name passed to provider                   (stage 2+)
+  INVOX_MODELS                    Comma-separated selectable models                       (stage 8+)
+  INVOX_API_KEY                   Provider API key                                        (stage 2+)
+  INVOX_PROMPT_TEMPLATES_FILE     Path to JSON file of system-prompt templates            (stage 9+)
 `,
   );
 }
@@ -117,12 +126,18 @@ async function main(): Promise<void> {
 
   const provider = pickProvider();
   const policy = pickPolicy();
+  const models = pickModels();
+  const configs = pickConfigOptions();
   log.info("starting", {
     name,
     version,
     provider: provider.name,
     policy,
     transports: [...args.transports],
+    defaultModel: models.defaultModelId,
+    availableModels: models.available.map((m) => m.modelId),
+    systemPrompts: configs.systemPrompts.map((p) => p.id),
+    defaultSystemPrompt: configs.defaultSystemPromptId,
   });
 
   const transports: Transport[] = [];
@@ -137,7 +152,10 @@ async function main(): Promise<void> {
   await Promise.all(
     transports.map((t) =>
       t.start((peer) => {
-        new AgentSideConnection((conn) => new InvoxAgent(conn, provider, policy), peer);
+        new AgentSideConnection(
+          (conn) => new InvoxAgent(conn, provider, policy, models, configs),
+          peer,
+        );
         // The connection auto-runs once constructed. We hold no reference here
         // because the package keeps it alive via the stream readers.
       }),
@@ -205,6 +223,134 @@ function pickPolicy(): PermissionPolicy {
   if (raw === "writes" || raw === "always" || raw === "never") return raw;
   log.warn(`unknown INVOX_PERMISSIONS=${raw}, defaulting to "never"`);
   return "never";
+}
+
+/**
+ * Build the model menu advertised to ACP clients.
+ *
+ * Sources (priority order):
+ *   - INVOX_MODELS=id1,id2,id3   — comma-separated user-curated list
+ *   - INVOX_MODEL                — falls back as the only / default entry
+ *   - hard-coded "gpt-4o-mini"   — final fallback so the menu is never empty
+ *
+ * Rule: the default model is ALWAYS included in the menu (unshifted to the
+ * front if missing). Otherwise a Zed user could land on a session whose
+ * "currentModelId" isn't in availableModels and the dropdown would render
+ * blank.
+ *
+ * Naming: `name` shown in the dropdown defaults to the modelId; we keep them
+ * identical because OAI-compat providers don't surface friendly names. Users
+ * who want a polished label can redefine via separate config later.
+ */
+function pickModels(): AgentModelConfig {
+  const fallback = process.env["INVOX_MODEL"] ?? "gpt-4o-mini";
+  const raw = process.env["INVOX_MODELS"] ?? fallback;
+  const ids = raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  if (!ids.includes(fallback)) ids.unshift(fallback);
+  const available: ModelInfo[] = ids.map((id) => ({ modelId: id, name: id }));
+  return { available, defaultModelId: fallback };
+}
+
+/**
+ * Build the AgentConfigOptions surfaced as ACP `setSessionConfigOption`
+ * dropdowns. Today this is the System Prompt template selector
+ * (the Thinking dropdown is hard-coded inside InvoxAgent — its values
+ * are dictated by the OpenAI `reasoning_effort` enum).
+ *
+ * Source order:
+ *   1. `INVOX_PROMPT_TEMPLATES_FILE` — JSON array of `SystemPromptDef`s.
+ *      Wins when present and parses cleanly.
+ *   2. Built-in 3-template menu (default / concise / review).
+ *
+ * Failure modes (file missing, malformed JSON, empty array) all warn
+ * and fall through to the built-in defaults rather than aborting startup.
+ */
+function pickConfigOptions(): AgentConfigOptions {
+  const systemPrompts = loadPromptTemplates();
+  const defaultId = systemPrompts[0]!.id; // Non-null: load() always returns ≥ 1 entry.
+  return {
+    systemPrompts,
+    defaultSystemPromptId: defaultId,
+  };
+}
+
+const BUILTIN_SYSTEM_PROMPTS: SystemPromptDef[] = [
+  {
+    id: "default",
+    name: "Default",
+    description: "Helpful coding assistant — uses tools first, explains after.",
+    prompt: DEFAULT_SYSTEM_PROMPT,
+  },
+  {
+    id: "concise",
+    name: "Concise",
+    description: "Brief responses with minimal narration.",
+    prompt:
+      `You are a coding assistant in Zed. Be brief.\n` +
+      `Use tools first; explain only when asked. Reply in 1-3 sentences unless code is required.`,
+  },
+  {
+    id: "review",
+    name: "Strict Review",
+    description: "Adversarial code reviewer — quotes file paths and flags risks.",
+    prompt:
+      `You are a senior code reviewer in Zed. Adopt a skeptical, evidence-first stance.\n` +
+      `Always quote file paths and line numbers. Flag risks before suggesting changes. ` +
+      `Read code with the Read tool before commenting on it.`,
+  },
+];
+
+function loadPromptTemplates(): SystemPromptDef[] {
+  const file = process.env["INVOX_PROMPT_TEMPLATES_FILE"];
+  if (!file) return BUILTIN_SYSTEM_PROMPTS;
+  try {
+    const raw = readFileSync(file, "utf8");
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed) || parsed.length === 0) {
+      log.warn(
+        `INVOX_PROMPT_TEMPLATES_FILE: parsed value is not a non-empty array; using built-in templates`,
+        { file },
+      );
+      return BUILTIN_SYSTEM_PROMPTS;
+    }
+    const out: SystemPromptDef[] = [];
+    for (const entry of parsed) {
+      if (
+        typeof entry !== "object" ||
+        entry === null ||
+        typeof (entry as { id?: unknown }).id !== "string" ||
+        typeof (entry as { name?: unknown }).name !== "string" ||
+        typeof (entry as { prompt?: unknown }).prompt !== "string"
+      ) {
+        log.warn("INVOX_PROMPT_TEMPLATES_FILE: skipping invalid entry", { entry });
+        continue;
+      }
+      const e = entry as { id: string; name: string; description?: string; prompt: string };
+      out.push({
+        id: e.id,
+        name: e.name,
+        ...(typeof e.description === "string" ? { description: e.description } : {}),
+        prompt: e.prompt,
+      });
+    }
+    if (out.length === 0) {
+      log.warn(
+        "INVOX_PROMPT_TEMPLATES_FILE: no valid entries after filtering; using built-in templates",
+        { file },
+      );
+      return BUILTIN_SYSTEM_PROMPTS;
+    }
+    return out;
+  } catch (err) {
+    log.warn("INVOX_PROMPT_TEMPLATES_FILE: load failed; using built-in templates", {
+      file,
+      err: err instanceof Error ? err.message : String(err),
+    });
+    return BUILTIN_SYSTEM_PROMPTS;
+  }
 }
 
 main().catch((err) => {

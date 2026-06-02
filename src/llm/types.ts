@@ -41,9 +41,29 @@ export interface ParsedToolCall {
 export type LLMDelta =
   | { kind: "text"; text: string }
   | { kind: "tool_call"; call: ParsedToolCall }
+  | { kind: "usage"; usage: UsageInfo }
   | { kind: "finish"; reason: FinishReason };
 
 export type FinishReason = "stop" | "tool_calls" | "length" | "other";
+
+/**
+ * Token accounting for one LLM call. Sourced from the upstream provider's
+ * usage block (OpenAI-compat: prompt_tokens / completion_tokens / total_tokens).
+ *
+ * Numbers are best-effort: if the provider does not return usage for the call
+ * (some self-hosted OAI-compat backends ignore `stream_options.include_usage`),
+ * the provider may simply not yield a `usage` delta — agents should treat
+ * this as "unknown" rather than zero.
+ */
+export interface UsageInfo {
+  /** Tokens consumed by the prompt (input). */
+  input: number;
+  /** Tokens emitted by the completion (output). */
+  output: number;
+  /** input + output as reported by the provider; may differ from the sum if
+   *  the provider counts cache/system overhead separately. */
+  total: number;
+}
 
 export interface ToolSpec {
   type: "function";
@@ -62,6 +82,20 @@ export interface LLMRequest {
   messages: LLMMessage[];
   signal: AbortSignal;
   tools?: ToolSpec[];
+  /**
+   * Per-call model override. When unset, the provider falls back to its
+   * constructor-time default. Used by InvoxAgent to honor `setSessionModel`
+   * without rebuilding the provider instance.
+   */
+  model?: string;
+  /**
+   * Reasoning / "thinking" effort for the upstream model. Maps directly
+   * onto OpenAI's `reasoning_effort` field on chat.completions; non-OpenAI
+   * backends usually ignore it. `none` is treated the same as undefined
+   * (field omitted from the wire request); `minimal/low/medium/high` are
+   * passed through verbatim.
+   */
+  reasoningEffort?: "minimal" | "low" | "medium" | "high" | "none";
 }
 
 export interface LLMProvider {

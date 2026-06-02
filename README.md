@@ -20,7 +20,7 @@
                           │        │         │
                           │ ┌──────▼───────┐ │
                           │ │AgentSideConn │ │  ACP / JSON-RPC 2.0
-                          │ │ (per peer)   │ │  via @zed-industries/agent-client-protocol
+                          │ │ (per peer)   │ │  via @agentclientprotocol/sdk
                           │ └──────┬───────┘ │
                           │        │         │
                           │ ┌──────▼───────┐ │
@@ -81,6 +81,12 @@ npx tsx examples/smoke-ws.ts
 
 # Offline: session/cancel halts an in-flight stream
 npx tsx examples/smoke-cancel.ts
+
+# Offline: model selection (setSessionModel) + per-turn token usage report
+npx tsx examples/smoke-usage-model.ts
+
+# Offline: custom session-config dropdowns (system_prompt + thinking)
+npx tsx examples/smoke-config-options.ts
 
 # Real LLM: against any OpenAI-compatible endpoint
 INVOX_BASE_URL=https://api.openai.com/v1 \
@@ -155,13 +161,17 @@ Then in Zed: open the agent panel, pick **invox**, send a prompt. Stage 1 echoes
 | `INVOX_LOG_FILE` | absolute path to also append logs to (in addition to stderr) | unset |
 | `INVOX_LOG_UTC` | `1` to use ISO UTC timestamps instead of local `MM-DD HH:mm:ss.SSS` | unset |
 | `INVOX_BASE_URL` | OpenAI-compatible base URL (set both this and API_KEY for real LLM) | — |
-| `INVOX_MODEL` | model name passed to provider | `gpt-4o-mini` |
+| `INVOX_MODEL` | default model name passed to provider (also the prefilled choice in the client's model dropdown) | `gpt-4o-mini` |
+| `INVOX_MODELS` | comma-separated list of selectable models advertised to the client (e.g. `gpt-4o-mini,gpt-4o,deepseek-chat`). The default `INVOX_MODEL` is auto-included. | unset (menu = `[INVOX_MODEL]`) |
 | `INVOX_API_KEY` | provider API key | — |
 | `INVOX_MOCK` | `1` → EchoProvider; `tools` → MockToolProvider; unset → real | unset |
 | `INVOX_PERMISSIONS` | `never` (default) / `writes` (gate writes+exec) / `always` (gate all tools) | `never` |
 | `INVOX_MAX_ITERATIONS` | max LLM↔tool round-trips per user prompt | `50` |
 | `INVOX_SESSION_DIR` | absolute path to store session JSONs (overrides `<cwd>/.invox/sessions`) | unset |
 | `INVOX_SESSION_TTL_DAYS` | delete sessions older than N days on first save per cwd. `0` disables. | `30` |
+| `INVOX_CONTEXT_WINDOW_<MODEL_ID>` | per-model context window (in tokens) reported via `usage_update`. The MODEL_ID is uppercased with non-alnum characters → `_`. | built-in table |
+| `INVOX_CONTEXT_WINDOW_DEFAULT` | fallback context window when the model id isn't in the built-in table | `128000` |
+| `INVOX_PROMPT_TEMPLATES_FILE` | absolute path to a JSON file (`SystemPromptDef[]`) overriding the built-in System Prompt menu | unset |
 
 **Provider selection**:
 - `INVOX_MOCK=1` → `EchoProvider` (deterministic, offline)
@@ -169,6 +179,66 @@ Then in Zed: open the agent panel, pick **invox**, send a prompt. Stage 1 echoes
 - otherwise → `EchoProvider` with a warn log
 
 Logs go to **stderr** unconditionally — stdout is reserved for JSON-RPC framing.
+
+## Model selection & token usage
+
+invox advertises an ACP **model menu** to clients. In Zed, a dropdown next to the input box lists every id from `INVOX_MODELS`; switching the dropdown sends `session/set_model`, which invox honors immediately for the next prompt and persists in the session JSON so reopening the project restores the choice.
+
+```bash
+INVOX_BASE_URL=https://api.openai.com/v1 \
+INVOX_API_KEY=sk-... \
+INVOX_MODEL=gpt-4o-mini \
+INVOX_MODELS="gpt-4o-mini,gpt-4o,o1-mini" \
+node dist/cli.js
+```
+
+The Provider instance is reused across model switches — only the `model` field on each request changes — so swapping models does not rebuild the HTTP client. Different `baseURL`s require restarting invox; one Provider per process for now.
+
+**Token usage** is sourced from the upstream `stream_options.include_usage` final chunk and reported once per turn on **two channels** so the user sees something today and the protocol stays forward-compatible:
+
+1. **`usage_update`** — the official ACP variant from `@agentclientprotocol/sdk@0.23` (`unstable_session_usage`). When Zed has the `acp-beta` feature flag on, this drives the small token-meter chip next to the model dropdown (`Input: 11k / 168k`-style). The wire shape is `{ sessionUpdate: "usage_update", used, size }`.
+
+2. **`agent_thought_chunk`** — visible everywhere as a single line inside Zed's collapsed "Thinking" block:
+
+   ```
+   🪙 1234 in / 567 out tokens · 3 call(s) · model=gpt-4o-mini
+   ```
+
+   Carries an `_meta: { "invox/usage": {...} }` extension for programmatic clients.
+
+The `size` (context window) used in `usage_update` is looked up from a built-in table covering common models (gpt/claude/qwen/deepseek/gemini/…); override per model with `INVOX_CONTEXT_WINDOW_<MODEL_ID>=<n>` (e.g. `INVOX_CONTEXT_WINDOW_QWEN_QWEN3_CODER_30B=131072`) or globally with `INVOX_CONTEXT_WINDOW_DEFAULT=<n>`. Backends that ignore `stream_options.include_usage` simply don't surface usage — invox stays silent rather than reporting zeros.
+
+## Custom session dropdowns (System Prompt + Thinking)
+
+invox advertises additional ACP `SessionConfigOption` dropdowns that Zed renders next to the model selector. They are stored per-session and persist across loads.
+
+| ID | Category | Values | Effect |
+|---|---|---|---|
+| `system_prompt` | `system_prompt` (custom) | one of the configured prompt template ids | Replaces the active system message at the next user turn (`history[0]`) |
+| `thinking` | `thought_level` | `off` / `low` / `medium` / `high` | Sent as OpenAI `reasoning_effort` on the next request; `off` omits the field |
+
+The System Prompt menu defaults to a built-in trio (`default` / `concise` / `review`). Provide `INVOX_PROMPT_TEMPLATES_FILE` pointing at a JSON file to override:
+
+```jsonc
+// templates.json
+[
+  {
+    "id": "default",
+    "name": "Default",
+    "description": "Helpful coding assistant.",
+    "prompt": "You are a coding assistant in Zed. ..."
+  },
+  {
+    "id": "tutor",
+    "name": "Patient Tutor",
+    "prompt": "You are a patient tutor. Explain step-by-step..."
+  }
+]
+```
+
+Invalid / missing files fall back to the built-in templates with a warn-level log. The first entry of the list is the per-session default; switch via the dropdown to update the live session.
+
+Switching a dropdown is **forward-only** — it does not rewrite past assistant messages. Only the next user turn sees the new prompt / reasoning level. Use a fresh session if you want a clean slate.
 
 ## Design
 

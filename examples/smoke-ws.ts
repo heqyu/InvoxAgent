@@ -22,7 +22,7 @@ import {
   type Client,
   type SessionNotification,
   type Stream,
-} from "@zed-industries/agent-client-protocol";
+} from "@agentclientprotocol/sdk";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(__dirname, "..");

@@ -25,7 +25,7 @@ import {
   type ReadTextFileRequest,
   type ReadTextFileResponse,
   type SessionNotification,
-} from "@zed-industries/agent-client-protocol";
+} from "@agentclientprotocol/sdk";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(__dirname, "..");

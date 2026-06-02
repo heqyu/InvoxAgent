@@ -56,6 +56,13 @@ export class MockToolProvider implements LLMProvider {
       yield { kind: "text", text: piece };
       await sleep(10);
     }
+    // Synthetic usage delta so the agent's per-turn report path is exercised
+    // by smoke-usage-model.ts. Numbers are fake but match the shape that
+    // OpenAIProvider would produce from `stream_options.include_usage`.
+    yield {
+      kind: "usage",
+      usage: { input: 42, output: 7, total: 49 },
+    };
     yield { kind: "finish", reason: "stop" };
   }
 }

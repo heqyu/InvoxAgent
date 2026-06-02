@@ -53,10 +53,13 @@ export class OpenAIProvider implements LLMProvider {
   async *stream(req: LLMRequest): AsyncIterable<LLMDelta> {
     const callId = `c${this.nextCallSeq++}`;
     const startedAt = Date.now();
+    // Per-call model override (set by setSessionModel). Falls back to the
+    // provider's default if the agent didn't pin a model on this session.
+    const modelForCall = req.model ?? this.model;
 
     log.info("llm: request", {
       callId,
-      model: this.model,
+      model: modelForCall,
       baseURL: this.baseURL,
       messages: req.messages.length,
       tools: req.tools?.length ?? 0,
@@ -74,11 +77,24 @@ export class OpenAIProvider implements LLMProvider {
     try {
       stream = await this.client.chat.completions.create(
         {
-          model: this.model,
+          model: modelForCall,
           stream: true,
+          // Ask the upstream to emit a final usage-only chunk so we can
+          // surface real token counts. Some self-hosted OAI-compat backends
+          // ignore this flag — that's fine, we just don't get a usage delta.
+          stream_options: { include_usage: true },
           messages: req.messages.map(toOpenAIMessage),
           ...(req.tools && req.tools.length > 0
             ? { tools: req.tools, tool_choice: "auto" }
+            : {}),
+          // Pass through reasoning_effort when the agent has thinking
+          // enabled. OpenAI's chat API documents this as `none | minimal
+          // | low | medium | high | xhigh`. Backends that don't recognize
+          // the field typically ignore it; strict ones may 400 — that's
+          // a backend-vs-config mismatch the user can resolve via the
+          // dropdown.
+          ...(req.reasoningEffort && req.reasoningEffort !== "none"
+            ? { reasoning_effort: req.reasoningEffort }
             : {}),
         },
         { signal: req.signal },
@@ -108,6 +124,13 @@ export class OpenAIProvider implements LLMProvider {
     let chunks = 0;
     let firstByteAt = 0;
     let lastChunkAt = startedAt;
+    /**
+     * Final usage-only chunk from `stream_options.include_usage`. Per OpenAI
+     * spec the `usage` field is non-null only on the very last chunk (which
+     * also has an empty `choices` array). We capture it here and emit one
+     * `LLMDelta { kind: "usage" }` after the stream drains.
+     */
+    let usageRaw: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | null = null;
 
     try {
       for await (const chunk of stream) {
@@ -130,6 +153,12 @@ export class OpenAIProvider implements LLMProvider {
           });
         }
         lastChunkAt = now;
+
+        // Capture usage BEFORE the `!choice` guard — usage-only chunks have
+        // no choices entry, so the guard would otherwise drop them.
+        if (chunk.usage) {
+          usageRaw = chunk.usage;
+        }
 
         const choice = chunk.choices[0];
         if (!choice) continue;
@@ -170,6 +199,14 @@ export class OpenAIProvider implements LLMProvider {
       throw err;
     }
 
+    const usage = usageRaw
+      ? {
+          input: usageRaw.prompt_tokens ?? 0,
+          output: usageRaw.completion_tokens ?? 0,
+          total: usageRaw.total_tokens ?? (usageRaw.prompt_tokens ?? 0) + (usageRaw.completion_tokens ?? 0),
+        }
+      : null;
+
     log.info("llm: response", {
       callId,
       elapsedMs: Date.now() - startedAt,
@@ -178,6 +215,7 @@ export class OpenAIProvider implements LLMProvider {
       textBytes,
       toolCalls: partials.size,
       finishReason,
+      ...(usage ? { usage } : {}),
     });
 
     if (log.isEnabled("trace") && partials.size > 0) {
@@ -203,6 +241,10 @@ export class OpenAIProvider implements LLMProvider {
         arguments: p.argsBuf,
       };
       yield { kind: "tool_call", call };
+    }
+
+    if (usage) {
+      yield { kind: "usage", usage };
     }
 
     yield { kind: "finish", reason: finishReason };
