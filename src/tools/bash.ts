@@ -1,4 +1,4 @@
-// bash: run a shell command and surface it to the user.
+// Bash: run a shell command and surface it to the user.
 //
 // Two execution paths:
 //
@@ -53,13 +53,13 @@ const DESCRIPTION_FIELD = {
 const spec: ToolSpec = {
   type: "function",
   function: {
-    name: "bash",
+    name: "Bash",
     description:
       "Execute a shell command in the session's working directory. " +
       "Pipes / redirects / quoting work the way the OS's default shell " +
       "(cmd on Windows, /bin/sh on POSIX) parses them. Returns combined " +
       "stdout+stderr and the exit code. Use this for build/test/git/grep " +
-      "commands; for editing files prefer edit_file.",
+      "commands; for editing files prefer Edit.",
     parameters: {
       type: "object",
       properties: {
@@ -78,14 +78,86 @@ async function execute(
   args: Record<string, unknown>,
   ctx: ToolExecContext,
 ): Promise<ToolExecResult> {
-  const command = String(args["command"] ?? "");
-  if (!command) return errorResult("missing 'command'", "execute", "bash");
-  log.info("tool: bash", { command });
+  const rawCommand = String(args["command"] ?? "");
+  if (!rawCommand) return errorResult("missing 'command'", "execute", "Bash");
+  log.info("tool: Bash", { command: rawCommand });
+
+  // Attempt to rewrite the command via `rtk rewrite`.
+  // If the rewrite succeeds and produces a non-empty result, use the rewritten
+  // command; otherwise fall back to the original.
+  let command = rawCommand;
+  try {
+    const rewritten = await runRtkRewrite(rawCommand, ctx.cwd);
+    if (rewritten) {
+      command = rewritten;
+      if (command === rawCommand) {
+        log.info("Bash: rtk rewrite returned unchanged", {
+          command: rawCommand,
+        });
+      } else {
+        log.info("Bash: rtk rewrite succeeded", {
+          original: rawCommand,
+          rewritten: command,
+        });
+      }
+    }
+  } catch (e) {
+    log.debug("Bash: rtk rewrite failed, using original command", {
+      error: (e as Error).message,
+    });
+  }
 
   if (ctx.caps.terminal === true) {
     return runViaAcpTerminal(command, args, ctx);
   }
   return runViaLocalSpawn(command, args, ctx);
+}
+
+// ── rtk rewrite ─────────────────────────────────────────────────────
+
+/**
+ * Run `rtk rewrite '<command>'` and return the rewritten command string.
+ * Returns an empty string on failure so callers can fall back to the original.
+ */
+async function runRtkRewrite(command: string, cwd: string): Promise<string> {
+  const rewriteCmd = `rtk rewrite '${command.replace(/'/g, "'\\''")}'`;
+  const { shellCmd, shellArgs } = buildShellInvocation(rewriteCmd);
+
+  return new Promise<string>((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const child = spawn(shellCmd, shellArgs, { cwd, windowsHide: true });
+
+    child.stdout.on("data", (d: Buffer) => {
+      stdout += d.toString("utf8");
+    });
+    child.stderr.on("data", (d: Buffer) => {
+      stderr += d.toString("utf8");
+    });
+
+    child.on("error", () => {
+      if (!settled) {
+        settled = true;
+        resolve("");
+      }
+    });
+
+    child.on("close", (exitCode) => {
+      if (!settled) {
+        settled = true;
+        const trimmed = stdout.trim();
+        // exit 0 = rewritten successfully (per rtk docs)
+        // exit 3 = rewritten successfully (observed in practice)
+        // exit 1 = no RTK equivalent, no output
+        if (trimmed && exitCode !== 1) {
+          resolve(trimmed);
+        } else {
+          resolve("");
+        }
+      }
+    });
+  });
 }
 
 // ── ACP terminal path (Zed) ──────────────────────────────────────────
@@ -124,20 +196,22 @@ async function runViaAcpTerminal(
   // a bare title with no expandable output. Any later tool_call_update we
   // emit replaces this content (we re-send the same terminalId), so this
   // is a pure UX upgrade — no double rendering.
-  await ctx.conn.sessionUpdate({
-    sessionId: ctx.sessionId,
-    update: {
-      sessionUpdate: "tool_call_update",
-      toolCallId: ctx.toolCallId,
-      status: "in_progress",
-      title,
-      kind: "execute",
-      content: [{ type: "terminal", terminalId: terminal.id }],
-    },
-  }).catch(() => {
-    // Best-effort — if the client doesn't accept the in-flight update,
-    // the post-exit update below still carries the same terminalId.
-  });
+  await ctx.conn
+    .sessionUpdate({
+      sessionId: ctx.sessionId,
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId: ctx.toolCallId,
+        status: "in_progress",
+        title,
+        kind: "execute",
+        content: [{ type: "terminal", terminalId: terminal.id }],
+      },
+    })
+    .catch(() => {
+      // Best-effort — if the client doesn't accept the in-flight update,
+      // the post-exit update below still carries the same terminalId.
+    });
 
   try {
     const exit = await terminal.waitForExit();
@@ -215,14 +289,18 @@ function pickWindowsShell(): string | null {
   let chosen: string | null;
   if (override.toLowerCase() === "cmd") {
     chosen = null;
-  } else if (override && override.toLowerCase() !== "bash" && isAbsolute(override)) {
+  } else if (
+    override &&
+    override.toLowerCase() !== "bash" &&
+    isAbsolute(override)
+  ) {
     chosen = existsSync(override) ? override : null;
   } else {
     chosen = findGitBash();
   }
 
   cachedWindowsShell = { value: chosen };
-  log.info("bash: shell selected", {
+  log.info("Bash: shell selected", {
     shell: chosen ?? "cmd.exe",
     override: override || undefined,
   });
@@ -250,7 +328,9 @@ function findGitBash(): string | null {
   if (userProfile) {
     // Common scoop/portable layouts.
     candidates.push(`${userProfile}\\scoop\\apps\\git\\current\\bin\\bash.exe`);
-    candidates.push(`${userProfile}\\AppData\\Local\\Programs\\Git\\bin\\bash.exe`);
+    candidates.push(
+      `${userProfile}\\AppData\\Local\\Programs\\Git\\bin\\bash.exe`,
+    );
   }
 
   for (const p of candidates) {
@@ -319,8 +399,7 @@ async function runViaLocalSpawn(
       settled = true;
       ctx.signal.removeEventListener("abort", onAbort);
 
-      const combined =
-        stdout + (stderr ? (stdout ? "\n" : "") + stderr : "");
+      const combined = stdout + (stderr ? (stdout ? "\n" : "") + stderr : "");
       const display =
         `$ ${command}\n` +
         `exit=${exitCode ?? "?"}${signal ? ` signal=${signal}` : ""}\n` +
@@ -351,7 +430,7 @@ function titleFor(_args: Record<string, unknown>, command: string): string {
 }
 
 export const bashTool: Tool = {
-  name: "bash",
+  name: "Bash",
   tier: "execute",
   spec,
   execute,

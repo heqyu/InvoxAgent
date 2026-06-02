@@ -74,7 +74,7 @@ Each `Tool` declares a `tier: "read" | "write" | "execute"`. The router's permis
 - `writes` — gate write+execute tiers via `session/request_permission`
 - `always` — gate every tool
 
-`SessionToolState` (`readPaths` set + `FileCache`) is created per session and passed to every tool execution. **`edit_file` enforces read-before-edit** by checking `readPaths`; that's the safety net against blind LLM edits. Cache invalidation lives in `cache.ts` — `write_file`/`edit_file` mutate the entry; we deliberately do **not** detect external mutations within a session.
+`SessionToolState` (`readPaths` set + `FileCache`) is created per session and passed to every tool execution. **`Edit` enforces read-before-edit** by checking `readPaths`; that's the safety net against blind LLM edits. Cache invalidation lives in `cache.ts` — `Write`/`Edit` mutate the entry; we deliberately do **not** detect external mutations within a session.
 
 ### LLM provider selection
 

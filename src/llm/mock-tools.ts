@@ -2,7 +2,7 @@
 // loop without a network round-trip.
 //
 // Behavior:
-//   - Turn 1: emit a tool_call requesting read_file on a path mentioned in
+//   - Turn 1: emit a tool_call requesting Read on a path mentioned in
 //     the user's message (looking for "read X" or quoted "X").
 //   - Turn 2 (after the agent feeds back the file content as a tool message):
 //     emit text deltas summarizing the file size, then finish.
@@ -40,7 +40,7 @@ export class MockToolProvider implements LLMProvider {
       }
       const call: ParsedToolCall = {
         id,
-        name: "read_file",
+        name: "Read",
         arguments: JSON.stringify({ path }),
       };
       yield { kind: "tool_call", call };

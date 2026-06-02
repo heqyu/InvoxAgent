@@ -1,4 +1,4 @@
-// read_file: line-numbered, paginated reads with cache.
+// Read: line-numbered, paginated reads with cache.
 
 import { resolve } from "node:path";
 import { log } from "../log.js";
@@ -26,14 +26,14 @@ const TRUNCATED_LINE_SUFFIX = "… [truncated]";
 const spec: ToolSpec = {
   type: "function",
   function: {
-    name: "read_file",
+    name: "Read",
     description:
       "Read a text file from the user's filesystem. Returns the file " +
       "contents prefixed with line numbers (cat -n style). Use offset+limit " +
       "to page through large files; the default cap is 2000 lines per call. " +
       "Single lines longer than 2000 chars are truncated. Empty files return " +
-      "(File is empty). After read_file you may call edit_file on the same " +
-      "path; without a prior read_file the edit will be rejected.",
+      "(File is empty). After Read you may call Edit on the same " +
+      "path; without a prior Read the edit will be rejected.",
     parameters: {
       type: "object",
       properties: {
@@ -62,10 +62,10 @@ async function execute(
   ctx: ToolExecContext,
 ): Promise<ToolExecResult> {
   const rel = String(args["path"] ?? "");
-  if (!rel) return errorResult("missing 'path'", "read", "read_file");
+  if (!rel) return errorResult("missing 'path'", "read", "Read");
   const path = resolve(ctx.cwd, rel);
 
-  log.debug("read_file: resolved path", { rel, resolved: path, cwd: ctx.cwd });
+  log.debug("Read: resolved path", { rel, resolved: path, cwd: ctx.cwd });
 
   const offset = isPositiveInt(args["offset"])
     ? Number(args["offset"])
@@ -81,14 +81,14 @@ async function execute(
   let fullContent: string;
   const cached = ctx.state.cache.get(path);
   if (cached) {
-    log.debug("read_file: cache hit", {
+    log.debug("Read: cache hit", {
       path,
       cachedBytes: cached.content.length,
     });
     fullContent = cached.content;
   } else {
     const inside = isInsideWorkspace(path, ctx.cwd);
-    log.debug("read_file: cache miss, checking workspace boundary", {
+    log.debug("Read: cache miss, checking workspace boundary", {
       path,
       insideWorkspace: inside,
     });
@@ -97,16 +97,16 @@ async function execute(
         // Inside workspace — delegate to ACP so Zed can track the read and
         // provide editor integration (e.g. "Go to File").
         if (!ctx.caps.fs?.readTextFile) {
-          log.debug("read_file: ACP fs.readTextFile capability missing", {
+          log.debug("Read: ACP fs.readTextFile capability missing", {
             path,
           });
           return errorResult(
             "client does not advertise fs.readTextFile capability",
             "read",
-            `read_file: ${rel}`,
+            `Read: ${rel}`,
           );
         }
-        log.debug("read_file: reading via ACP", {
+        log.debug("Read: reading via ACP", {
           path,
           sessionId: ctx.sessionId,
         });
@@ -115,37 +115,37 @@ async function execute(
           path,
         });
         fullContent = res.content;
-        log.debug("read_file: ACP read succeeded", {
+        log.debug("Read: ACP read succeeded", {
           path,
           bytes: fullContent.length,
         });
       } else {
         // Outside workspace — read directly via Node.js fs.
-        log.warn("tool: read_file: reading OUTSIDE workspace", { path });
-        log.debug("read_file: reading via direct fs", { path });
+        log.warn("tool: Read: reading OUTSIDE workspace", { path });
+        log.debug("Read: reading via direct fs", { path });
         fullContent = await readFileDirect(path);
-        log.debug("read_file: direct fs read succeeded", {
+        log.debug("Read: direct fs read succeeded", {
           path,
           bytes: fullContent.length,
         });
       }
       ctx.state.cache.set(path, fullContent);
     } catch (e) {
-      log.debug("read_file: read FAILED", {
+      log.debug("Read: read FAILED", {
         path,
         error: (e as Error).message,
       });
       return errorResult(
         `read failed: ${(e as Error).message}`,
         "read",
-        `read_file: ${rel}`,
+        `Read: ${rel}`,
       );
     }
   }
 
   // Mark for read-before-edit gate.
   ctx.state.readPaths.add(path);
-  log.debug("read_file: completed", {
+  log.debug("Read: completed", {
     path,
     totalLines: fullContent.split("\n").length,
     bytes: fullContent.length,
@@ -235,7 +235,7 @@ function isPositiveInt(v: unknown): boolean {
 }
 
 export const readFileTool: Tool = {
-  name: "read_file",
+  name: "Read",
   tier: "read",
   spec,
   execute,

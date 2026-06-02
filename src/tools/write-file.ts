@@ -1,4 +1,4 @@
-// write_file: full-file create/overwrite via ACP fs/write_text_file.
+// Write: full-file create/overwrite via ACP fs/write_text_file.
 //
 // Soft read-before-overwrite hint when the file already exists but the LLM
 // hasn't read it. Cache is updated post-write so subsequent reads hit.
@@ -29,12 +29,12 @@ const DESCRIPTION_FIELD = {
 const spec: ToolSpec = {
   type: "function",
   function: {
-    name: "write_file",
+    name: "Write",
     description:
       "Create a new text file or overwrite an existing one with the given " +
       "content. The client may render this as a diff. For modifying " +
-      "existing files prefer edit_file (precise string replacement) over " +
-      "write_file — write_file replaces the ENTIRE file content.",
+      "existing files prefer Edit (precise string replacement) over " +
+      "Write — Write replaces the ENTIRE file content.",
     parameters: {
       type: "object",
       properties: {
@@ -59,10 +59,10 @@ async function execute(
 ): Promise<ToolExecResult> {
   const rel = String(args["path"] ?? "");
   const content = String(args["content"] ?? "");
-  if (!rel) return errorResult("missing 'path'", "edit", "write_file");
+  if (!rel) return errorResult("missing 'path'", "edit", "Write");
   const path = resolve(ctx.cwd, rel);
   const inside = isInsideWorkspace(path, ctx.cwd);
-  log.debug("write_file: resolved path", {
+  log.debug("Write: resolved path", {
     rel,
     resolved: path,
     cwd: ctx.cwd,
@@ -70,11 +70,11 @@ async function execute(
   });
 
   if (inside && !ctx.caps.fs?.writeTextFile) {
-    log.debug("write_file: ACP fs.writeTextFile capability missing", { path });
+    log.debug("Write: ACP fs.writeTextFile capability missing", { path });
     return errorResult(
       "client does not advertise fs.writeTextFile capability",
       "edit",
-      `write_file: ${rel}`,
+      `Write: ${rel}`,
     );
   }
 
@@ -82,7 +82,7 @@ async function execute(
   let oldText: string | null = null;
   const cached = ctx.state.cache.get(path);
   if (cached) {
-    log.debug("write_file: old text from cache", {
+    log.debug("Write: old text from cache", {
       path,
       cachedBytes: cached.content.length,
     });
@@ -91,32 +91,32 @@ async function execute(
     try {
       if (inside) {
         if (ctx.caps.fs?.readTextFile) {
-          log.debug("write_file: reading old text via ACP", { path });
+          log.debug("Write: reading old text via ACP", { path });
           const r = await ctx.conn.readTextFile({
             sessionId: ctx.sessionId,
             path,
           });
           oldText = r.content;
-          log.debug("write_file: ACP read for diff succeeded", {
+          log.debug("Write: ACP read for diff succeeded", {
             path,
             bytes: oldText.length,
           });
         } else {
           log.debug(
-            "write_file: skipping old-text read (no ACP readTextFile capability)",
+            "Write: skipping old-text read (no ACP readTextFile capability)",
             { path },
           );
         }
       } else {
-        log.debug("write_file: reading old text via direct fs", { path });
+        log.debug("Write: reading old text via direct fs", { path });
         oldText = await readFileDirect(path);
-        log.debug("write_file: direct fs read for diff succeeded", {
+        log.debug("Write: direct fs read for diff succeeded", {
           path,
           bytes: oldText.length,
         });
       }
     } catch {
-      log.debug("write_file: old-text read failed (treating as new file)", {
+      log.debug("Write: old-text read failed (treating as new file)", {
         path,
       });
       oldText = null;
@@ -125,7 +125,7 @@ async function execute(
 
   const fileExisted = oldText !== null;
   const wasRead = ctx.state.readPaths.has(path);
-  log.debug("write_file: pre-write state", {
+  log.debug("Write: pre-write state", {
     path,
     fileExisted,
     wasRead,
@@ -134,39 +134,39 @@ async function execute(
   const advisory =
     fileExisted && !wasRead
       ? `Note: this file existed and was overwritten without being read first. ` +
-        `For safety, prefer read_file → edit_file over write_file when modifying existing files.\n`
+        `For safety, prefer Read → Edit over Write when modifying existing files.\n`
       : "";
 
   try {
     if (inside) {
-      log.debug("write_file: writing via ACP", { path, bytes: content.length });
+      log.debug("Write: writing via ACP", { path, bytes: content.length });
       await ctx.conn.writeTextFile({ sessionId: ctx.sessionId, path, content });
-      log.debug("write_file: ACP write succeeded", { path });
+      log.debug("Write: ACP write succeeded", { path });
     } else {
-      log.warn("tool: write_file: writing OUTSIDE workspace", { path });
-      log.debug("write_file: writing via direct fs", {
+      log.warn("tool: Write: writing OUTSIDE workspace", { path });
+      log.debug("Write: writing via direct fs", {
         path,
         bytes: content.length,
       });
       await writeFileDirect(path, content);
-      log.debug("write_file: direct fs write succeeded", { path });
+      log.debug("Write: direct fs write succeeded", { path });
     }
   } catch (e) {
-    log.debug("write_file: write FAILED", {
+    log.debug("Write: write FAILED", {
       path,
       error: (e as Error).message,
     });
     return errorResult(
       `write failed: ${(e as Error).message}`,
       "edit",
-      `write_file: ${rel}`,
+      `Write: ${rel}`,
     );
   }
 
   // After a successful write, the new content is the on-disk content.
   ctx.state.cache.set(path, content);
   ctx.state.readPaths.add(path);
-  log.debug("write_file: completed", {
+  log.debug("Write: completed", {
     path,
     bytes: content.length,
     fileExisted,
@@ -200,7 +200,7 @@ function titleFor(
 }
 
 export const writeFileTool: Tool = {
-  name: "write_file",
+  name: "Write",
   tier: "write",
   spec,
   execute,

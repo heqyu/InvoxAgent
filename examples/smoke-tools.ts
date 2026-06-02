@@ -4,7 +4,7 @@
 // Flow:
 //   client → prompt("read 'package.json'")
 //   agent  → text "Let me read package.json for you."
-//   agent  → tool_call read_file(path: "package.json")
+//   agent  → tool_call Read(path: "package.json")
 //   agent  → conn.readTextFile(...)             ← we serve this from disk
 //   agent  → tool_call_update completed
 //   agent  → text "Done. The file is N bytes long."
@@ -62,7 +62,9 @@ async function main(): Promise<void> {
     async requestPermission() {
       throw new Error("not used (policy: never ask)");
     },
-    async readTextFile(params: ReadTextFileRequest): Promise<ReadTextFileResponse> {
+    async readTextFile(
+      params: ReadTextFileRequest,
+    ): Promise<ReadTextFileResponse> {
       fsReadCalls.push(params);
       // Serve from disk — the agent's tool will call us with absolute path.
       const content = readFileSync(params.path, "utf8");
@@ -101,16 +103,32 @@ async function main(): Promise<void> {
   const textChunks = updates
     .filter((u) => u.update.sessionUpdate === "agent_message_chunk")
     .map((u) => {
-      const upd = u.update as Extract<typeof u.update, { sessionUpdate: "agent_message_chunk" }>;
+      const upd = u.update as Extract<
+        typeof u.update,
+        { sessionUpdate: "agent_message_chunk" }
+      >;
       return upd.content.type === "text" ? upd.content.text : "";
     });
-  const toolCallStarts = updates.filter((u) => u.update.sessionUpdate === "tool_call");
-  const toolCallUpdates = updates.filter((u) => u.update.sessionUpdate === "tool_call_update");
+  const toolCallStarts = updates.filter(
+    (u) => u.update.sessionUpdate === "tool_call",
+  );
+  const toolCallUpdates = updates.filter(
+    (u) => u.update.sessionUpdate === "tool_call_update",
+  );
 
   assert(textChunks.length > 0, "expected ≥1 text chunk");
-  assert(toolCallStarts.length === 1, `expected 1 tool_call, got ${toolCallStarts.length}`);
-  assert(toolCallUpdates.length === 1, `expected 1 tool_call_update, got ${toolCallUpdates.length}`);
-  assert(fsReadCalls.length === 1, `expected 1 fs.readTextFile call, got ${fsReadCalls.length}`);
+  assert(
+    toolCallStarts.length === 1,
+    `expected 1 tool_call, got ${toolCallStarts.length}`,
+  );
+  assert(
+    toolCallUpdates.length === 1,
+    `expected 1 tool_call_update, got ${toolCallUpdates.length}`,
+  );
+  assert(
+    fsReadCalls.length === 1,
+    `expected 1 fs.readTextFile call, got ${fsReadCalls.length}`,
+  );
   const firstRead = fsReadCalls[0];
   assert(!!firstRead, "fsReadCalls[0] missing");
   assert(
@@ -126,12 +144,21 @@ async function main(): Promise<void> {
     SessionNotification["update"],
     { sessionUpdate: "tool_call_update" }
   >;
-  assert(tcStart.toolCallId === tcEnd.toolCallId, "tool_call/update id mismatch");
-  assert(tcEnd.status === "completed", `expected completed, got ${tcEnd.status}`);
+  assert(
+    tcStart.toolCallId === tcEnd.toolCallId,
+    "tool_call/update id mismatch",
+  );
+  assert(
+    tcEnd.status === "completed",
+    `expected completed, got ${tcEnd.status}`,
+  );
 
   const assembled = textChunks.join("");
   assert(/Let me read/.test(assembled), `phase-1 text missing: ${assembled}`);
-  assert(/Done\. The file is \d+ bytes/.test(assembled), `phase-2 summary missing: ${assembled}`);
+  assert(
+    /Done\. The file is \d+ bytes/.test(assembled),
+    `phase-2 summary missing: ${assembled}`,
+  );
 
   console.error(
     `[smoke-tools] ✓ ${textChunks.length} text chunks, 1 tool_call→completed, fs.readTextFile served once`,

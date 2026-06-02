@@ -46,15 +46,18 @@
 
 - Speaks Zed's **Agent Client Protocol** (JSON-RPC 2.0) over stdio (and WebSocket in stage 4+)
 - Bridges to any **OpenAI-compatible** LLM endpoint
-- Streams replies and **routes LLM tool_calls through ACP** — `read_file`, `write_file`, `bash` — with a multi-step loop bounded at 8 iterations per turn
+- Streams replies and **routes LLM tool_calls through ACP** — `Read`, `Write`, `Edit`, `Bash`, `Glob`, `Grep` — with a multi-step loop bounded at 8 iterations per turn
 
 ## Tools the LLM can call
 
 | Tool | ACP method routed to | Client capability required |
 |---|---|---|
-| `read_file(path)` | `fs/read_text_file` | `fs.readTextFile` |
-| `write_file(path, content)` | `fs/write_text_file` (also tries to read old content for diff) | `fs.writeTextFile` |
-| `bash(command)` | `terminal/create` + `terminal/wait_for_exit` + `terminal/output` | `terminal: true` |
+| `Read(path)` | `fs/read_text_file` | `fs.readTextFile` |
+| `Write(path, content)` | `fs/write_text_file` (also tries to read old content for diff) | `fs.writeTextFile` |
+| `Edit(path, old_string, new_string)` | `fs/write_text_file` (precise string replacement) | `fs.readTextFile` + `fs.writeTextFile` |
+| `Bash(command)` | `terminal/create` + `terminal/wait_for_exit` + `terminal/output` | `terminal: true` |
+| `Glob(pattern)` | client-side glob (fast-glob) | — |
+| `Grep(pattern)` | client-side ripgrep | — |
 
 Permission policy for v1: **never ask** — the agent trusts the LLM and runs tools directly. (Stage 5 polish may add an env-knob for stricter policies.)
 

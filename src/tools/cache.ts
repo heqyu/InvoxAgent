@@ -6,10 +6,10 @@
 // within a turn are free.
 //
 // Invalidation rules:
-//   1. write_file / edit_file invalidate (or replace) the entry for that path
+//   1. Write / Edit invalidate (or replace) the entry for that path
 //   2. The cache is per-session (not shared across sessions/agents)
 //   3. We do NOT detect external mutations within a session — if the user
-//      edits the file in their editor between two read_file calls, the LLM
+//      edits the file in their editor between two Read calls, the LLM
 //      may see the stale cache. This is a deliberate trade-off:
 //        - keeping it simple
 //        - the LLM-driven workflow rarely interleaves with manual edits

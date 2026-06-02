@@ -1,4 +1,4 @@
-// glob: find files matching a glob pattern, sorted by mtime descending.
+// Glob: find files matching a glob pattern, sorted by mtime descending.
 //
 // Uses fast-glob — pure JS, no external binaries needed. Default search
 // root is the session cwd; .gitignore patterns are honored when present.
@@ -11,7 +11,12 @@ import { resolve, sep } from "node:path";
 import fg from "fast-glob";
 import { log } from "../log.js";
 import type { ToolSpec } from "../llm/types.js";
-import { errorResult, type Tool, type ToolExecContext, type ToolExecResult } from "./types.js";
+import {
+  errorResult,
+  type Tool,
+  type ToolExecContext,
+  type ToolExecResult,
+} from "./types.js";
 
 const DESCRIPTION_FIELD = {
   type: "string",
@@ -26,7 +31,7 @@ const DEFAULT_LIMIT = 200;
 const spec: ToolSpec = {
   type: "function",
   function: {
-    name: "glob",
+    name: "Glob",
     description:
       "Find files matching a glob pattern. Returns absolute paths sorted " +
       "by modification time, newest first. Use this to discover files in " +
@@ -64,7 +69,7 @@ async function execute(
   ctx: ToolExecContext,
 ): Promise<ToolExecResult> {
   const pattern = String(args["pattern"] ?? "");
-  if (!pattern) return errorResult("missing 'pattern'", "other", "glob");
+  if (!pattern) return errorResult("missing 'pattern'", "other", "Glob");
 
   const rawPath = typeof args["path"] === "string" ? args["path"] : "";
   const searchRoot = rawPath ? resolve(ctx.cwd, rawPath) : ctx.cwd;
@@ -74,7 +79,7 @@ async function execute(
       ? Math.floor(args["limit"])
       : DEFAULT_LIMIT;
 
-  log.info("tool: glob", { pattern, searchRoot, limit });
+  log.info("tool: Glob", { pattern, searchRoot, limit });
 
   let entries: string[];
   try {
@@ -89,7 +94,11 @@ async function execute(
       ignore: ["**/node_modules/**", "**/.git/**", "**/dist/**", "**/build/**"],
     });
   } catch (e) {
-    return errorResult(`glob failed: ${(e as Error).message}`, "other", `glob: ${pattern}`);
+    return errorResult(
+      `glob failed: ${(e as Error).message}`,
+      "other",
+      `Glob: ${pattern}`,
+    );
   }
 
   // Sort by mtime descending (newest first). statSync is fast in batch on
@@ -114,7 +123,9 @@ async function execute(
     `Pattern: ${pattern}` +
     (rawPath ? `\nPath: ${searchRoot}` : "") +
     `\nMatched: ${entries.length}` +
-    (truncated ? ` (showing first ${limit} by mtime; pass higher \`limit\` to see more)` : "") +
+    (truncated
+      ? ` (showing first ${limit} by mtime; pass higher \`limit\` to see more)`
+      : "") +
     `\n`;
   const body = top.length > 0 ? top.join("\n") : "(no matches)";
   const display = header + body;
@@ -136,13 +147,14 @@ function normalizePath(p: string): string {
 }
 
 function titleFor(args: Record<string, unknown>, pattern: string): string {
-  const desc = typeof args["description"] === "string" ? args["description"].trim() : "";
+  const desc =
+    typeof args["description"] === "string" ? args["description"].trim() : "";
   if (desc) return desc;
   return `Glob ${pattern}`;
 }
 
 export const globTool: Tool = {
-  name: "glob",
+  name: "Glob",
   tier: "read",
   spec,
   execute,

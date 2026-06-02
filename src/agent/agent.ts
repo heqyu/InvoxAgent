@@ -1316,7 +1316,7 @@ function startTitleFor(call: ParsedToolCall): string {
   // reaches the user via the tool result body.
   if (parsed) {
     switch (call.name) {
-      case "read_file": {
+      case "Read": {
         const p = String(parsed["path"] ?? "");
         const offset = parsed["offset"];
         return p
@@ -1325,15 +1325,15 @@ function startTitleFor(call: ParsedToolCall): string {
             : `Read ${p}`
           : "Read file";
       }
-      case "write_file": {
+      case "Write": {
         const p = String(parsed["path"] ?? "");
         return p ? `Write ${p}` : "Write file";
       }
-      case "edit_file": {
+      case "Edit": {
         const p = String(parsed["path"] ?? "");
         return p ? `Edit ${p}` : "Edit file";
       }
-      case "bash": {
+      case "Bash": {
         const c = String(parsed["command"] ?? "");
         return c
           ? `\`${c.slice(0, 80)}${c.length > 80 ? "…" : ""}\``
@@ -1361,11 +1361,7 @@ function startLocationsFor(
 ): { path: string }[] | undefined {
   const parsed = safeParseJSON(call.arguments);
   if (!parsed) return undefined;
-  if (
-    call.name === "read_file" ||
-    call.name === "write_file" ||
-    call.name === "edit_file"
-  ) {
+  if (call.name === "Read" || call.name === "Write" || call.name === "Edit") {
     const p = typeof parsed["path"] === "string" ? parsed["path"].trim() : "";
     if (p) return [{ path: p }];
   }

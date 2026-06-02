@@ -1,4 +1,4 @@
-// grep: full-text search via ripgrep. The @vscode/ripgrep package ships a
+// Grep: full-text search via ripgrep. The @vscode/ripgrep package ships a
 // platform-specific binary so we don't need the system `rg` to be installed.
 //
 // Output mode: line-oriented `path:lineno:content` by default. The LLM can
@@ -10,7 +10,12 @@ import { resolve } from "node:path";
 import { rgPath } from "@vscode/ripgrep";
 import { log } from "../log.js";
 import type { ToolSpec } from "../llm/types.js";
-import { errorResult, type Tool, type ToolExecContext, type ToolExecResult } from "./types.js";
+import {
+  errorResult,
+  type Tool,
+  type ToolExecContext,
+  type ToolExecResult,
+} from "./types.js";
 
 const DESCRIPTION_FIELD = {
   type: "string",
@@ -25,7 +30,7 @@ const DEFAULT_MAX_BYTES = 256 * 1024; // 256 KiB output cap
 const spec: ToolSpec = {
   type: "function",
   function: {
-    name: "grep",
+    name: "Grep",
     description:
       "Search file contents with ripgrep. Returns matches as " +
       "<path>:<line>:<text>. Use this to find symbols, references, or " +
@@ -89,14 +94,15 @@ async function execute(
   ctx: ToolExecContext,
 ): Promise<ToolExecResult> {
   const pattern = String(args["pattern"] ?? "");
-  if (!pattern) return errorResult("missing 'pattern'", "other", "grep");
+  if (!pattern) return errorResult("missing 'pattern'", "other", "Grep");
 
   const rawPath = typeof args["path"] === "string" ? args["path"] : "";
   const searchRoot = rawPath ? resolve(ctx.cwd, rawPath) : ctx.cwd;
 
   const outputMode = (() => {
     const m = String(args["output_mode"] ?? "content");
-    if (m === "files_with_matches" || m === "count" || m === "content") return m;
+    if (m === "files_with_matches" || m === "count" || m === "content")
+      return m;
     return "content";
   })();
 
@@ -106,7 +112,9 @@ async function execute(
       ? Math.floor(args["context"])
       : 0;
   const limit =
-    typeof args["limit"] === "number" && args["limit"] > 0 ? Math.floor(args["limit"]) : 0;
+    typeof args["limit"] === "number" && args["limit"] > 0
+      ? Math.floor(args["limit"])
+      : 0;
   const globRestrict = typeof args["glob"] === "string" ? args["glob"] : "";
 
   const rgArgs: string[] = [];
@@ -121,11 +129,27 @@ async function execute(
   if (globRestrict) rgArgs.push("-g", globRestrict);
   // Belt-and-suspenders: always ignore these huge dirs even if .gitignore
   // doesn't list them (e.g. dist after fresh clone).
-  rgArgs.push("--glob", "!node_modules", "--glob", "!.git", "--glob", "!dist", "--glob", "!build");
+  rgArgs.push(
+    "--glob",
+    "!node_modules",
+    "--glob",
+    "!.git",
+    "--glob",
+    "!dist",
+    "--glob",
+    "!build",
+  );
   // Use -- to terminate flag parsing so a pattern starting with '-' is safe.
   rgArgs.push("--", pattern, searchRoot);
 
-  log.info("tool: grep", { pattern, searchRoot, outputMode, caseInsensitive, context, limit });
+  log.info("tool: Grep", {
+    pattern,
+    searchRoot,
+    outputMode,
+    caseInsensitive,
+    context,
+    limit,
+  });
 
   return new Promise<ToolExecResult>((resolveResult) => {
     let stdout = "";
@@ -144,7 +168,9 @@ async function execute(
       if (bytes > DEFAULT_MAX_BYTES) {
         if (!truncated) {
           truncated = true;
-          stdout += d.toString("utf8").slice(0, Math.max(0, DEFAULT_MAX_BYTES - (bytes - d.length)));
+          stdout += d
+            .toString("utf8")
+            .slice(0, Math.max(0, DEFAULT_MAX_BYTES - (bytes - d.length)));
         }
         // Past the cap: drop the rest. Don't kill the process — let rg
         // finish so we get a clean exit code, but stop accumulating.
@@ -170,7 +196,13 @@ async function execute(
       if (settled) return;
       settled = true;
       ctx.signal.removeEventListener("abort", onAbort);
-      resolveResult(errorResult(`rg spawn failed: ${err.message}`, "other", `grep: ${pattern}`));
+      resolveResult(
+        errorResult(
+          `rg spawn failed: ${err.message}`,
+          "other",
+          `Grep: ${pattern}`,
+        ),
+      );
     });
 
     child.on("close", (exitCode) => {
@@ -184,7 +216,7 @@ async function execute(
           errorResult(
             `ripgrep error: ${stderr.trim() || "exit 2"}`,
             "other",
-            `grep: ${pattern}`,
+            `Grep: ${pattern}`,
           ),
         );
         return;
@@ -210,7 +242,8 @@ async function execute(
         (context ? `, context=${context}` : "") +
         `\n`;
 
-      const body = exitCode === 1 ? "(no matches)" : display.trim() || "(no matches)";
+      const body =
+        exitCode === 1 ? "(no matches)" : display.trim() || "(no matches)";
       const text = header + body;
 
       resolveResult({
@@ -225,13 +258,14 @@ async function execute(
 }
 
 function titleFor(args: Record<string, unknown>, pattern: string): string {
-  const desc = typeof args["description"] === "string" ? args["description"].trim() : "";
+  const desc =
+    typeof args["description"] === "string" ? args["description"].trim() : "";
   if (desc) return desc;
   return `Grep ${pattern}`;
 }
 
 export const grepTool: Tool = {
-  name: "grep",
+  name: "Grep",
   tier: "read",
   spec,
   execute,

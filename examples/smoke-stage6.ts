@@ -1,17 +1,17 @@
 // Stage-6 acceptance harness — exercises the upgraded read/edit/write
 // pipeline end-to-end:
 //
-//   1. read_file before edit:  edit must succeed.
-//   2. edit_file without prior read: edit must fail with a clear message.
-//   3. read_file twice in one prompt: second call should be a cache hit
+//   1. Read before Edit:  Edit must succeed.
+//   2. Edit without prior Read: Edit must fail with a clear message.
+//   3. Read twice in one prompt: second call should be a cache hit
 //      (we observe the agent's stderr "cache hit" log).
-//   4. read_file with offset/limit: returned text uses correct line numbers.
-//   5. write_file then edit_file: edit must succeed (write seeds the cache).
+//   4. Read with offset/limit: returned text uses correct line numbers.
+//   5. Write then Edit: Edit must succeed (Write seeds the cache).
 //
 // Drives the agent directly via a custom ACP Client that mocks the
 // fs/read_text_file and fs/write_text_file methods against a temp dir.
 // Uses INVOX_MOCK=tools so the LLM is deterministic? No — MockToolProvider
-// only emits read_file. So this harness drives the agent's tools through
+// only emits Read. So this harness drives the agent's tools through
 // a CUSTOM mock provider that emits a scripted sequence of tool_calls.
 // We export it via INVOX_MOCK_SCRIPT (see below) — if that's awkward, we
 // fall back to invoking the tools' execute() directly.
@@ -35,17 +35,17 @@ async function main(): Promise<void> {
 
   // Seed a file
   const file = join(dir, "hello.txt");
-  writeFileSync(
-    file,
-    "alpha\nbeta\ngamma\ndelta\nepsilon\n",
-    "utf8",
-  );
+  writeFileSync(file, "alpha\nbeta\ngamma\ndelta\nepsilon\n", "utf8");
 
   // Mock ACP connection: fs/read and fs/write hit the local disk inside `dir`.
   const conn = {
-    async readTextFile(params: { path: string; line?: number | null; limit?: number | null }) {
+    async readTextFile(params: {
+      path: string;
+      line?: number | null;
+      limit?: number | null;
+    }) {
       const content = readFileSync(params.path, "utf8");
-      // We deliberately ignore line/limit here — read_file does its own
+      // We deliberately ignore line/limit here — Read does its own
       // pagination using the cached full content, so the ACP server-side
       // slicing isn't on the hot path for this test.
       return { content };
@@ -80,49 +80,69 @@ async function main(): Promise<void> {
     state,
   };
 
-  // ── 1. read_file produces line-numbered output and caches.
+  // ── 1. Read produces line-numbered output and caches.
   let r = await executeTool(
-    "read_file",
+    "Read",
     JSON.stringify({ path: "hello.txt", description: "read file" }),
     ctx,
   );
-  assert(r.ok, `1. read_file should succeed: ${r.resultText}`);
-  assert(/^\s*1\talpha/m.test(r.resultText), `1. expected line-numbered alpha: ${r.resultText}`);
-  assert(/^\s*5\tepsilon/m.test(r.resultText), `1. expected line 5 epsilon: ${r.resultText}`);
-  console.error("[stage6] ✓ read_file numbers lines");
+  assert(r.ok, `1. Read should succeed: ${r.resultText}`);
+  assert(
+    /^\s*1\talpha/m.test(r.resultText),
+    `1. expected line-numbered alpha: ${r.resultText}`,
+  );
+  assert(
+    /^\s*5\tepsilon/m.test(r.resultText),
+    `1. expected line 5 epsilon: ${r.resultText}`,
+  );
+  console.error("[stage6] ✓ Read numbers lines");
 
-  // ── 2. cache hit: second read uses cache (entries should be 1 still).
+  // ── 2. cache hit: second Read uses cache (entries should be 1 still).
   const beforeMisses = state.cache.stats().misses;
   r = await executeTool(
-    "read_file",
+    "Read",
     JSON.stringify({ path: "hello.txt", description: "read again" }),
     ctx,
   );
-  assert(r.ok, `2. second read_file should succeed`);
+  assert(r.ok, `2. second Read should succeed`);
   const afterMisses = state.cache.stats().misses;
   assert(
     afterMisses === beforeMisses,
     `2. expected cache hit (no new misses), but misses went ${beforeMisses}→${afterMisses}`,
   );
-  console.error("[stage6] ✓ read_file second call hits cache");
+  console.error("[stage6] ✓ Read second call hits cache");
 
-  // ── 3. read_file with offset+limit returns correct line numbers.
+  // ── 3. Read with offset+limit returns correct line numbers.
   r = await executeTool(
-    "read_file",
-    JSON.stringify({ path: "hello.txt", offset: 3, limit: 2, description: "page" }),
+    "Read",
+    JSON.stringify({
+      path: "hello.txt",
+      offset: 3,
+      limit: 2,
+      description: "page",
+    }),
     ctx,
   );
   assert(r.ok, `3. paginated read should succeed`);
-  assert(/^\s*3\tgamma/m.test(r.resultText), `3. line 3 gamma missing: ${r.resultText}`);
-  assert(/^\s*4\tdelta/m.test(r.resultText), `3. line 4 delta missing: ${r.resultText}`);
-  assert(!/epsilon/.test(r.resultText), `3. line 5 should not be in slice: ${r.resultText}`);
-  console.error("[stage6] ✓ read_file offset/limit paginates correctly");
+  assert(
+    /^\s*3\tgamma/m.test(r.resultText),
+    `3. line 3 gamma missing: ${r.resultText}`,
+  );
+  assert(
+    /^\s*4\tdelta/m.test(r.resultText),
+    `3. line 4 delta missing: ${r.resultText}`,
+  );
+  assert(
+    !/epsilon/.test(r.resultText),
+    `3. line 5 should not be in slice: ${r.resultText}`,
+  );
+  console.error("[stage6] ✓ Read offset/limit paginates correctly");
 
-  // ── 4. edit_file requires prior read_file.
+  // ── 4. Edit requires prior Read.
   const file2 = join(dir, "untouched.txt");
   writeFileSync(file2, "x\ny\nz\n", "utf8");
   r = await executeTool(
-    "edit_file",
+    "Edit",
     JSON.stringify({
       path: "untouched.txt",
       old_string: "x",
@@ -132,17 +152,20 @@ async function main(): Promise<void> {
     ctx,
   );
   assert(!r.ok, `4. edit on unread file should fail`);
-  assert(/before edit_file/.test(r.resultText), `4. expected gate message: ${r.resultText}`);
-  console.error("[stage6] ✓ edit_file gates on read-before-edit");
+  assert(
+    /before Edit/.test(r.resultText),
+    `4. expected gate message: ${r.resultText}`,
+  );
+  console.error("[stage6] ✓ Edit gates on read-before-edit");
 
-  // ── 5. After read_file, edit succeeds and uniqueness is enforced.
+  // ── 5. After Read, Edit succeeds and uniqueness is enforced.
   await executeTool(
-    "read_file",
+    "Read",
     JSON.stringify({ path: "untouched.txt", description: "read for edit" }),
     ctx,
   );
   r = await executeTool(
-    "edit_file",
+    "Edit",
     JSON.stringify({
       path: "untouched.txt",
       old_string: "x",
@@ -153,19 +176,22 @@ async function main(): Promise<void> {
   );
   assert(r.ok, `5. edit after read should succeed: ${r.resultText}`);
   const onDisk = readFileSync(file2, "utf8");
-  assert(onDisk === "X\ny\nz\n", `5. expected file rewritten with X, got: ${JSON.stringify(onDisk)}`);
-  console.error("[stage6] ✓ edit_file applies precise replacement");
+  assert(
+    onDisk === "X\ny\nz\n",
+    `5. expected file rewritten with X, got: ${JSON.stringify(onDisk)}`,
+  );
+  console.error("[stage6] ✓ Edit applies precise replacement");
 
   // ── 6. Non-unique old_string should be rejected unless replace_all.
   writeFileSync(file2, "a\na\na\n", "utf8");
   state.cache.invalidate(join(dir, "untouched.txt"));
   await executeTool(
-    "read_file",
+    "Read",
     JSON.stringify({ path: "untouched.txt", description: "re-read" }),
     ctx,
   );
   r = await executeTool(
-    "edit_file",
+    "Edit",
     JSON.stringify({
       path: "untouched.txt",
       old_string: "a",
@@ -175,12 +201,15 @@ async function main(): Promise<void> {
     ctx,
   );
   assert(!r.ok, `6. non-unique edit should fail`);
-  assert(/not unique/.test(r.resultText), `6. expected uniqueness error: ${r.resultText}`);
-  console.error("[stage6] ✓ edit_file rejects non-unique old_string");
+  assert(
+    /not unique/.test(r.resultText),
+    `6. expected uniqueness error: ${r.resultText}`,
+  );
+  console.error("[stage6] ✓ Edit rejects non-unique old_string");
 
   // ── 7. replace_all bypasses uniqueness check.
   r = await executeTool(
-    "edit_file",
+    "Edit",
     JSON.stringify({
       path: "untouched.txt",
       old_string: "a",
@@ -192,10 +221,13 @@ async function main(): Promise<void> {
   );
   assert(r.ok, `7. replace_all should succeed: ${r.resultText}`);
   const after7 = readFileSync(file2, "utf8");
-  assert(after7 === "A\nA\nA\n", `7. expected all replaced, got: ${JSON.stringify(after7)}`);
-  console.error("[stage6] ✓ edit_file replace_all replaces every occurrence");
+  assert(
+    after7 === "A\nA\nA\n",
+    `7. expected all replaced, got: ${JSON.stringify(after7)}`,
+  );
+  console.error("[stage6] ✓ Edit replace_all replaces every occurrence");
 
-  // ── 8. write_file seeds cache so subsequent edit doesn't need read.
+  // ── 8. Write seeds cache so subsequent Edit doesn't need Read.
   // (Fresh state to be sure.)
   const fresh = {
     readPaths: new Set<string>(),
@@ -204,7 +236,7 @@ async function main(): Promise<void> {
   const ctx2: ToolExecContext = { ...ctx, state: fresh };
   const file3 = join(dir, "new.txt");
   let r2 = await executeTool(
-    "write_file",
+    "Write",
     JSON.stringify({
       path: "new.txt",
       content: "one\ntwo\n",
@@ -212,9 +244,9 @@ async function main(): Promise<void> {
     }),
     ctx2,
   );
-  assert(r2.ok, `8a. write_file should succeed`);
+  assert(r2.ok, `8a. Write should succeed`);
   r2 = await executeTool(
-    "edit_file",
+    "Edit",
     JSON.stringify({
       path: "new.txt",
       old_string: "one",
@@ -223,8 +255,11 @@ async function main(): Promise<void> {
     }),
     ctx2,
   );
-  assert(r2.ok, `8b. edit on just-written file should succeed: ${r2.resultText}`);
-  console.error("[stage6] ✓ write_file seeds cache so subsequent edit works");
+  assert(
+    r2.ok,
+    `8b. edit on just-written file should succeed: ${r2.resultText}`,
+  );
+  console.error("[stage6] ✓ Write seeds cache so subsequent Edit works");
 
   // Cleanup.
   rmSync(dir, { recursive: true, force: true });

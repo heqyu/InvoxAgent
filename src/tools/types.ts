@@ -17,12 +17,12 @@ export type RiskTier = "read" | "write" | "execute";
  * Per-session state shared across tool calls within one ACP session.
  *
  * Lives on the agent's Session object and is passed by reference into every
- * tool execution. Tools mutate it (e.g. read_file populates the cache,
- * edit_file invalidates it) so subsequent calls within the same turn see
+ * tool execution. Tools mutate it (e.g. Read populates the cache,
+ * Edit invalidates it) so subsequent calls within the same turn see
  * a coherent view.
  */
 export interface SessionToolState {
-  /** Absolute paths the LLM has read this session — gates edit_file. */
+  /** Absolute paths the LLM has read this session — gates Edit. */
   readPaths: Set<string>;
   /** Per-path content cache (see ./cache.ts for invalidation rules). */
   cache: FileCache;
@@ -65,14 +65,17 @@ export interface ToolExecResult {
  * router dispatches by `name`.
  */
 export interface Tool {
-  /** Lowercase identifier. Must be unique. Sent to the LLM as function.name. */
+  /** Tool name (PascalCase). Must be unique. Sent to the LLM as function.name. */
   readonly name: string;
   /** Risk tier — drives the permission gate in router.ts. */
   readonly tier: RiskTier;
   /** OpenAI tool spec given to the LLM. The function.name MUST match `name`. */
   readonly spec: ToolSpec;
   /** Run the tool and produce a result the agent can stream back. */
-  execute(args: Record<string, unknown>, ctx: ToolExecContext): Promise<ToolExecResult>;
+  execute(
+    args: Record<string, unknown>,
+    ctx: ToolExecContext,
+  ): Promise<ToolExecResult>;
 }
 
 /** Helper used by every tool's error paths. */
@@ -83,7 +86,9 @@ export function errorResult(
 ): ToolExecResult {
   return {
     resultText: `ERROR: ${msg}`,
-    acpContent: [{ type: "content", content: { type: "text", text: `Error: ${msg}` } }],
+    acpContent: [
+      { type: "content", content: { type: "text", text: `Error: ${msg}` } },
+    ],
     kind,
     title,
     ok: false,
