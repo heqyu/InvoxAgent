@@ -2,11 +2,14 @@
 // pipeline end-to-end:
 //
 //   1. Read before Edit:  Edit must succeed.
-//   2. Edit without prior Read: Edit must fail with a clear message.
-//   3. Read twice in one prompt: second call should be a cache hit
+//   2. Read twice in one prompt: second call should be a cache hit
 //      (we observe the agent's stderr "cache hit" log).
-//   4. Read with offset/limit: returned text uses correct line numbers.
-//   5. Write then Edit: Edit must succeed (Write seeds the cache).
+//   3. Read with offset/limit: returned text uses correct line numbers.
+//   4. Edit auto-reads unread file and succeeds.
+//   5. Edit on a fresh file succeeds (auto-read).
+//   6. Non-unique old_string rejected unless replace_all.
+//   7. replace_all bypasses uniqueness check.
+//   8. Write seeds cache so subsequent Edit works.
 //
 // Drives the agent directly via a custom ACP Client that mocks the
 // fs/read_text_file and fs/write_text_file methods against a temp dir.
@@ -138,7 +141,7 @@ async function main(): Promise<void> {
   );
   console.error("[stage6] ✓ Read offset/limit paginates correctly");
 
-  // ── 4. Edit requires prior Read.
+  // ── 4. Edit auto-reads unread file and succeeds.
   const file2 = join(dir, "untouched.txt");
   writeFileSync(file2, "x\ny\nz\n", "utf8");
   r = await executeTool(
@@ -151,45 +154,36 @@ async function main(): Promise<void> {
     }),
     ctx,
   );
-  assert(!r.ok, `4. edit on unread file should fail`);
   assert(
-    /before Edit/.test(r.resultText),
-    `4. expected gate message: ${r.resultText}`,
+    r.ok,
+    `4. edit on unread file should auto-read and succeed: ${r.resultText}`,
   );
-  console.error("[stage6] ✓ Edit gates on read-before-edit");
+  console.error("[stage6] ✓ Edit auto-reads before editing");
 
-  // ── 5. After Read, Edit succeeds and uniqueness is enforced.
-  await executeTool(
-    "Read",
-    JSON.stringify({ path: "untouched.txt", description: "read for edit" }),
-    ctx,
-  );
+  // ── 5. Edit on a fresh file succeeds (auto-read).
+  writeFileSync(file2, "hello\nworld\n", "utf8");
+  state.cache.invalidate(join(dir, "untouched.txt"));
   r = await executeTool(
     "Edit",
     JSON.stringify({
       path: "untouched.txt",
-      old_string: "x",
-      new_string: "X",
-      description: "uppercase x",
+      old_string: "hello",
+      new_string: "HELLO",
+      description: "replace hello",
     }),
     ctx,
   );
-  assert(r.ok, `5. edit after read should succeed: ${r.resultText}`);
+  assert(r.ok, `5. edit should succeed: ${r.resultText}`);
   const onDisk = readFileSync(file2, "utf8");
   assert(
-    onDisk === "X\ny\nz\n",
-    `5. expected file rewritten with X, got: ${JSON.stringify(onDisk)}`,
+    onDisk === "HELLO\nworld\n",
+    `5. expected HELLO, got: ${JSON.stringify(onDisk)}`,
   );
   console.error("[stage6] ✓ Edit applies precise replacement");
 
   // ── 6. Non-unique old_string should be rejected unless replace_all.
   writeFileSync(file2, "a\na\na\n", "utf8");
   state.cache.invalidate(join(dir, "untouched.txt"));
-  await executeTool(
-    "Read",
-    JSON.stringify({ path: "untouched.txt", description: "re-read" }),
-    ctx,
-  );
   r = await executeTool(
     "Edit",
     JSON.stringify({

@@ -34,11 +34,11 @@ const spec: ToolSpec = {
     description:
       "Apply a precise string replacement to a file. The exact `old_string` " +
       "is found and replaced with `new_string`. Strict semantics:\n" +
-      "  - You MUST call Read on the path before Edit.\n" +
       "  - `old_string` must match EXACTLY (whitespace, indentation, newlines).\n" +
       "  - `old_string` must be UNIQUE in the file unless `replace_all=true`.\n" +
       "  - If old_string is not unique, expand it with surrounding context.\n" +
       "  - To create a brand-new file, use Write (not Edit).\n" +
+      "The file is auto-read from cache if available; no prior Read needed.\n" +
       "Use this for surgical edits; use Write for large rewrites.",
     parameters: {
       type: "object",
@@ -118,20 +118,12 @@ async function execute(
     outsideWorkspace: !inside,
   });
 
-  // Read-before-edit gate.
+  // Auto-read if the file hasn't been read yet (cache miss or readPaths gap).
+  // This ensures the LLM always works from up-to-date content.
   const hasBeenRead = ctx.state.readPaths.has(path);
-  log.debug("Edit: read-before-edit gate", { path, hasBeenRead });
-  if (!hasBeenRead) {
-    return errorResult(
-      `must call Read on ${rel} before Edit (so you see the exact text to replace)`,
-      "edit",
-      `Edit: ${rel}`,
-    );
-  }
-
-  // Get current text — prefer cache, fall back to read (ACP or direct fs).
-  let currentText: string;
   const cached = ctx.state.cache.get(path);
+  let currentText: string;
+
   if (cached) {
     log.debug("Edit: current text from cache", {
       path,
@@ -139,30 +131,31 @@ async function execute(
     });
     currentText = cached.content;
   } else {
+    // Not in cache — read it now (same path whether first time or evicted).
     try {
       if (inside) {
-        log.debug("Edit: re-reading via ACP for edit", { path });
+        log.debug("Edit: auto-reading via ACP", { path });
         const r = await ctx.conn.readTextFile({
           sessionId: ctx.sessionId,
           path,
         });
         currentText = r.content;
-        log.debug("Edit: ACP re-read succeeded", {
+        log.debug("Edit: ACP auto-read succeeded", {
           path,
           bytes: currentText.length,
         });
       } else {
         log.warn("tool: Edit: reading OUTSIDE workspace", { path });
-        log.debug("Edit: re-reading via direct fs for edit", { path });
+        log.debug("Edit: auto-reading via direct fs", { path });
         currentText = await readFileDirect(path);
-        log.debug("Edit: direct fs re-read succeeded", {
+        log.debug("Edit: direct fs auto-read succeeded", {
           path,
           bytes: currentText.length,
         });
       }
       ctx.state.cache.set(path, currentText);
     } catch (e) {
-      log.debug("Edit: re-read FAILED", {
+      log.debug("Edit: auto-read FAILED", {
         path,
         error: (e as Error).message,
       });
@@ -172,6 +165,12 @@ async function execute(
         `Edit: ${rel}`,
       );
     }
+  }
+
+  // Mark as read (for consistency / downstream tool gates).
+  if (!hasBeenRead) {
+    log.info("Edit: auto-read before edit", { path });
+    ctx.state.readPaths.add(path);
   }
 
   // Compute new content with strict semantics.
