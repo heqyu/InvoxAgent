@@ -41,8 +41,10 @@ interface SkillDef {
   id: string;
   /** The skill's prompt template content (from SKILL.md). */
   content: string;
-  /** Source file path (for logging / catalog). */
+  /** Source file path to SKILL.md (for logging / catalog). */
   source: string;
+  /** Absolute path to the skill directory (dirname of source). */
+  skillDir: string;
   /** If loaded from a plugin, the plugin name. Undefined for direct skills. */
   pluginName?: string;
 }
@@ -67,7 +69,12 @@ function loadFromDir(skillsDir: string, skills: Map<string, SkillDef>): number {
       try {
         const content = readFileSync(skillFile, "utf8");
         if (!content.trim()) continue;
-        skills.set(id, { id, content, source: skillFile });
+        skills.set(id, {
+          id,
+          content,
+          source: skillFile,
+          skillDir: join(skillsDir, id),
+        });
         count++;
       } catch {
         // SKILL.md missing or unreadable — skip silently
@@ -104,6 +111,7 @@ function loadSkills(cwd: string): Map<string, SkillDef> {
       id: ps.id,
       content: ps.content,
       source: ps.source,
+      skillDir: join(ps.source, ".."),
       pluginName: ps.pluginName,
     });
     pluginCount++;
@@ -132,7 +140,9 @@ function loadSkills(cwd: string): Map<string, SkillDef> {
 /**
  * Interpolate placeholders in a skill template.
  *
- * Supports two styles:
+ * Supports three styles:
+ *   - `${CLAUDE_SKILL_DIR}` — replaced by the skill's directory path
+ *                              (Windows-normalized to forward slashes)
  *   - `$ARGUMENTS`           — Claude Code compat: replaced by params.arguments
  *                              (string) or the full params JSON if not present.
  *   - `{{key}}`              — named params: replaced by params[key].
@@ -142,17 +152,28 @@ function loadSkills(cwd: string): Map<string, SkillDef> {
 function interpolate(
   template: string,
   params: Record<string, unknown>,
+  skillDir?: string,
 ): string {
-  // 1. $ARGUMENTS — Claude Code convention
+  // 1. ${CLAUDE_SKILL_DIR} — skill directory for script resolution
+  let result = template;
+  if (skillDir) {
+    // Normalize backslashes to forward slashes on Windows so shell commands
+    // don't treat them as escape characters.
+    const normalized =
+      process.platform === "win32" ? skillDir.replace(/\\/g, "/") : skillDir;
+    result = result.replace(/\$\{CLAUDE_SKILL_DIR\}/g, normalized);
+  }
+
+  // 2. $ARGUMENTS — Claude Code convention
   const argsValue =
     typeof params["arguments"] === "string"
       ? params["arguments"]
       : Object.keys(params).length > 0
         ? JSON.stringify(params)
         : "";
-  let result = template.replace(/\$ARGUMENTS/g, argsValue);
+  result = result.replace(/\$ARGUMENTS/g, argsValue);
 
-  // 2. {{key}} — named params
+  // 3. {{key}} — named params
   result = result.replace(/\{\{(\w+)\}\}/g, (_match, key: string) => {
     const val = params[key];
     if (val === undefined || val === null) return `{{${key}}}`;
@@ -338,7 +359,7 @@ export function renderSkill(
   const skills = loadSkills(cwd);
   const skill = skills.get(name);
   if (!skill) return null;
-  return interpolate(skill.content, params);
+  return interpolate(skill.content, params, skill.skillDir);
 }
 
 // ── Catalog rendering ───────────────────────────────────────────────
@@ -460,7 +481,16 @@ async function execute(
       : {};
 
   // Interpolate the skill's content template
-  const rendered = interpolate(skill.content, params);
+  let rendered = interpolate(skill.content, params, skill.skillDir);
+
+  // Prepend base directory header so the LLM always knows where the skill
+  // lives (cc-haha compatibility). Scripts referenced as
+  // `${CLAUDE_SKILL_DIR}/scripts/foo.sh` will resolve correctly.
+  const normalizedDir =
+    process.platform === "win32"
+      ? skill.skillDir.replace(/\\/g, "/")
+      : skill.skillDir;
+  rendered = `Base directory for this skill: ${normalizedDir}\n\n${rendered}`;
 
   log.info("Skill: invoked", {
     name,
