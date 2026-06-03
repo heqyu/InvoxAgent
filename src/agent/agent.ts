@@ -18,6 +18,8 @@
 // MAX_ITERATIONS defaults to 50; override via INVOX_MAX_ITERATIONS env.
 import OpenAI from "openai";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   PROTOCOL_VERSION,
   type Agent,
@@ -29,6 +31,7 @@ import {
   type ContentBlock,
   type DeleteSessionRequest,
   type DeleteSessionResponse,
+  type Implementation,
   type InitializeRequest,
   type InitializeResponse,
   type LoadSessionRequest,
@@ -80,6 +83,22 @@ import {
   runPostToolUseFailure,
   runStop,
 } from "../plugins/hooks.js";
+
+/** Read the agent package version once, cache for the process lifetime. */
+let _agentVersion: string | undefined;
+function agentVersion(): string {
+  if (!_agentVersion) {
+    try {
+      const p = join(__dirname, "..", "package.json");
+      _agentVersion = (
+        JSON.parse(readFileSync(p, "utf8")) as { version: string }
+      ).version;
+    } catch {
+      _agentVersion = "unknown";
+    }
+  }
+  return _agentVersion;
+}
 
 function maxIterations(): number {
   const raw = process.env["INVOX_MAX_ITERATIONS"];
@@ -199,6 +218,7 @@ export interface AgentConfigOptions {
 export class InvoxAgent implements Agent {
   readonly conn: AgentSideConnection;
   private clientCaps: ClientCapabilities = {};
+  private clientInfo: Implementation | undefined;
   private sessions = new Map<string, Session>();
   private provider: LLMProvider;
   private policy: PermissionPolicy;
@@ -265,10 +285,12 @@ export class InvoxAgent implements Agent {
 
   async initialize(params: InitializeRequest): Promise<InitializeResponse> {
     this.clientCaps = params.clientCapabilities ?? {};
+    this.clientInfo = params.clientInfo ?? undefined;
     log.info("initialize", {
       provider: this.provider.name,
       clientProtocolVersion: params.protocolVersion,
       clientCaps: this.clientCaps,
+      clientInfo: this.clientInfo,
     });
 
     return {
@@ -336,8 +358,7 @@ export class InvoxAgent implements Agent {
     const hooks = this.getHooks(session.cwd);
     runSessionStart(hooks, {
       hook_event_name: "SessionStart",
-      session_id: session.id,
-      cwd: session.cwd,
+      ...this.hookBase(session),
       source: "startup",
     }).catch((e) => {
       log.warn(
@@ -672,9 +693,8 @@ export class InvoxAgent implements Agent {
     const hooks = this.getHooks(session.cwd);
     const submitResult = await runUserPromptSubmit(hooks, {
       hook_event_name: "UserPromptSubmit",
+      ...this.hookBase(session),
       prompt: contentToString(userContent),
-      session_id: session.id,
-      cwd: session.cwd,
     });
 
     if (!submitResult.continue) {
@@ -737,9 +757,8 @@ export class InvoxAgent implements Agent {
       const stopHooks = this.getHooks(session.cwd);
       runStop(stopHooks, {
         hook_event_name: "Stop",
+        ...this.hookBase(session),
         stop_hook_active: stopReason !== "end_turn",
-        session_id: session.id,
-        cwd: session.cwd,
       }).catch((e) => {
         log.warn("Stop hook error", e instanceof Error ? e.message : String(e));
       });
@@ -936,10 +955,9 @@ export class InvoxAgent implements Agent {
       const toolHooks = this.getHooks(session.cwd);
       const preResult = await runPreToolUse(toolHooks, {
         hook_event_name: "PreToolUse",
+        ...this.hookBase(session),
         tool_name: call.name,
         tool_input: toolArgs,
-        session_id: session.id,
-        cwd: session.cwd,
       });
 
       if (!preResult.allow) {
@@ -1008,11 +1026,10 @@ export class InvoxAgent implements Agent {
       if (r.ok) {
         const postResult = await runPostToolUse(toolHooks, {
           hook_event_name: "PostToolUse",
+          ...this.hookBase(session),
           tool_name: call.name,
           tool_input: toolArgs,
           tool_response: r.resultText,
-          session_id: session.id,
-          cwd: session.cwd,
         });
         if (postResult.systemMessage) {
           r.resultText += "\n\n" + postResult.systemMessage;
@@ -1030,11 +1047,10 @@ export class InvoxAgent implements Agent {
       } else {
         const postResult = await runPostToolUseFailure(toolHooks, {
           hook_event_name: "PostToolUseFailure",
+          ...this.hookBase(session),
           tool_name: call.name,
           tool_input: toolArgs,
           tool_response: r.resultText,
-          session_id: session.id,
-          cwd: session.cwd,
         });
         if (postResult.systemMessage) {
           r.resultText += "\n\n" + postResult.systemMessage;
@@ -1086,6 +1102,23 @@ export class InvoxAgent implements Agent {
     const hooks = loadHooks(cwd);
     this.hookCache.set(cwd, hooks);
     return hooks;
+  }
+
+  /** Build the common base fields shared by every hook context. */
+  private hookBase(session: Session): {
+    session_id: string;
+    cwd: string;
+    model: string;
+    client: string;
+    version: string;
+  } {
+    return {
+      session_id: session.id,
+      cwd: session.cwd,
+      model: session.selectedModel ?? this.models.defaultModelId,
+      client: this.clientInfo?.name ?? "",
+      version: agentVersion(),
+    };
   }
 
   /**

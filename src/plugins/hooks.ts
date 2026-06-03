@@ -74,6 +74,12 @@ export interface HookContextBase {
   session_id: string;
   cwd: string;
   transcript_path?: string;
+  /** LLM model id used for the current session. */
+  model: string;
+  /** Client name reported during ACP initialize (e.g. "Zed", "Claude Code"). */
+  client: string;
+  /** Agent (invox) package version. */
+  version: string;
 }
 
 export interface SessionStartCtx extends HookContextBase {
@@ -385,6 +391,11 @@ function runHookCommand(
     });
 
     // Write context JSON to stdin and close
+    log.debug("hook stdin", {
+      hookEvent,
+      command: cmd.command.substring(0, 120),
+      stdin: jsonCtx.trim(),
+    });
     child.stdin.write(jsonCtx);
     child.stdin.end();
   });
