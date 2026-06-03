@@ -832,21 +832,21 @@ export class InvoxAgent implements Agent {
       // System prompt lives at history[0]; tool specs are the complete
       // merged list (built-in + MCP).  Gated behind log.isEnabled("debug")
       // to avoid the cost of stringify when nobody is listening.
-      if (log.isEnabled("debug")) {
-        const systemMsg = session.history[0];
-        log.debug("llm request context ▸ system prompt", {
-          role: systemMsg?.role,
-          content:
-            typeof systemMsg?.content === "string"
-              ? systemMsg.content
-              : JSON.stringify(systemMsg?.content),
-          historyLength: session.history.length,
-        });
-        log.debug("llm request context ▸ tool specs", {
-          count: allTools.length,
-          tools: allTools,
-        });
-      }
+      // if (log.isEnabled("debug")) {
+      //   const systemMsg = session.history[0];
+      //   log.debug("llm request context ▸ system prompt", {
+      //     role: systemMsg?.role,
+      //     content:
+      //       typeof systemMsg?.content === "string"
+      //         ? systemMsg.content
+      //         : JSON.stringify(systemMsg?.content),
+      //     historyLength: session.history.length,
+      //   });
+      //   log.debug("llm request context ▸ tool specs", {
+      //     count: allTools.length,
+      //     tools: allTools,
+      //   });
+      // }
 
       for await (const delta of this.provider.stream({
         messages: session.history,
