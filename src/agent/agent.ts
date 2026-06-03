@@ -64,6 +64,9 @@ import {
 import { FileCache } from "../tools/cache.js";
 import { kindFromTier } from "../tools/permissions.js";
 import { listAvailableCommands } from "../tools/skill.js";
+import { McpClientManager } from "../mcp/client.js";
+import { loadMcpConfig } from "../mcp/config.js";
+import { createMcpTool } from "../mcp/tool.js";
 import { getTool, TOOL_SPECS } from "../tools/registry.js";
 import { executeTool } from "../tools/router.js";
 import type { PermissionPolicy, SessionToolState } from "../tools/types.js";
@@ -124,6 +127,8 @@ interface Session {
   };
   /** Wall-clock ms when prompt() started — used to compute turn elapsed. */
   turnStartedAt: number;
+  /** MCP client manager — owns connected MCP servers for this session. */
+  mcpClient?: McpClientManager;
   /**
    * Persisted snapshot of the last completed turn's usage. Survives restarts
    * so the user can see what the previous turn cost after reloadSession.
@@ -310,6 +315,11 @@ export class InvoxAgent implements Agent {
     this.sessions.set(id, session);
     log.info("session created", { id, cwd: params.cwd });
 
+    // Connect to MCP servers defined in .claude/.mcp.json.
+    // Graceful degradation: if config is missing or any server fails,
+    // the session continues without MCP tools.
+    await this.initMcpForSession(session);
+
     // Advertise available skills as `/` commands in Zed's UI.
     //
     // IMPORTANT: Must be deferred to the next macrotask. The ACP SDK's
@@ -391,6 +401,9 @@ export class InvoxAgent implements Agent {
     };
     this.sessions.set(session.id, session);
 
+    // Connect to MCP servers defined in .claude/.mcp.json.
+    await this.initMcpForSession(session);
+
     // Refresh the system prompt with the current skill list — the persisted
     // history[0] may have a stale version (or none) from a previous session.
     if (restoredConfigValues.system_prompt) {
@@ -465,6 +478,15 @@ export class InvoxAgent implements Agent {
     // Try all known sessions first (in-memory).
     const session = this.sessions.get(params.sessionId);
     if (session) {
+      // Disconnect MCP servers before cleanup.
+      if (session.mcpClient) {
+        session.mcpClient.disconnect().catch((e) => {
+          log.warn("mcp disconnect error on session delete", {
+            sessionId: params.sessionId,
+            error: (e as Error).message,
+          });
+        });
+      }
       const s = new SessionStore(session.cwd);
       s.delete(params.sessionId);
       this.sessions.delete(params.sessionId);
@@ -716,10 +738,15 @@ export class InvoxAgent implements Agent {
     let finishReason: "stop" | "tool_calls" | "length" | "other" = "other";
 
     try {
+      // Merge invox built-in tools with MCP tools for this session.
+      const mcpSpecs = session.mcpClient?.getToolSpecs() ?? [];
+      const allTools =
+        mcpSpecs.length > 0 ? [...TOOL_SPECS, ...mcpSpecs] : TOOL_SPECS;
+
       for await (const delta of this.provider.stream({
         messages: session.history,
         signal: session.abort.signal,
-        tools: TOOL_SPECS,
+        tools: allTools,
         model: session.selectedModel ?? this.models.defaultModelId,
         reasoningEffort: thinkingToReasoningEffort(
           session.configValues.thinking,
@@ -782,7 +809,15 @@ export class InvoxAgent implements Agent {
 
     for (const call of toolCalls) {
       const tool = getTool(call.name);
-      const startKind = tool ? kindFromTier(tool.tier) : "other";
+      const mcpTool =
+        !tool && call.name.startsWith("mcp__")
+          ? session.mcpClient?.getMcpTool(call.name)
+          : undefined;
+      const startKind = mcpTool
+        ? ("execute" as const)
+        : tool
+          ? kindFromTier(tool.tier)
+          : ("other" as const);
       const startTitle = startTitleFor(call);
       const startLocations = startLocationsFor(call);
 
@@ -806,16 +841,32 @@ export class InvoxAgent implements Agent {
       });
       const toolStartedAt = Date.now();
 
-      const r = await executeTool(call.name, call.arguments, {
-        conn: this.conn,
-        sessionId: session.id,
-        cwd: session.cwd,
-        caps: this.clientCaps,
-        signal: session.abort.signal,
-        policy: this.policy,
-        toolCallId: call.id,
-        state: session.toolState,
-      });
+      const r = mcpTool
+        ? await createMcpTool(mcpTool, session.mcpClient!).execute(
+            call.arguments.trim() === ""
+              ? {}
+              : (JSON.parse(call.arguments) as Record<string, unknown>),
+            {
+              conn: this.conn,
+              sessionId: session.id,
+              cwd: session.cwd,
+              caps: this.clientCaps,
+              signal: session.abort.signal,
+              policy: this.policy,
+              toolCallId: call.id,
+              state: session.toolState,
+            },
+          )
+        : await executeTool(call.name, call.arguments, {
+            conn: this.conn,
+            sessionId: session.id,
+            cwd: session.cwd,
+            caps: this.clientCaps,
+            signal: session.abort.signal,
+            policy: this.policy,
+            toolCallId: call.id,
+            state: session.toolState,
+          });
 
       log.info("tool end", {
         name: call.name,
@@ -870,6 +921,36 @@ export class InvoxAgent implements Agent {
         cwd,
         error: (e as Error).message,
       });
+    }
+  }
+
+  /**
+   * Connect to MCP servers defined in .claude/.mcp.json and attach the
+   * manager to the session. Graceful degradation: if the config file is
+   * missing or any server fails to start, the session continues without
+   * MCP tools.
+   */
+  private async initMcpForSession(session: Session): Promise<void> {
+    try {
+      const config = loadMcpConfig(session.cwd);
+      if (!config) return;
+      const mcp = new McpClientManager();
+      await mcp.connect(config.mcpServers);
+      if (mcp.getToolSpecs().length > 0) {
+        session.mcpClient = mcp;
+        log.info("mcp connected for session", {
+          sessionId: session.id,
+          cwd: session.cwd,
+          toolCount: mcp.getToolSpecs().length,
+        });
+      }
+    } catch (e) {
+      log.warn("mcp init failed", {
+        sessionId: session.id,
+        cwd: session.cwd,
+        error: (e as Error).message,
+      });
+      // Session continues without MCP tools.
     }
   }
 
