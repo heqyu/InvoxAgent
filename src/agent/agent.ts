@@ -20,6 +20,7 @@ import OpenAI from "openai";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import os from "node:os";
 import {
   PROTOCOL_VERSION,
   type Agent,
@@ -1592,6 +1593,18 @@ function systemMessageWithMemoryAndSkills(
   cwd: string,
 ): LLMMessage {
   let content = prompt;
+
+  // 0. Context: date + platform (helps LLM generate correct shell commands)
+  const now = new Date();
+  const dateStr = now.toISOString().slice(0, 10); // YYYY-MM-DD
+  const platform = process.platform; // "win32" | "darwin" | "linux"
+  const arch = process.arch; // "x64" | "arm64" | ...
+  const release = os.release(); // e.g. "10.0.26100"
+  content +=
+    `\n\n# Context\n\n` +
+    `Current date: ${dateStr}\n` +
+    `Platform: ${platform} (${arch}), release ${release}\n` +
+    `Working directory: ${cwd}`;
 
   // 1. CLAUDE.md memory (user first, then project)
   const memory = loadClaudeMd(cwd);
