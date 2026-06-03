@@ -1,0 +1,12 @@
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "a052fc1c3a3f3bf15a1c0f2941ed8117da6236fd",
+  "prompts": {},
+  "humans": {
+    "h_a9f63ef7475f25": {
+      "author": "invox <invox@local>"
+    }
+  }
+}
