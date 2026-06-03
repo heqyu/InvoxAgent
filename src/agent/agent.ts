@@ -1362,22 +1362,21 @@ function systemMessageForPrompt(prompt: string): LLMMessage {
 /**
  * Build a system message that includes the list of available skills.
  *
- * The skill names are injected so the LLM knows which skills exist and
- * can semantically match user requests like "use skill /self-constrained-build"
- * to the correct Skill tool call — without having to call Skill({ name: "list" })
- * first.
+ * Modeled after Claude Code's skill listing format: each skill gets a
+ * meaningful description extracted from its SKILL.md frontmatter, so the
+ * LLM can semantically match user requests to the correct skill without
+ * having to call Skill({ name: "list" }) first.
  */
 function systemMessageWithSkills(prompt: string, cwd: string): LLMMessage {
   const commands = listAvailableCommands(cwd);
   if (commands.length === 0) {
     return { role: "system", content: prompt };
   }
-  const lines = commands.map((c) => `  - ${c.name}: ${c.description}`);
+  const lines = commands.map((c) => `- ${c.name}: ${c.description}`);
   const skillSection =
-    `\n\n# Available Skills\n` +
+    `\n\nThe following skills are available for use with the Skill tool:\n\n` +
     lines.join("\n") +
-    `\n\nWhen the user mentions any of the above skill names, ` +
-    `call Skill({ name: "<skill-name>", description: "..." }) to load and follow it.`;
+    `\n\nWhen the user types "/<skill-name>", invoke it via Skill. Only use skills listed above, don't guess.`;
   return { role: "system", content: prompt + skillSection };
 }
 

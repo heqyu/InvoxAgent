@@ -11,18 +11,20 @@
 // The LLM then follows the rendered instructions using its existing tools
 // (Read, Write, Edit, Bash, etc.).
 //
-// Skill definitions are loaded from .claude/skills/ directories:
+// Skill definitions are loaded from three sources (lowest → highest priority):
 //
-//   1. <cwd>/.claude/skills/<name>/SKILL.md   — project-level
-//   2. ~/.claude/skills/<name>/SKILL.md       — user-level (global)
+//   1. ~/.claude/skills/<name>/SKILL.md          — user-level (global)
+//   2. Plugin skills (from .plugins-cache.json)   — plugin-level
+//   3. <cwd>/.claude/skills/<name>/SKILL.md       — project-level
 //
-// Project-level skills override user-level on name collision.
+// Higher-priority sources override lower ones on name collision.
 // Calling Skill("list") or an unknown skill name returns the catalog.
 
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { log } from "../log.js";
+import { loadPluginSkills } from "../plugins/loader.js";
 import type { ToolSpec } from "../llm/types.js";
 import { DESCRIPTION_FIELD } from "./shared.js";
 import {
@@ -41,6 +43,8 @@ interface SkillDef {
   content: string;
   /** Source file path (for logging / catalog). */
   source: string;
+  /** If loaded from a plugin, the plugin name. Undefined for direct skills. */
+  pluginName?: string;
 }
 
 // ── Skill loading from .claude/skills/*/SKILL.md ────────────────────
@@ -87,11 +91,25 @@ function loadSkills(cwd: string): Map<string, SkillDef> {
 
   const skills = new Map<string, SkillDef>();
 
-  // 1. User-level: ~/.claude/skills/<name>/SKILL.md
+  // 1. User-level: ~/.claude/skills/<name>/SKILL.md (lowest priority)
   const globalDir = join(homedir(), ".claude", "skills");
   const globalCount = loadFromDir(globalDir, skills);
 
-  // 2. Project-level: <cwd>/.claude/skills/<name>/SKILL.md (overrides global)
+  // 2. Plugin-level: skills from enabled plugins in .plugins-cache.json
+  //    (overrides user-level, but overridden by project-level)
+  const pluginSkills = loadPluginSkills(cwd);
+  let pluginCount = 0;
+  for (const [id, ps] of pluginSkills) {
+    skills.set(id, {
+      id: ps.id,
+      content: ps.content,
+      source: ps.source,
+      pluginName: ps.pluginName,
+    });
+    pluginCount++;
+  }
+
+  // 3. Project-level: <cwd>/.claude/skills/<name>/SKILL.md (highest priority)
   const projectDir = join(cwd, ".claude", "skills");
   const projectCount = loadFromDir(projectDir, skills);
 
@@ -99,6 +117,7 @@ function loadSkills(cwd: string): Map<string, SkillDef> {
     cwd,
     globalDir,
     globalCount,
+    pluginCount,
     projectDir,
     projectCount,
     total: skills.size,
@@ -143,6 +162,126 @@ function interpolate(
   return result;
 }
 
+// ── YAML frontmatter parsing ───────────────────────────────────────
+
+/**
+ * Minimal YAML frontmatter parser — extracts scalar string values only.
+ * Handles both plain scalars and YAML block scalars (>-, |-).
+ *
+ * Example input:
+ *   ---
+ *   name: my-skill
+ *   description: >-
+ *     This is a multi-line
+ *     description.
+ *   ---
+ *
+ * Returns `{ name: "my-skill", description: "This is a multi-line description." }`
+ */
+function parseFrontmatter(content: string): Record<string, string> | null {
+  // Strip UTF-8 BOM if present
+  if (content.charCodeAt(0) === 0xfeff) content = content.slice(1);
+  if (!content.startsWith("---")) return null;
+  const endIdx = content.indexOf("\n---", 3);
+  if (endIdx === -1) return null;
+  const raw = content.slice(3, endIdx).trim();
+  if (!raw) return null;
+
+  const result: Record<string, string> = {};
+  const lines = raw.split("\n");
+  let currentKey = "";
+  let currentValue = "";
+  let blockScalar: "" | ">-" | "|-" = "";
+
+  for (const line of lines) {
+    // New key-value pair (indented 0)
+    const kvMatch = line.match(/^(\w[\w-]*):\s*(.*)/);
+    if (kvMatch) {
+      // Flush previous key
+      if (currentKey) {
+        result[currentKey] = currentValue.trim();
+      }
+      currentKey = kvMatch[1]!;
+      const rawVal = kvMatch[2]!.trim();
+
+      // Check for block scalar indicator
+      if (rawVal === ">-" || rawVal === "|-") {
+        blockScalar = rawVal as ">-" | "|-";
+        currentValue = "";
+      } else if (rawVal === ">" || rawVal === "|") {
+        // Also handle > and | without dash (folded/literal)
+        blockScalar = rawVal === ">" ? ">-" : "|-";
+        currentValue = "";
+      } else {
+        blockScalar = "";
+        // Strip surrounding quotes
+        currentValue = rawVal.replace(/^["']|["']$/g, "");
+      }
+      continue;
+    }
+
+    // Continuation of block scalar (indented)
+    if (currentKey && blockScalar) {
+      if (currentValue) currentValue += " ";
+      currentValue += line.trim();
+    }
+  }
+
+  // Flush last key
+  if (currentKey) {
+    result[currentKey] = currentValue.trim();
+  }
+
+  return Object.keys(result).length > 0 ? result : null;
+}
+
+/**
+ * Extract a human-readable description from a SKILL.md content.
+ *
+ * Priority:
+ *   1. YAML frontmatter `description` field (best quality — author-written)
+ *   2. First non-empty, non-frontmatter line of the markdown body
+ *   3. Fallback: "Invoke the <id> skill"
+ */
+function extractDescription(content: string, id: string): string {
+  // Try frontmatter first
+  const fm = parseFrontmatter(content);
+  if (fm?.["description"]) {
+    let desc = fm["description"];
+    // Unwrap YAML quoted strings if present
+    desc = desc.replace(/^["']|["']$/g, "");
+    if (desc.length > 200) desc = desc.slice(0, 197) + "…";
+    return desc;
+  }
+
+  // Fall back: find first real line after frontmatter
+  // Strip BOM if present
+  let raw = content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
+  let lines = raw.split("\n");
+  if (lines[0]?.trim() === "---") {
+    const endIdx = raw.indexOf("\n---", 3);
+    if (endIdx !== -1) {
+      const afterFm = raw.slice(endIdx + 4);
+      lines = afterFm.split("\n");
+    }
+  }
+  for (const line of lines) {
+    const trimmed = line.trim();
+    // Skip empty lines, headings, frontmatter delimiters, horizontal rules
+    if (
+      !trimmed ||
+      trimmed === "---" ||
+      trimmed === "---" ||
+      trimmed.startsWith("```")
+    )
+      continue;
+    const desc = trimmed.length > 200 ? trimmed.slice(0, 197) + "…" : trimmed;
+    return desc;
+  }
+
+  return `Invoke the ${id} skill`;
+}
+
 // ── ACP AvailableCommand export ─────────────────────────────────────
 
 /**
@@ -162,7 +301,8 @@ export interface SkillAvailableCommand {
  *
  * Each skill becomes a command:
  *   - `name`: the skill id (directory name)
- *   - `description`: first line of the SKILL.md (truncated to 120 chars)
+ *   - `description`: extracted from SKILL.md frontmatter `description` field,
+ *     or the first meaningful line of the markdown body (truncated to 200 chars)
  *   - `input`: unstructured with a hint showing the user can type args
  */
 export function listAvailableCommands(cwd: string): SkillAvailableCommand[] {
@@ -172,12 +312,10 @@ export function listAvailableCommands(cwd: string): SkillAvailableCommand[] {
   for (const skill of [...skills.values()].sort((a, b) =>
     a.id.localeCompare(b.id),
   )) {
-    const firstLine = skill.content.split("\n")[0]?.trim() ?? "";
-    const desc =
-      firstLine.length > 120 ? firstLine.slice(0, 117) + "…" : firstLine;
+    const desc = extractDescription(skill.content, skill.id);
     commands.push({
       name: skill.id,
-      description: desc || `Invoke the ${skill.id} skill`,
+      description: desc,
       input: { type: "unstructured", hint: "Skill parameters (optional)" },
     });
   }
@@ -211,16 +349,16 @@ function renderCatalog(skills: Map<string, SkillDef>): string {
       "No skills found. Create a skill directory with a SKILL.md file:\n\n" +
       "  <project>/.claude/skills/<name>/SKILL.md   (project-level)\n" +
       "  ~/.claude/skills/<name>/SKILL.md           (user-level)\n\n" +
+      "Or install plugins with a .plugins-cache.json at the project root.\n\n" +
       "Use $ARGUMENTS for a catch-all param, or {{param_name}} for named params."
     );
   }
   const lines: string[] = ["Available skills:\n"];
   const sorted = [...skills.values()].sort((a, b) => a.id.localeCompare(b.id));
   for (const skill of sorted) {
-    const firstLine = skill.content.split("\n")[0]?.trim() ?? "";
-    const desc =
-      firstLine.length > 80 ? firstLine.slice(0, 77) + "…" : firstLine;
-    lines.push(`- **${skill.id}**${desc ? ` — ${desc}` : ""}`);
+    const desc = extractDescription(skill.content, skill.id);
+    const src = skill.pluginName ? ` [plugin: ${skill.pluginName}]` : "";
+    lines.push(`- **${skill.id}**${desc ? ` — ${desc}` : ""}${src}`);
   }
   lines.push(`\nCall a skill with: Skill({ name: "<id>", params: { ... } })`);
   return lines.join("\n");
@@ -233,26 +371,32 @@ const spec: ToolSpec = {
   function: {
     name: "Skill",
     description:
-      "Invoke a reusable skill/workflow template loaded from .claude/skills/. " +
-      "Each skill lives at .claude/skills/<name>/SKILL.md. Returns the " +
-      "skill's rendered instructions for the current context.\n\n" +
-      "WHEN TO USE THIS TOOL:\n" +
-      '- The user says "use skill /<name>" or "use skill <name>"\n' +
-      '- The user types "/<name>" as a command (e.g. /self-constrained-build)\n' +
-      "- The user asks to run, load, or activate a skill by name\n" +
-      "- The user's message semantically matches a known skill name\n\n" +
-      "WORKFLOW:\n" +
-      '1. Call Skill({ name: "<skill-name>", description: "..." }) to load the skill\n' +
-      "2. The tool returns rendered instructions — follow them using your existing tools\n" +
-      '3. If unsure which skill to use, call Skill({ name: "list" }) first to see available skills',
+      "Execute a skill within the main conversation\n\n" +
+      "When users ask you to perform tasks, check if any of the available skills match. " +
+      "Skills provide specialized capabilities and domain knowledge.\n\n" +
+      'When users reference a "slash command" or "/<something>", they are referring to a skill. ' +
+      "Use this tool to invoke it.\n\n" +
+      "How to invoke:\n" +
+      "- Set `name` to the exact name of an available skill (no leading slash).\n" +
+      "- Set `params` to pass optional arguments to the skill.\n\n" +
+      "Important:\n" +
+      "- Available skills are listed in the # Available Skills section of the system prompt.\n" +
+      "- Only invoke a skill that appears in that list, or one the user explicitly typed as /<name> " +
+      "in their message. Never guess or invent a skill name from training data; otherwise do not call this tool\n" +
+      "- When a skill matches the user's request, this is a BLOCKING REQUIREMENT: " +
+      "invoke the relevant Skill tool BEFORE generating any other response about the task\n" +
+      "- NEVER mention a skill without actually calling this tool\n" +
+      "- Do not invoke a skill that is already running\n" +
+      "- If the skill's instructions are already visible in the current conversation " +
+      "(e.g. from a previous Skill call or /command), follow them directly " +
+      "instead of calling this tool again\n",
     parameters: {
       type: "object",
       properties: {
         name: {
           type: "string",
           description:
-            "The skill id to invoke (= directory name under .claude/skills/). " +
-            'Use name="list" to list all available skills.',
+            "The name of a skill from the available-skills list. Do not guess names.",
         },
         params: {
           type: "object",

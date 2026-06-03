@@ -110,6 +110,7 @@ ENVIRONMENT:
   INVOX_MODELS                    Comma-separated selectable models                       (stage 8+)
   INVOX_API_KEY                   Provider API key                                        (stage 2+)
   INVOX_PROMPT_TEMPLATES_FILE     Path to JSON file of system-prompt templates            (stage 9+)
+  INVOX_PLUGIN_DIR                Path to plugin marketplace root (.plugins-cache.json)
 `,
   );
 }
