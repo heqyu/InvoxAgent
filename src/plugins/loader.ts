@@ -170,6 +170,7 @@ function loadPluginSkillsFromConfig(
           source: skillFile,
           content,
           pluginName,
+          pluginRoot: cfg.path,
         });
         loaded++;
       } catch {

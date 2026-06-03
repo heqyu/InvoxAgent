@@ -45,6 +45,8 @@ interface SkillDef {
   source: string;
   /** Absolute path to the skill directory (dirname of source). */
   skillDir: string;
+  /** Absolute path to the plugin root (for plugin skills only). */
+  pluginRoot?: string;
   /** If loaded from a plugin, the plugin name. Undefined for direct skills. */
   pluginName?: string;
 }
@@ -112,6 +114,7 @@ function loadSkills(cwd: string): Map<string, SkillDef> {
       content: ps.content,
       source: ps.source,
       skillDir: join(ps.source, ".."),
+      pluginRoot: ps.pluginRoot,
       pluginName: ps.pluginName,
     });
     pluginCount++;
@@ -153,18 +156,27 @@ function interpolate(
   template: string,
   params: Record<string, unknown>,
   skillDir?: string,
+  pluginRoot?: string,
 ): string {
-  // 1. ${CLAUDE_SKILL_DIR} — skill directory for script resolution
   let result = template;
+
+  // 1. ${CLAUDE_SKILL_DIR} — skill's own directory for script resolution
   if (skillDir) {
-    // Normalize backslashes to forward slashes on Windows so shell commands
-    // don't treat them as escape characters.
     const normalized =
       process.platform === "win32" ? skillDir.replace(/\\/g, "/") : skillDir;
     result = result.replace(/\$\{CLAUDE_SKILL_DIR\}/g, normalized);
   }
 
-  // 2. $ARGUMENTS — Claude Code convention
+  // 2. ${CLAUDE_PLUGIN_ROOT} — plugin root directory (cross-skill / shared assets)
+  if (pluginRoot) {
+    const normalized =
+      process.platform === "win32"
+        ? pluginRoot.replace(/\\/g, "/")
+        : pluginRoot;
+    result = result.replace(/\$\{CLAUDE_PLUGIN_ROOT\}/g, normalized);
+  }
+
+  // 3. $ARGUMENTS — Claude Code convention
   const argsValue =
     typeof params["arguments"] === "string"
       ? params["arguments"]
@@ -359,7 +371,7 @@ export function renderSkill(
   const skills = loadSkills(cwd);
   const skill = skills.get(name);
   if (!skill) return null;
-  return interpolate(skill.content, params, skill.skillDir);
+  return interpolate(skill.content, params, skill.skillDir, skill.pluginRoot);
 }
 
 // ── Catalog rendering ───────────────────────────────────────────────
@@ -481,7 +493,12 @@ async function execute(
       : {};
 
   // Interpolate the skill's content template
-  let rendered = interpolate(skill.content, params, skill.skillDir);
+  let rendered = interpolate(
+    skill.content,
+    params,
+    skill.skillDir,
+    skill.pluginRoot,
+  );
 
   // Prepend base directory header so the LLM always knows where the skill
   // lives (cc-haha compatibility). Scripts referenced as

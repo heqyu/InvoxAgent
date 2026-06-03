@@ -39,4 +39,5 @@ export interface PluginSkill {
   source: string;
   content: string;
   pluginName: string;
+  pluginRoot: string;
 }
