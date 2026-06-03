@@ -37,7 +37,7 @@
 
 import { spawn } from "node:child_process";
 import { log } from "../log.js";
-import { loadConfigs } from "./loader.js";
+import { discoverDirs } from "../discovery/index.js";
 import { join } from "node:path";
 import { readFileSync, existsSync } from "node:fs";
 
@@ -131,6 +131,15 @@ export interface HookResponse {
   continue?: boolean;
   suppressOutput?: boolean;
   systemMessage?: string;
+  /**
+   * Claude Code convention for Stop-hook blocks: the detailed instruction
+   * text that should be injected as a user message so the agent knows
+   * *what* to do next.  In Claude Code the runtime reads `reason` directly;
+   * in InvoxAgent we merge it into `systemMessage` during normalisation
+   * (see the `decision:"block"` branch in runHookCommand) so the existing
+   * Stop handler in agent.ts picks it up transparently.
+   */
+  reason?: string;
 }
 
 // ── Resolved hook (a hook group with its owning plugin) ─────────────
@@ -159,18 +168,42 @@ export class HookRegistry {
 const hookCache = new Map<string, HookRegistry>();
 
 /**
- * Load hooks from all enabled plugins for the given cwd.
+ * Load hooks from all three tiers: user settings.json, project settings.json,
+ * and plugin hooks.json files. Results are cached by cwd.
+ *
+ * Merge order (lowest → highest priority):
+ *   1. User settings.json hooks
+ *   2. Project settings.json hooks
+ *   3. Each enabled plugin's hooks/hooks.json
+ *
+ * CHOICE: Within each event, hook groups are appended (not replaced).
+ * This matches Claude Code's behavior where all matching hooks run.
  */
 export function loadHooks(cwd: string): HookRegistry {
   const cached = hookCache.get(cwd);
   if (cached) return cached;
 
   const registry = new HookRegistry();
-  const configs = loadConfigs(cwd);
+  const discovery = discoverDirs(cwd);
 
-  for (const cfg of configs) {
-    if (cfg.enabled === false) continue;
-    loadHooksFromPlugin(cfg.path, registry);
+  // 1. User settings.json hooks
+  if (discovery.userSettings?.hooks) {
+    mergeSettingsHooks(discovery.userSettings.hooks, registry, "user settings");
+  }
+
+  // 2. Project settings.json hooks
+  if (discovery.projectSettings?.hooks) {
+    mergeSettingsHooks(
+      discovery.projectSettings.hooks,
+      registry,
+      "project settings",
+    );
+  }
+
+  // 3. Plugin hooks.json (only enabled plugins)
+  for (const plugin of discovery.plugins) {
+    if (!plugin.enabled) continue;
+    loadHooksFromPlugin(plugin.root, registry);
   }
 
   hookCache.set(cwd, registry);
@@ -180,6 +213,89 @@ export function loadHooks(cwd: string): HookRegistry {
 export function clearHookCache(cwd?: string): void {
   if (cwd) hookCache.delete(cwd);
   else hookCache.clear();
+}
+
+// ── Settings.json hook merging ──────────────────────────────────────
+
+/**
+ * Registry map keys for event name → registry array lookup.
+ * CHOICE: Defined as a function (not a constant) to avoid stale references
+ * if the registry is mutated between calls.
+ */
+function registryMap(
+  registry: HookRegistry,
+): Record<string, ResolvedHookGroup[]> {
+  return {
+    SessionStart: registry.sessionStart,
+    UserPromptSubmit: registry.userPromptSubmit,
+    PreToolUse: registry.preToolUse,
+    PostToolUse: registry.postToolUse,
+    PostToolUseFailure: registry.postToolUseFailure,
+    Stop: registry.stop,
+  };
+}
+
+/**
+ * Merge hooks from a settings.json `hooks` field into the registry.
+ *
+ * The hooks field has the same wire format as hooks.json:
+ *   { "EventName": [{ "matcher": "...", "hooks": [{ "type": "command", ... }] }] }
+ *
+ * @param settingsHooks - The hooks object from settings.json
+ * @param registry - Target registry to merge into
+ * @param source - Label for logging ("user settings" or "project settings")
+ */
+function mergeSettingsHooks(
+  settingsHooks: Record<string, unknown>,
+  registry: HookRegistry,
+  source: string,
+): void {
+  const map = registryMap(registry);
+
+  for (const [eventName, groups] of Object.entries(settingsHooks)) {
+    const target = map[eventName];
+    if (!target) {
+      log.warn("discovery: unknown hook event in settings.json", {
+        eventName,
+        source,
+      });
+      continue;
+    }
+    if (!Array.isArray(groups)) continue;
+
+    for (const group of groups) {
+      if (!group || typeof group !== "object") continue;
+      const g = group as Record<string, unknown>;
+      const hookCommands = g["hooks"];
+      if (!Array.isArray(hookCommands)) continue;
+
+      const commands: HookCommand[] = [];
+      for (const h of hookCommands) {
+        if (!h || typeof h !== "object") continue;
+        const cmd = h as Record<string, unknown>;
+        if (cmd["type"] !== "command") continue;
+        if (typeof cmd["command"] !== "string" || !cmd["command"]) continue;
+        commands.push({
+          type: "command",
+          command: cmd["command"] as string,
+          timeout:
+            typeof cmd["timeout"] === "number" ? cmd["timeout"] : undefined,
+          async: cmd["async"] === true,
+        });
+      }
+
+      if (commands.length === 0) continue;
+
+      target.push({
+        pluginRoot: "", // No plugin root for settings.json hooks
+        pluginName: source,
+        description:
+          typeof g["description"] === "string" ? g["description"] : undefined,
+        matcher: typeof g["matcher"] === "string" ? g["matcher"] : undefined,
+        hooks: commands,
+      });
+    }
+  }
 }
 
 // ── Plugin hook loading ─────────────────────────────────────────────
@@ -374,6 +490,31 @@ function runHookCommand(
       if (stdout.trim()) {
         try {
           response = JSON.parse(stdout.trim()) as HookResponse;
+          // Normalize Claude Code convention: decision → continue
+          if (
+            response &&
+            typeof (response as Record<string, unknown>).decision === "string"
+          ) {
+            const decision = (response as Record<string, unknown>)
+              .decision as string;
+            if (decision === "block" && response.continue === undefined) {
+              response.continue = false;
+              // Claude Code convention: `reason` is the full instruction text
+              // to inject as a user message (e.g. review-gate's detailed
+              // step-by-step guide).  Merge it into systemMessage so the
+              // existing Stop handler in agent.ts picks it up transparently.
+              // Prefer reason over any existing short systemMessage because
+              // the hook author placed the actionable content in reason.
+              if (response.reason && response.reason.length > 0) {
+                response.systemMessage = response.reason;
+              }
+            } else if (
+              decision === "allow" &&
+              response.continue === undefined
+            ) {
+              response.continue = true;
+            }
+          }
         } catch {
           // Non-JSON stdout is ignored (e.g. debug output)
         }
@@ -386,6 +527,15 @@ function runHookCommand(
           systemMessage: `[blocked by ${hookEvent} hook] ${stderr.trim()}`,
         };
       }
+
+      log.debug("hook stdout", {
+        hookEvent,
+        command: cmd.command.substring(0, 120),
+        exitCode: code,
+        stdout: stdout.trim().substring(0, 500),
+        stderr: stderr.trim().substring(0, 200),
+        parsedResponse: response,
+      });
 
       resolve({ response, exitCode: code, stderr });
     });
@@ -570,9 +720,10 @@ export async function runPostToolUseFailure(
 export async function runStop(
   registry: HookRegistry | undefined,
   ctx: StopCtx,
-): Promise<boolean> {
+): Promise<{ continue: boolean; systemMessage?: string }> {
   const result = await runHooks(registry, ctx);
-  // Default: stop. If a hook sets continue=true, the agent continues.
-  // If a hook blocks (continue=false), the agent stops.
-  return result.continue !== false; // false = should stop
+  return {
+    continue: result.continue !== false,
+    systemMessage: result.systemMessage,
+  };
 }

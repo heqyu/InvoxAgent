@@ -1,25 +1,37 @@
-// Plugin loader — reads .claude/plugins.json, scans each plugin directory,
-// and returns resolved skills ready to merge into the skill registry.
+// Plugin loader — scans plugin directories for skills (SKILL.md files).
 //
-// Config locations (first found wins):
-//   1. <cwd>/.claude/plugins.json   — project-level
-//   2. ~/.claude/plugins.json       — user-level
+// Plugin list comes from the discovery module (which reads plugins.json
+// from user or project level). This file only handles the skill-specific
+// scanning within each resolved plugin directory.
 //
 // Plugin directory layout:
 //   <path>/
 //     .claude-plugin/plugin.json    — manifest (name, version, ...)
 //     skills/<name>/SKILL.md        — skill definitions
 
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { join, isAbsolute, resolve } from "node:path";
-import { homedir } from "node:os";
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { log } from "../log.js";
-import type { PluginConfig, PluginManifest, PluginSkill } from "./types.js";
+import { discoverDirs } from "../discovery/index.js";
+import type { PluginEntry } from "../discovery/types.js";
 
-const PLUGINS_JSON = "plugins.json";
 const MANIFEST_DIR = ".claude-plugin";
 const MANIFEST_FILE = "plugin.json";
 const SKILL_FILE = "SKILL.md";
+
+// ── Plugin skill type ───────────────────────────────────────────────
+
+/**
+ * A resolved skill loaded from a plugin — ready to merge into the
+ * skill registry.
+ */
+export interface PluginSkill {
+  id: string;
+  source: string;
+  content: string;
+  pluginName: string;
+  pluginRoot: string;
+}
 
 // ── Public API ──────────────────────────────────────────────────────
 
@@ -28,22 +40,23 @@ const pluginSkillCache = new Map<string, Map<string, PluginSkill>>();
 /**
  * Load all plugin-provided skills for the given cwd.
  *
- * Priority: project-level config overrides user-level on the same path.
- * Within a plugin, skills can be individually toggled.
+ * Plugin list comes from discoverDirs() (reads plugins.json).
+ * Within a plugin, skills can be individually toggled via the
+ * skills field in plugins.json.
  */
 export function loadPluginSkills(cwd: string): Map<string, PluginSkill> {
   const cached = pluginSkillCache.get(cwd);
   if (cached) return cached;
 
   const skills = new Map<string, PluginSkill>();
-  const configs = loadConfigs(cwd);
+  const discovery = discoverDirs(cwd);
 
-  for (const cfg of configs) {
-    if (cfg.enabled === false) {
-      log.info("plugins: plugin disabled", { path: cfg.path });
+  for (const plugin of discovery.plugins) {
+    if (!plugin.enabled) {
+      log.info("plugins: plugin disabled", { root: plugin.root });
       continue;
     }
-    loadPluginSkillsFromConfig(cfg, skills);
+    loadPluginSkillsFromEntry(plugin, skills);
   }
 
   pluginSkillCache.set(cwd, skills);
@@ -55,89 +68,27 @@ export function clearPluginCache(cwd?: string): void {
   else pluginSkillCache.clear();
 }
 
-// ── Config loading ──────────────────────────────────────────────────
-
-export function loadConfigs(cwd: string): PluginConfig[] {
-  // Project-level takes precedence; if it exists, user-level is skipped.
-  const projectPath = join(cwd, ".claude", PLUGINS_JSON);
-  if (existsSync(projectPath)) {
-    return readConfig(projectPath, cwd) ?? [];
-  }
-
-  const userPath = join(homedir(), ".claude", PLUGINS_JSON);
-  if (existsSync(userPath)) {
-    return readConfig(userPath, homedir()) ?? [];
-  }
-
-  return [];
-}
-
-function readConfig(filePath: string, basePath: string): PluginConfig[] | null {
-  try {
-    const raw = readFileSync(filePath, "utf8");
-    const parsed = JSON.parse(raw) as unknown;
-
-    if (!Array.isArray(parsed)) {
-      log.warn("plugins: invalid config (not an array)", { filePath });
-      return null;
-    }
-
-    // Normalize paths relative to the config file's parent dir.
-    const configs: PluginConfig[] = [];
-    for (const entry of parsed) {
-      if (typeof entry !== "object" || entry === null) continue;
-      const e = entry as Record<string, unknown>;
-      if (typeof e["path"] !== "string" || !e["path"]) continue;
-
-      const rawPath = e["path"] as string;
-      const absPath = isAbsolute(rawPath)
-        ? rawPath
-        : resolve(basePath, rawPath);
-
-      configs.push({
-        path: absPath,
-        enabled: e["enabled"] !== false,
-        ...(e["skills"] && typeof e["skills"] === "object"
-          ? { skills: e["skills"] as Record<string, boolean> }
-          : {}),
-      });
-    }
-
-    log.info("plugins: config loaded", {
-      filePath,
-      pluginCount: configs.length,
-    });
-    return configs;
-  } catch (err) {
-    log.warn("plugins: failed to read config", {
-      filePath,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return null;
-  }
-}
-
 // ── Plugin scanning ─────────────────────────────────────────────────
 
-function loadPluginSkillsFromConfig(
-  cfg: PluginConfig,
+function loadPluginSkillsFromEntry(
+  plugin: PluginEntry,
   skills: Map<string, PluginSkill>,
 ): void {
-  if (!isDir(cfg.path)) {
-    log.warn("plugins: plugin path not found or not a directory", {
-      path: cfg.path,
+  if (!isDir(plugin.root)) {
+    log.warn("plugins: plugin root not found or not a directory", {
+      root: plugin.root,
     });
     return;
   }
 
-  const manifest = readManifest(cfg.path);
-  const pluginName = manifest?.name ?? basename(cfg.path);
+  const manifest = readManifest(plugin.root);
+  const pluginName = manifest?.name ?? basename(plugin.root);
 
-  const skillsDir = join(cfg.path, "skills");
+  const skillsDir = join(plugin.root, "skills");
   if (!isDir(skillsDir)) {
     log.info("plugins: no skills/ directory", {
       plugin: pluginName,
-      path: cfg.path,
+      root: plugin.root,
     });
     return;
   }
@@ -153,8 +104,8 @@ function loadPluginSkillsFromConfig(
       if (!id) continue;
 
       // Check per-skill toggle
-      if (cfg.skills) {
-        const enabled = cfg.skills[id];
+      if (plugin.skills) {
+        const enabled = plugin.skills[id];
         if (enabled === false) {
           skipped++;
           continue;
@@ -170,7 +121,7 @@ function loadPluginSkillsFromConfig(
           source: skillFile,
           content,
           pluginName,
-          pluginRoot: cfg.path,
+          pluginRoot: plugin.root,
         });
         loaded++;
       } catch {
@@ -183,7 +134,7 @@ function loadPluginSkillsFromConfig(
 
   log.info("plugins: loaded", {
     plugin: pluginName,
-    path: cfg.path,
+    root: plugin.root,
     loaded,
     skipped,
   });
@@ -191,13 +142,13 @@ function loadPluginSkillsFromConfig(
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-function readManifest(pluginRoot: string): PluginManifest | null {
+function readManifest(pluginRoot: string): { name: string } | null {
   const manifestPath = join(pluginRoot, MANIFEST_DIR, MANIFEST_FILE);
   try {
     const raw = readFileSync(manifestPath, "utf8");
     const parsed = JSON.parse(raw) as unknown;
     if (parsed && typeof parsed === "object" && "name" in parsed) {
-      return parsed as PluginManifest;
+      return parsed as { name: string };
     }
   } catch {
     // Manifest missing or malformed — not fatal

@@ -74,7 +74,6 @@ import { getTool, TOOL_SPECS } from "../tools/registry.js";
 import { executeTool } from "../tools/router.js";
 import type { PermissionPolicy, SessionToolState } from "../tools/types.js";
 import {
-  HookRegistry,
   loadHooks,
   runSessionStart,
   runUserPromptSubmit,
@@ -229,8 +228,6 @@ export class InvoxAgent implements Agent {
   /** Tracks whether syncWithZedThreads has already run for this agent
    *  lifetime. We want it to fire exactly once, not per-session. */
   private syncedZed = false;
-  /** Hook registries keyed by cwd — lazy-loaded on first session creation. */
-  private hookCache = new Map<string, HookRegistry>();
 
   constructor(
     conn: AgentSideConnection,
@@ -355,7 +352,7 @@ export class InvoxAgent implements Agent {
     await this.initMcpForSession(session);
 
     // Fire SessionStart hooks (non-blocking, best-effort).
-    const hooks = this.getHooks(session.cwd);
+    const hooks = loadHooks(session.cwd);
     runSessionStart(hooks, {
       hook_event_name: "SessionStart",
       ...this.hookBase(session),
@@ -690,7 +687,7 @@ export class InvoxAgent implements Agent {
 
     // Run UserPromptSubmit hooks — plugins can inject additional context
     // or block the prompt entirely.
-    const hooks = this.getHooks(session.cwd);
+    const hooks = loadHooks(session.cwd);
     const submitResult = await runUserPromptSubmit(hooks, {
       hook_event_name: "UserPromptSubmit",
       ...this.hookBase(session),
@@ -724,10 +721,49 @@ export class InvoxAgent implements Agent {
     const max = maxIterations();
     let stopReason: "end_turn" | "cancelled" | "max_turn_requests" =
       "max_turn_requests";
+    const stopHooks = loadHooks(session.cwd);
+    const hookBase = this.hookBase(session);
+    // Mirrors Claude Code: true only after a Stop hook actually blocked and the
+    // loop continued. Reset to false when the hook放行 or on first call.
+    let stopHookActive = false;
     try {
       for (let iter = 0; iter < max; iter++) {
         const result = await this.runOneIteration(session);
         if (result.kind === "stop") {
+          // Only fire Stop hook on natural end_turn — cancelled and max_iterations
+          // go straight through (matches Claude Code: Stop hook only runs when the
+          // model naturally decides to stop).
+          if (result.reason === "end_turn") {
+            const stopResult = await runStop(stopHooks, {
+              hook_event_name: "Stop",
+              ...hookBase,
+              stop_hook_active: stopHookActive,
+            }).catch((e) => {
+              log.warn(
+                "Stop hook error",
+                e instanceof Error ? e.message : String(e),
+              );
+              return { continue: true } as {
+                continue: boolean;
+                systemMessage?: string;
+              };
+            });
+
+            if (!stopResult.continue && stopResult.systemMessage) {
+              log.info("Stop hook blocked, continuing loop", {
+                sessionId: session.id,
+                stopHookActive,
+              });
+              session.history.push({
+                role: "user",
+                content: `[Stop hook] ${stopResult.systemMessage}`,
+              });
+              stopHookActive = true;
+              continue;
+            }
+          }
+
+          stopHookActive = false;
           stopReason = result.reason;
           break;
         }
@@ -752,16 +788,6 @@ export class InvoxAgent implements Agent {
         );
       }
       this.persist(session);
-
-      // Fire Stop hooks after the agentic loop ends.
-      const stopHooks = this.getHooks(session.cwd);
-      runStop(stopHooks, {
-        hook_event_name: "Stop",
-        ...this.hookBase(session),
-        stop_hook_active: stopReason !== "end_turn",
-      }).catch((e) => {
-        log.warn("Stop hook error", e instanceof Error ? e.message : String(e));
-      });
     }
     // Build a PromptResponse with the optional `usage` field. In
     // @agentclientprotocol/sdk@0.23 this is a typed field on PromptResponse
@@ -952,7 +978,7 @@ export class InvoxAgent implements Agent {
           ? {}
           : (JSON.parse(call.arguments) as Record<string, unknown>);
 
-      const toolHooks = this.getHooks(session.cwd);
+      const toolHooks = loadHooks(session.cwd);
       const preResult = await runPreToolUse(toolHooks, {
         hook_event_name: "PreToolUse",
         ...this.hookBase(session),
@@ -1090,18 +1116,6 @@ export class InvoxAgent implements Agent {
     }
 
     return { kind: "continue" };
-  }
-
-  /**
-   * Lazily load hooks for a given cwd. Results are cached per agent
-   * instance so hook modules are imported at most once per cwd.
-   */
-  private getHooks(cwd: string): HookRegistry {
-    const cached = this.hookCache.get(cwd);
-    if (cached) return cached;
-    const hooks = loadHooks(cwd);
-    this.hookCache.set(cwd, hooks);
-    return hooks;
   }
 
   /** Build the common base fields shared by every hook context. */

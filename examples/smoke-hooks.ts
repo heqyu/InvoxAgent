@@ -13,6 +13,7 @@ import {
   loadHooks,
   clearHookCache,
 } from "../src/plugins/hooks.js";
+import { clearDiscoveryCache } from "../src/discovery/index.js";
 
 const ASSERT = (cond: boolean, msg: string): void => {
   if (!cond) {
@@ -35,6 +36,16 @@ async function main(): Promise<void> {
   console.log("[smoke-hooks] starting...\n");
 
   const tmpDir = join(tmpdir(), `invox-hooks-${Date.now()}`);
+
+  // CHOICE: Override HOME so discoverDirs() doesn't read the real
+  // ~/.claude/settings.json (which contains production hooks).
+  const fakeHome = join(tmpDir, "fake-home");
+  mkdirSync(join(fakeHome, ".claude"), { recursive: true });
+  writeFileSync(join(fakeHome, ".claude", "settings.json"), "{}", "utf8");
+  const origHome = process.env.HOME;
+  const origUserProfile = process.env.USERPROFILE;
+  process.env.HOME = fakeHome;
+  process.env.USERPROFILE = fakeHome;
 
   // Create a plugin with hooks
   const pluginDir = join(tmpDir, "plugins", "test-hooks");
@@ -367,6 +378,12 @@ async function main(): Promise<void> {
     ASSERT(!emptySubmit.systemMessage, "Empty registry: no systemMessage");
   } finally {
     clearHookCache();
+    clearDiscoveryCache();
+    if (origHome !== undefined) process.env.HOME = origHome;
+    else delete process.env.HOME;
+    if (origUserProfile !== undefined)
+      process.env.USERPROFILE = origUserProfile;
+    else delete process.env.USERPROFILE;
     rmSync(tmpDir, { recursive: true, force: true });
   }
 
