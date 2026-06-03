@@ -57,7 +57,7 @@ export function clearPluginCache(cwd?: string): void {
 
 // ── Config loading ──────────────────────────────────────────────────
 
-function loadConfigs(cwd: string): PluginConfig[] {
+export function loadConfigs(cwd: string): PluginConfig[] {
   // Project-level takes precedence; if it exists, user-level is skipped.
   const projectPath = join(cwd, ".claude", PLUGINS_JSON);
   if (existsSync(projectPath)) {

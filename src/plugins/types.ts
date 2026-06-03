@@ -28,6 +28,13 @@ export interface PluginManifest {
   description?: string;
   author?: { name: string };
   keywords?: string[];
+  /**
+   * Hook declarations. Keys are hook event names (e.g. "SessionStart",
+   * "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"). Values
+   * are paths relative to the plugin root pointing to JS modules that
+   * export a default async function handling the hook.
+   */
+  hooks?: Record<string, string>;
 }
 
 /**

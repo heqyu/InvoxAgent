@@ -70,6 +70,16 @@ import { createMcpTool } from "../mcp/tool.js";
 import { getTool, TOOL_SPECS } from "../tools/registry.js";
 import { executeTool } from "../tools/router.js";
 import type { PermissionPolicy, SessionToolState } from "../tools/types.js";
+import {
+  HookRegistry,
+  loadHooks,
+  runSessionStart,
+  runUserPromptSubmit,
+  runPreToolUse,
+  runPostToolUse,
+  runPostToolUseFailure,
+  runStop,
+} from "../plugins/hooks.js";
 
 function maxIterations(): number {
   const raw = process.env["INVOX_MAX_ITERATIONS"];
@@ -199,6 +209,8 @@ export class InvoxAgent implements Agent {
   /** Tracks whether syncWithZedThreads has already run for this agent
    *  lifetime. We want it to fire exactly once, not per-session. */
   private syncedZed = false;
+  /** Hook registries keyed by cwd — lazy-loaded on first session creation. */
+  private hookCache = new Map<string, HookRegistry>();
 
   constructor(
     conn: AgentSideConnection,
@@ -319,6 +331,20 @@ export class InvoxAgent implements Agent {
     // Graceful degradation: if config is missing or any server fails,
     // the session continues without MCP tools.
     await this.initMcpForSession(session);
+
+    // Fire SessionStart hooks (non-blocking, best-effort).
+    const hooks = this.getHooks(session.cwd);
+    runSessionStart(hooks, {
+      hook_event_name: "SessionStart",
+      session_id: session.id,
+      cwd: session.cwd,
+      source: "startup",
+    }).catch((e) => {
+      log.warn(
+        "SessionStart hook error",
+        e instanceof Error ? e.message : String(e),
+      );
+    });
 
     // Advertise available skills as `/` commands in Zed's UI.
     //
@@ -641,6 +667,35 @@ export class InvoxAgent implements Agent {
       model: session.selectedModel ?? this.models.defaultModelId,
     });
 
+    // Run UserPromptSubmit hooks — plugins can inject additional context
+    // or block the prompt entirely.
+    const hooks = this.getHooks(session.cwd);
+    const submitResult = await runUserPromptSubmit(hooks, {
+      hook_event_name: "UserPromptSubmit",
+      prompt: contentToString(userContent),
+      session_id: session.id,
+      cwd: session.cwd,
+    });
+
+    if (!submitResult.continue) {
+      log.info("prompt blocked by hook", { sessionId: session.id });
+      return { stopReason: "end_turn" };
+    }
+
+    // Merge hook-provided systemMessage into the system prompt
+    // for this turn only (not persisted).
+    if (submitResult.systemMessage) {
+      const sys = session.history[0];
+      const prefix =
+        typeof sys?.content === "string"
+          ? sys.content
+          : JSON.stringify(sys?.content);
+      session.history[0] = {
+        role: "system",
+        content: prefix + "\n\n" + submitResult.systemMessage,
+      };
+    }
+
     session.history.push({
       role: "user",
       content: userContent,
@@ -677,6 +732,17 @@ export class InvoxAgent implements Agent {
         );
       }
       this.persist(session);
+
+      // Fire Stop hooks after the agentic loop ends.
+      const stopHooks = this.getHooks(session.cwd);
+      runStop(stopHooks, {
+        hook_event_name: "Stop",
+        stop_hook_active: stopReason !== "end_turn",
+        session_id: session.id,
+        cwd: session.cwd,
+      }).catch((e) => {
+        log.warn("Stop hook error", e instanceof Error ? e.message : String(e));
+      });
     }
     // Build a PromptResponse with the optional `usage` field. In
     // @agentclientprotocol/sdk@0.23 this is a typed field on PromptResponse
@@ -861,23 +927,60 @@ export class InvoxAgent implements Agent {
       });
       const toolStartedAt = Date.now();
 
+      // ── PreToolUse hook ──────────────────────────────────────
+      const toolArgs: Record<string, unknown> =
+        call.arguments.trim() === ""
+          ? {}
+          : (JSON.parse(call.arguments) as Record<string, unknown>);
+
+      const toolHooks = this.getHooks(session.cwd);
+      const preResult = await runPreToolUse(toolHooks, {
+        hook_event_name: "PreToolUse",
+        tool_name: call.name,
+        tool_input: toolArgs,
+        session_id: session.id,
+        cwd: session.cwd,
+      });
+
+      if (!preResult.allow) {
+        // Hook denied the tool — emit a tool_call_update with denied status.
+        const reason =
+          preResult.reason ?? `Tool "${call.name}" blocked by plugin hook.`;
+        await this.conn.sessionUpdate({
+          sessionId: session.id,
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId: call.id,
+            status: "failed",
+            title: `${call.name} (blocked by hook)`,
+            kind: startKind,
+            content: [
+              { type: "content", content: { type: "text", text: reason } },
+            ],
+          },
+        });
+        session.history.push({
+          role: "tool",
+          tool_call_id: call.id,
+          content: reason,
+          name: call.name,
+        });
+        continue;
+      }
+      // ── End PreToolUse hook ──────────────────────────────────
+
       const r = mcpTool
-        ? await createMcpTool(mcpTool, session.mcpClient!).execute(
-            call.arguments.trim() === ""
-              ? {}
-              : (JSON.parse(call.arguments) as Record<string, unknown>),
-            {
-              conn: this.conn,
-              sessionId: session.id,
-              cwd: session.cwd,
-              caps: this.clientCaps,
-              signal: session.abort.signal,
-              policy: this.policy,
-              toolCallId: call.id,
-              state: session.toolState,
-            },
-          )
-        : await executeTool(call.name, call.arguments, {
+        ? await createMcpTool(mcpTool, session.mcpClient!).execute(toolArgs, {
+            conn: this.conn,
+            sessionId: session.id,
+            cwd: session.cwd,
+            caps: this.clientCaps,
+            signal: session.abort.signal,
+            policy: this.policy,
+            toolCallId: call.id,
+            state: session.toolState,
+          })
+        : await executeTool(call.name, JSON.stringify(toolArgs), {
             conn: this.conn,
             sessionId: session.id,
             cwd: session.cwd,
@@ -901,6 +1004,54 @@ export class InvoxAgent implements Agent {
             : r.resultText,
       });
 
+      // ── PostToolUse / PostToolUseFailure hooks ────────────────
+      if (r.ok) {
+        const postResult = await runPostToolUse(toolHooks, {
+          hook_event_name: "PostToolUse",
+          tool_name: call.name,
+          tool_input: toolArgs,
+          tool_response: r.resultText,
+          session_id: session.id,
+          cwd: session.cwd,
+        });
+        if (postResult.systemMessage) {
+          r.resultText += "\n\n" + postResult.systemMessage;
+          r.acpContent = [
+            ...r.acpContent,
+            {
+              type: "content",
+              content: {
+                type: "text",
+                text: "\n\n" + postResult.systemMessage,
+              },
+            },
+          ];
+        }
+      } else {
+        const postResult = await runPostToolUseFailure(toolHooks, {
+          hook_event_name: "PostToolUseFailure",
+          tool_name: call.name,
+          tool_input: toolArgs,
+          tool_response: r.resultText,
+          session_id: session.id,
+          cwd: session.cwd,
+        });
+        if (postResult.systemMessage) {
+          r.resultText += "\n\n" + postResult.systemMessage;
+          r.acpContent = [
+            ...r.acpContent,
+            {
+              type: "content",
+              content: {
+                type: "text",
+                text: "\n\n" + postResult.systemMessage,
+              },
+            },
+          ];
+        }
+      }
+      // ── End PostToolUse hooks ─────────────────────────────────
+
       await this.conn.sessionUpdate({
         sessionId: session.id,
         update: {
@@ -923,6 +1074,18 @@ export class InvoxAgent implements Agent {
     }
 
     return { kind: "continue" };
+  }
+
+  /**
+   * Lazily load hooks for a given cwd. Results are cached per agent
+   * instance so hook modules are imported at most once per cwd.
+   */
+  private getHooks(cwd: string): HookRegistry {
+    const cached = this.hookCache.get(cwd);
+    if (cached) return cached;
+    const hooks = loadHooks(cwd);
+    this.hookCache.set(cwd, hooks);
+    return hooks;
   }
 
   /**
