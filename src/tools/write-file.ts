@@ -11,20 +11,13 @@ import {
   writeFileDirect,
   resolveToolPath,
 } from "./fs-utils.js";
+import { DESCRIPTION_FIELD } from "./shared.js";
 import {
   errorResult,
   type Tool,
   type ToolExecContext,
   type ToolExecResult,
 } from "./types.js";
-
-const DESCRIPTION_FIELD = {
-  type: "string",
-  description:
-    "A short human-readable phrase describing what this call is doing, " +
-    "in the same language the user is using. Shown as the title of the " +
-    "tool call card in the user's editor.",
-} as const;
 
 const spec: ToolSpec = {
   type: "function",

@@ -24,6 +24,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { log } from "../log.js";
 import type { ToolSpec } from "../llm/types.js";
+import { DESCRIPTION_FIELD } from "./shared.js";
 import {
   errorResult,
   type Tool,
@@ -142,6 +143,66 @@ function interpolate(
   return result;
 }
 
+// ── ACP AvailableCommand export ─────────────────────────────────────
+
+/**
+ * ACP `AvailableCommand` shape — matches the protocol schema so the agent
+ * can send `available_commands_update` and Zed renders a `/` command menu.
+ */
+export interface SkillAvailableCommand {
+  name: string;
+  description: string;
+  input?: { type: "unstructured"; hint: string } | null;
+}
+
+/**
+ * Build the ACP `AvailableCommand[]` array from the loaded skills.
+ * Called by the agent after session creation/load so Zed's `/` menu is
+ * populated with the project's skills.
+ *
+ * Each skill becomes a command:
+ *   - `name`: the skill id (directory name)
+ *   - `description`: first line of the SKILL.md (truncated to 120 chars)
+ *   - `input`: unstructured with a hint showing the user can type args
+ */
+export function listAvailableCommands(cwd: string): SkillAvailableCommand[] {
+  const skills = loadSkills(cwd);
+  const commands: SkillAvailableCommand[] = [];
+
+  for (const skill of [...skills.values()].sort((a, b) =>
+    a.id.localeCompare(b.id),
+  )) {
+    const firstLine = skill.content.split("\n")[0]?.trim() ?? "";
+    const desc =
+      firstLine.length > 120 ? firstLine.slice(0, 117) + "…" : firstLine;
+    commands.push({
+      name: skill.id,
+      description: desc || `Invoke the ${skill.id} skill`,
+      input: { type: "unstructured", hint: "Skill parameters (optional)" },
+    });
+  }
+
+  return commands;
+}
+
+/**
+ * Look up a skill by name and return its rendered content (with params
+ * interpolated), or `null` if the skill doesn't exist.
+ *
+ * Used by the agent to intercept `/command args` in user prompts and
+ * auto-invoke the skill without waiting for the LLM.
+ */
+export function renderSkill(
+  cwd: string,
+  name: string,
+  params: Record<string, unknown> = {},
+): string | null {
+  const skills = loadSkills(cwd);
+  const skill = skills.get(name);
+  if (!skill) return null;
+  return interpolate(skill.content, params);
+}
+
 // ── Catalog rendering ───────────────────────────────────────────────
 
 function renderCatalog(skills: Map<string, SkillDef>): string {
@@ -175,7 +236,15 @@ const spec: ToolSpec = {
       "Invoke a reusable skill/workflow template loaded from .claude/skills/. " +
       "Each skill lives at .claude/skills/<name>/SKILL.md. Returns the " +
       "skill's rendered instructions for the current context.\n\n" +
-      "Call Skill with name='list' to see all available skills.",
+      "WHEN TO USE THIS TOOL:\n" +
+      '- The user says "use skill /<name>" or "use skill <name>"\n' +
+      '- The user types "/<name>" as a command (e.g. /self-constrained-build)\n' +
+      "- The user asks to run, load, or activate a skill by name\n" +
+      "- The user's message semantically matches a known skill name\n\n" +
+      "WORKFLOW:\n" +
+      '1. Call Skill({ name: "<skill-name>", description: "..." }) to load the skill\n' +
+      "2. The tool returns rendered instructions — follow them using your existing tools\n" +
+      '3. If unsure which skill to use, call Skill({ name: "list" }) first to see available skills',
     parameters: {
       type: "object",
       properties: {
@@ -193,13 +262,7 @@ const spec: ToolSpec = {
             "by params[key].",
           additionalProperties: true,
         },
-        description: {
-          type: "string",
-          description:
-            "A short human-readable phrase describing what this call is doing, " +
-            "in the same language the user is using. Shown as the title of the " +
-            "tool call card in the user's editor.",
-        },
+        description: DESCRIPTION_FIELD,
       },
       required: ["name", "description"],
     },
@@ -267,7 +330,7 @@ async function execute(
       { type: "content", content: { type: "text", text: rendered } },
     ],
     kind: "read",
-    title: name,
+    title: `Skill (${name}) Loaded`,
     ok: true,
   };
 }

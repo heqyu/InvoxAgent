@@ -53,6 +53,7 @@ import type {
   UsageInfo,
   UserContent,
 } from "../llm/types.js";
+import { contentToString } from "../llm/utils.js";
 import {
   SessionStore,
   sessionTtlDays,
@@ -62,6 +63,7 @@ import {
 } from "../persistence.js";
 import { FileCache } from "../tools/cache.js";
 import { kindFromTier } from "../tools/permissions.js";
+import { listAvailableCommands } from "../tools/skill.js";
 import { getTool, TOOL_SPECS } from "../tools/registry.js";
 import { executeTool } from "../tools/router.js";
 import type { PermissionPolicy, SessionToolState } from "../tools/types.js";
@@ -287,8 +289,9 @@ export class InvoxAgent implements Agent {
       id,
       cwd: params.cwd,
       history: [
-        systemMessageForPrompt(
+        systemMessageWithSkills(
           this.systemPromptById.get(defaultPromptId)!.prompt,
+          params.cwd,
         ),
       ],
       abort: new AbortController(),
@@ -306,6 +309,19 @@ export class InvoxAgent implements Agent {
     };
     this.sessions.set(id, session);
     log.info("session created", { id, cwd: params.cwd });
+
+    // Advertise available skills as `/` commands in Zed's UI.
+    //
+    // IMPORTANT: Must be deferred to the next macrotask. The ACP SDK's
+    // Connection.writeQueue serialises writes — if we call sendMessage()
+    // (for the notification) before processMessage() calls sendMessage()
+    // (for the session/new response), the notification lands on the wire
+    // BEFORE the response. Clients that process messages in arrival order
+    // then silently drop the notification because the session doesn't
+    // exist yet. Deferring via setTimeout(fn, 0) ensures the response is
+    // queued first (microtask), then the notification (macrotask).
+    setTimeout(() => this.sendAvailableCommands(session).catch(() => {}), 0);
+
     return {
       sessionId: id,
       models: this.modelStateFor(session),
@@ -375,7 +391,20 @@ export class InvoxAgent implements Agent {
     };
     this.sessions.set(session.id, session);
 
+    // Refresh the system prompt with the current skill list — the persisted
+    // history[0] may have a stale version (or none) from a previous session.
+    if (restoredConfigValues.system_prompt) {
+      const def = this.systemPromptById.get(restoredConfigValues.system_prompt);
+      if (def) {
+        session.history[0] = systemMessageWithSkills(def.prompt, session.cwd);
+      }
+    }
+
     await this.replayHistory(session);
+
+    // Advertise available skills as `/` commands in Zed's UI.
+    // Same deferred-send pattern as newSession() — see comment there.
+    setTimeout(() => this.sendAvailableCommands(session).catch(() => {}), 0);
 
     // Send last turn usage AFTER replayHistory so the agent_thought_chunk
     // renders at the bottom of the thread (after the last message), which
@@ -549,7 +578,7 @@ export class InvoxAgent implements Agent {
       session.configValues.system_prompt = value;
       // Replace history[0] in place — by construction of newSession /
       // loadSession that slot is always a system message.
-      session.history[0] = systemMessageForPrompt(def.prompt);
+      session.history[0] = systemMessageWithSkills(def.prompt, session.cwd);
     } else if (params.configId === "thinking") {
       if (!THINKING_VALUES.has(value)) {
         throw new Error(
@@ -585,10 +614,11 @@ export class InvoxAgent implements Agent {
     const userContent = buildUserContent(params.prompt);
     log.info("prompt received", {
       sessionId: session.id,
-      userText: userContentPreview(userContent),
+      userText: contentToString(userContent),
       historyLen: session.history.length,
       model: session.selectedModel ?? this.models.defaultModelId,
     });
+
     session.history.push({
       role: "user",
       content: userContent,
@@ -648,8 +678,18 @@ export class InvoxAgent implements Agent {
     return response;
   }
 
-  async cancel(_params: CancelNotification): Promise<void> {
-    // not implemented yet
+  async cancel(params: CancelNotification): Promise<void> {
+    // CHOICE: abort every active session for this connection. The ACP cancel
+    // notification doesn't carry a sessionId (it's a broadcast), so we stop
+    // all in-flight prompt() loops. Each loop checks signal.aborted at the
+    // top of runOneIteration and after the stream, so the abort propagates
+    // within one iteration boundary.
+    for (const session of this.sessions.values()) {
+      if (!session.abort.signal.aborted) {
+        session.abort.abort();
+        log.info("cancel: aborted session", { sessionId: session.id });
+      }
+    }
   }
 
   // ── private ──────────────────────────────────────────────────────────
@@ -819,16 +859,48 @@ export class InvoxAgent implements Agent {
    * Called from newSession / loadSession — the two entry points that
    * carry a cwd.
    */
-  private maybeSyncZedThreads(cwd: string): void {
+  private async maybeSyncZedThreads(cwd: string): Promise<void> {
     if (this.syncedZed) return;
     this.syncedZed = true;
     try {
       const store = new SessionStore(cwd);
-      syncWithZedThreads(store.rootDir(), cwd);
+      await syncWithZedThreads(store.rootDir(), cwd);
     } catch (e) {
       log.warn("maybeSyncZedThreads failed", {
         cwd,
         error: (e as Error).message,
+      });
+    }
+  }
+
+  /**
+   * Send the current skill catalog as an ACP `available_commands_update`
+   * sessionUpdate. Zed's UI renders these as `/` commands in the input menu.
+   *
+   * Called once after session creation/load — the first point where we know
+   * the session's `cwd` and can scan `.claude/skills/`.
+   */
+  private async sendAvailableCommands(session: Session): Promise<void> {
+    const commands = listAvailableCommands(session.cwd);
+    if (commands.length === 0) return;
+    try {
+      await this.conn.sessionUpdate({
+        sessionId: session.id,
+        update: {
+          sessionUpdate: "available_commands_update",
+          availableCommands: commands,
+        },
+      });
+      log.info("available_commands_update sent", {
+        sessionId: session.id,
+        cwd: session.cwd,
+        count: commands.length,
+        names: commands.map((c) => c.name),
+      });
+    } catch (err) {
+      log.warn("sendAvailableCommands failed", {
+        sessionId: session.id,
+        error: err instanceof Error ? err.message : String(err),
       });
     }
   }
@@ -1091,7 +1163,7 @@ export class InvoxAgent implements Agent {
           sessionId: session.id,
           update: {
             sessionUpdate: "user_message_chunk",
-            content: { type: "text", text: userContentPreview(m.content) },
+            content: { type: "text", text: contentToString(m.content) },
           },
         });
         continue;
@@ -1171,11 +1243,41 @@ export const DEFAULT_SYSTEM_PROMPT =
   `- image: the user attached an image — refer to it in your answer\n` +
   `\n` +
   `Always prefer using tools to answer questions about the codebase. ` +
-  `If a file is referenced but not yet read, read it first.`;
+  `If a file is referenced but not yet read, read it first.\n` +
+  `\n` +
+  `# Skills\n` +
+  `\n` +
+  `You have access to a Skill tool that loads reusable workflow templates from .claude/skills/. ` +
+  `When the user asks you to use, run, load, or activate a skill — or when their message ` +
+  `matches a known skill name — call the Skill tool to load and follow that skill's instructions.\n` +
+  `Examples: "use skill /self-constrained-build", "run the review skill", "activate langgpt"\n` +
+  `If unsure which skill to use, call Skill({ name: "list" }) to see all available skills.`;
 
 /** Build the OpenAI-shape system message for a given prompt body. */
 function systemMessageForPrompt(prompt: string): LLMMessage {
   return { role: "system", content: prompt };
+}
+
+/**
+ * Build a system message that includes the list of available skills.
+ *
+ * The skill names are injected so the LLM knows which skills exist and
+ * can semantically match user requests like "use skill /self-constrained-build"
+ * to the correct Skill tool call — without having to call Skill({ name: "list" })
+ * first.
+ */
+function systemMessageWithSkills(prompt: string, cwd: string): LLMMessage {
+  const commands = listAvailableCommands(cwd);
+  if (commands.length === 0) {
+    return { role: "system", content: prompt };
+  }
+  const lines = commands.map((c) => `  - ${c.name}: ${c.description}`);
+  const skillSection =
+    `\n\n# Available Skills\n` +
+    lines.join("\n") +
+    `\n\nWhen the user mentions any of the above skill names, ` +
+    `call Skill({ name: "<skill-name>", description: "..." }) to load and follow it.`;
+  return { role: "system", content: prompt + skillSection };
 }
 
 /** Allowed values for the `thinking` config option. Must match the
@@ -1271,14 +1373,6 @@ function uriToPath(uri: string): string {
   const q = p.indexOf("?");
   if (q !== -1) p = p.slice(0, q);
   return p;
-}
-
-/** Plain-text preview for logging (strips image data). */
-function userContentPreview(content: string | UserContent): string {
-  if (typeof content === "string") return content;
-  return content
-    .map((p) => (p.type === "text" ? p.text : `[${p.type}]`))
-    .join(" ");
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────

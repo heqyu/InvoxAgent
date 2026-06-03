@@ -29,9 +29,9 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import Database from "better-sqlite3";
 import { log } from "./log.js";
 import type { LLMMessage } from "./llm/types.js";
+import { contentToString } from "./llm/utils.js";
 
 export interface PersistedSession {
   /** Schema version. Bump when breaking changes are made. */
@@ -94,22 +94,12 @@ const TITLE_MAX_LEN = 60;
 export function titleFromHistory(history: LLMMessage[]): string {
   for (const m of history) {
     if (m.role !== "user") continue;
-    const raw =
-      typeof m.content === "string" ? m.content : userContentPreview(m.content);
+    const raw = contentToString(m.content);
     const t = raw.trim().replace(/\s+/g, " ");
     if (!t) continue;
     return t.length <= TITLE_MAX_LEN ? t : t.slice(0, TITLE_MAX_LEN - 1) + "…";
   }
   return "(empty)";
-}
-
-import type { UserContent } from "./llm/types.js";
-
-function userContentPreview(content: string | UserContent): string {
-  if (typeof content === "string") return content;
-  return content
-    .map((p) => (p.type === "text" ? p.text : `[${p.type}]`))
-    .join(" ");
 }
 
 export class SessionStore {
@@ -290,7 +280,10 @@ function zedDbPaths(): string[] {
  *
  * Returns the number of orphaned files deleted.
  */
-export function syncWithZedThreads(root: string, cwd: string): number {
+export async function syncWithZedThreads(
+  root: string,
+  cwd: string,
+): Promise<number> {
   // Collect all session IDs currently on disk.
   let diskIds: string[];
   try {
@@ -305,6 +298,28 @@ export function syncWithZedThreads(root: string, cwd: string): number {
   }
 
   if (diskIds.length === 0) return 0;
+
+  // Lazy-load better-sqlite3 so a missing native binary doesn't crash
+  // the entire process at import time. This function is best-effort —
+  // if the module can't load, we skip the sync silently.
+  let Database: new (
+    path: string,
+    opts?: { readonly?: boolean },
+  ) => {
+    prepare(sql: string): {
+      all(param: unknown): unknown[];
+    };
+    close(): void;
+  };
+  try {
+    const mod = await import("better-sqlite3");
+    Database = mod.default;
+  } catch (e) {
+    log.warn("syncWithZedThreads: better-sqlite3 unavailable, skipping", {
+      error: (e as Error).message,
+    });
+    return 0;
+  }
 
   // Collect all session_ids known to Zed for this project.
   const zedSessionIds = new Set<string>();

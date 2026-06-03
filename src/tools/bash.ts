@@ -35,20 +35,13 @@ import { existsSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { log } from "../log.js";
 import type { ToolSpec } from "../llm/types.js";
+import { DESCRIPTION_FIELD } from "./shared.js";
 import {
   errorResult,
   type Tool,
   type ToolExecContext,
   type ToolExecResult,
 } from "./types.js";
-
-const DESCRIPTION_FIELD = {
-  type: "string",
-  description:
-    "A short human-readable phrase describing what this call is doing, " +
-    "in the same language the user is using. Shown as the title of the " +
-    "tool call card in the user's editor.",
-} as const;
 
 const spec: ToolSpec = {
   type: "function",
@@ -116,10 +109,53 @@ async function execute(
 // ── rtk rewrite ─────────────────────────────────────────────────────
 
 /**
+ * Cached availability of `rtk` on this machine. `null` = not yet probed,
+ * `true` = available, `false` = missing. Probed once on first Bash call;
+ * subsequent calls skip the spawn entirely when rtk is absent.
+ */
+let rtkAvailable: boolean | null = null;
+
+/**
+ * Probe whether `rtk` is installed. Cached for the process lifetime so
+ * every Bash call after the first doesn't pay the spawn cost.
+ */
+async function ensureRtkProbed(cwd: string): Promise<boolean> {
+  if (rtkAvailable !== null) return rtkAvailable;
+  const { shellCmd, shellArgs } = buildShellInvocation("rtk --version");
+  rtkAvailable = await new Promise<boolean>((resolve) => {
+    let settled = false;
+    const child = spawn(shellCmd, shellArgs, {
+      cwd,
+      windowsHide: true,
+      stdio: "ignore",
+    });
+    child.on("error", () => {
+      if (!settled) {
+        settled = true;
+        resolve(false);
+      }
+    });
+    child.on("close", (code) => {
+      if (!settled) {
+        settled = true;
+        resolve(code === 0);
+      }
+    });
+  });
+  if (!rtkAvailable) {
+    log.debug("Bash: rtk not available, rewrite disabled for this session");
+  }
+  return rtkAvailable;
+}
+
+/**
  * Run `rtk rewrite '<command>'` and return the rewritten command string.
  * Returns an empty string on failure so callers can fall back to the original.
+ * Skips the spawn entirely if rtk was probed and found absent.
  */
 async function runRtkRewrite(command: string, cwd: string): Promise<string> {
+  if (!(await ensureRtkProbed(cwd))) return "";
+
   const rewriteCmd = `rtk rewrite '${command.replace(/'/g, "'\\''")}'`;
   const { shellCmd, shellArgs } = buildShellInvocation(rewriteCmd);
 

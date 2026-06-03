@@ -38,7 +38,7 @@ export class FileCache {
   }
 
   set(path: string, content: string): void {
-    this.map.set(path, { content, cachedAt: 0 });
+    this.map.set(path, { content, cachedAt: Date.now() });
   }
 
   invalidate(path: string): void {

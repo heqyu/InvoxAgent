@@ -16,8 +16,8 @@ import type {
   LLMProvider,
   LLMRequest,
   ParsedToolCall,
-  UserContent,
 } from "./types.js";
+import { chunkString, contentToString, sleep } from "./utils.js";
 
 export class MockToolProvider implements LLMProvider {
   readonly name = "mock-tools";
@@ -75,15 +75,6 @@ function lastUserContent(msgs: LLMMessage[]): string {
   return "";
 }
 
-function contentToString(content: string | UserContent | undefined): string {
-  if (!content) return "";
-  if (typeof content === "string") return content;
-  // UserContent = string | ChatCompletionContentPart[]
-  return (content as Array<{ type: string; text?: string }>)
-    .map((p) => (p.type === "text" ? (p.text ?? "") : `[${p.type}]`))
-    .join(" ");
-}
-
 function extractPath(s: string): string | null {
   // Matches "read X", "read the X", or quoted "X".
   const quoted = s.match(/"([^"]+)"/);
@@ -91,14 +82,4 @@ function extractPath(s: string): string | null {
   const verbed = s.match(/\bread\s+(?:the\s+)?(\S+)/i);
   if (verbed) return verbed[1] ?? null;
   return null;
-}
-
-function chunkString(s: string, size: number): string[] {
-  const out: string[] = [];
-  for (let i = 0; i < s.length; i += size) out.push(s.slice(i, i + size));
-  return out;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

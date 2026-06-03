@@ -22,7 +22,13 @@
 // Run: npx tsx examples/smoke-usage-model.ts
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { writeFileSync, readFileSync, readdirSync, existsSync, mkdtempSync } from "node:fs";
+import {
+  writeFileSync,
+  readFileSync,
+  readdirSync,
+  existsSync,
+  mkdtempSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -85,7 +91,9 @@ function spawnAgent(sessionCwd: string): SpawnedAgent {
     async requestPermission() {
       throw new Error("not used (policy: never ask)");
     },
-    async readTextFile(params: ReadTextFileRequest): Promise<ReadTextFileResponse> {
+    async readTextFile(
+      params: ReadTextFileRequest,
+    ): Promise<ReadTextFileResponse> {
       // MockToolProvider asks for package.json by default — serve from
       // the session cwd so the round-trip completes.
       return { content: readFileSync(params.path, "utf8") };
@@ -115,7 +123,14 @@ async function main(): Promise<void> {
   assert(!!sess.sessionId, "sessionId missing on session/new response");
   // The `models` field is `unstable_session_model` in the new SDK and
   // optional on NewSessionResponse — assert it's populated.
-  const models = (sess as { models?: { availableModels: { modelId: string }[]; currentModelId: string } }).models;
+  const models = (
+    sess as {
+      models?: {
+        availableModels: { modelId: string }[];
+        currentModelId: string;
+      };
+    }
+  ).models;
   assert(!!models, "session/new response missing models");
   const ids = models.availableModels.map((m) => m.modelId);
   assert(
@@ -135,7 +150,10 @@ async function main(): Promise<void> {
 
   // unstable_setSessionModel — the renamed helper that correctly emits
   // `session/set_model` (the previous SDK had a typo sending `set_mode`).
-  await a.conn.unstable_setSessionModel({ sessionId: sess.sessionId, modelId: "beta" });
+  await a.conn.unstable_setSessionModel({
+    sessionId: sess.sessionId,
+    modelId: "beta",
+  });
   console.error("[smoke-usage-model] ✓ unstable_setSessionModel(beta)");
 
   // Prep a file the mock tool will read.
@@ -151,18 +169,33 @@ async function main(): Promise<void> {
   );
   // PromptResponse.usage is the unstable_session_usage Usage field —
   // second data path that drives Zed's token chip.
-  const usage = (promptRes as { usage?: { totalTokens: number; inputTokens: number; outputTokens: number } }).usage;
-  assert(!!usage, `expected PromptResponse.usage to be populated, got: ${JSON.stringify(promptRes)}`);
+  const usage = (
+    promptRes as {
+      usage?: {
+        totalTokens: number;
+        inputTokens: number;
+        outputTokens: number;
+      };
+    }
+  ).usage;
+  assert(
+    !!usage,
+    `expected PromptResponse.usage to be populated, got: ${JSON.stringify(promptRes)}`,
+  );
   assert(
     usage.inputTokens === 42 && usage.outputTokens === 7,
     `expected usage { input: 42, output: 7 }, got: ${JSON.stringify(usage)}`,
   );
-  console.error("[smoke-usage-model] ✓ session/prompt → end_turn, usage:", usage);
+  console.error(
+    "[smoke-usage-model] ✓ session/prompt → end_turn, usage:",
+    usage,
+  );
 
   // The agent should emit one `usage_update` (for Zed's beta token-meter
   // UI) and one `agent_thought_chunk` (the visible-today fallback line).
   const usageUpdates = a.updates.filter(
-    (u) => (u.update as { sessionUpdate: string }).sessionUpdate === "usage_update",
+    (u) =>
+      (u.update as { sessionUpdate: string }).sessionUpdate === "usage_update",
   );
   assert(
     usageUpdates.length === 1,
@@ -170,8 +203,10 @@ async function main(): Promise<void> {
   );
   const uu = usageUpdates[0]!.update as { used: number; size: number };
   assert(uu.used === 49, `expected used=49, got ${uu.used}`);
-  assert(typeof uu.size === "number" && uu.size > 0,
-    `expected positive context-window size, got ${uu.size}`);
+  assert(
+    typeof uu.size === "number" && uu.size > 0,
+    `expected positive context-window size, got ${uu.size}`,
+  );
   console.error(
     `[smoke-usage-model] ✓ usage_update emitted: used=${uu.used} size=${uu.size}`,
   );
@@ -179,19 +214,33 @@ async function main(): Promise<void> {
   const thoughtChunks = a.updates.filter(
     (u) => u.update.sessionUpdate === "agent_thought_chunk",
   );
-  assert(thoughtChunks.length === 1,
-    `expected exactly 1 agent_thought_chunk (token report), got ${thoughtChunks.length}`);
+  assert(
+    thoughtChunks.length === 1,
+    `expected exactly 1 agent_thought_chunk (token report), got ${thoughtChunks.length}`,
+  );
   const tc = thoughtChunks[0]!;
-  const upd = tc.update as Extract<typeof tc.update, { sessionUpdate: "agent_thought_chunk" }>;
+  const upd = tc.update as Extract<
+    typeof tc.update,
+    { sessionUpdate: "agent_thought_chunk" }
+  >;
   const text = upd.content.type === "text" ? upd.content.text : "";
-  assert(text.startsWith("🪙"), `agent_thought_chunk should start with 🪙, got: ${text}`);
-  assert(text.includes("model=beta"),
-    `agent_thought_chunk should report model=beta, got: ${text}`);
-  assert(text.includes("Context:") && text.includes(" / "),
-    `agent_thought_chunk should report Context: used / max, got: ${text}`);
+  assert(
+    text.startsWith("🪙"),
+    `agent_thought_chunk should start with 🪙, got: ${text}`,
+  );
+  assert(
+    text.includes("beta"),
+    `agent_thought_chunk should report model beta, got: ${text}`,
+  );
+  assert(
+    text.includes("Context:") && text.includes(" / "),
+    `agent_thought_chunk should report Context: used / max, got: ${text}`,
+  );
   const meta = (tc as { _meta?: Record<string, unknown> })._meta;
-  assert(!!meta && typeof meta["invox/usage"] === "object",
-    "agent_thought_chunk missing _meta['invox/usage']");
+  assert(
+    !!meta && typeof meta["invox/usage"] === "object",
+    "agent_thought_chunk missing _meta['invox/usage']",
+  );
   console.error("[smoke-usage-model] ✓ agent_thought_chunk:", text);
 
   a.child.kill();
@@ -203,13 +252,20 @@ async function main(): Promise<void> {
   const files = readdirSync(sessionsDir).filter((f) => f.endsWith(".json"));
   assert(files.length === 1, `expected 1 session file, got ${files.length}`);
   const sessionFile = files[0]!;
-  const snapshot = JSON.parse(readFileSync(join(sessionsDir, sessionFile), "utf8")) as {
+  const snapshot = JSON.parse(
+    readFileSync(join(sessionsDir, sessionFile), "utf8"),
+  ) as {
     selectedModel?: string;
     id: string;
   };
-  assert(snapshot.selectedModel === "beta",
-    `expected selectedModel=beta on disk, got ${snapshot.selectedModel}`);
-  console.error("[smoke-usage-model] ✓ disk has selectedModel =", snapshot.selectedModel);
+  assert(
+    snapshot.selectedModel === "beta",
+    `expected selectedModel=beta on disk, got ${snapshot.selectedModel}`,
+  );
+  console.error(
+    "[smoke-usage-model] ✓ disk has selectedModel =",
+    snapshot.selectedModel,
+  );
 
   // ── Second process: load session, expect beta restored ─────────────────
   const b = spawnAgent(workCwd);
@@ -225,11 +281,23 @@ async function main(): Promise<void> {
     sessionId: snapshot.id,
     mcpServers: [],
   });
-  const loadedModels = (loaded as { models?: { availableModels: { modelId: string }[]; currentModelId: string } }).models;
+  const loadedModels = (
+    loaded as {
+      models?: {
+        availableModels: { modelId: string }[];
+        currentModelId: string;
+      };
+    }
+  ).models;
   assert(!!loadedModels, "session/load response missing models");
-  assert(loadedModels.currentModelId === "beta",
-    `expected loaded currentModelId=beta, got ${loadedModels.currentModelId}`);
-  console.error("[smoke-usage-model] ✓ session/load.models.currentModelId =", loadedModels.currentModelId);
+  assert(
+    loadedModels.currentModelId === "beta",
+    `expected loaded currentModelId=beta, got ${loadedModels.currentModelId}`,
+  );
+  console.error(
+    "[smoke-usage-model] ✓ session/load.models.currentModelId =",
+    loadedModels.currentModelId,
+  );
 
   b.child.kill();
   await waitExit(b.child);

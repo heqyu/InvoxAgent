@@ -6,22 +6,8 @@
 // observable. Format preserved from stage 1 so the existing smoke assertions
 // pass unchanged.
 
-import type {
-  LLMDelta,
-  LLMProvider,
-  LLMRequest,
-  UserContent,
-} from "./types.js";
-
-function contentToString(content: string | UserContent | undefined): string {
-  if (!content) return "";
-  if (typeof content === "string") return content;
-  // UserContent = string | ChatCompletionContentPart[]
-  // Walk the array without naming the OpenAI namespace.
-  return (content as Array<{ type: string; text?: string }>)
-    .map((p) => (p.type === "text" ? (p.text ?? "") : `[${p.type}]`))
-    .join(" ");
-}
+import type { LLMDelta, LLMProvider, LLMRequest } from "./types.js";
+import { chunkString, contentToString, sleep } from "./utils.js";
 
 export class EchoProvider implements LLMProvider {
   readonly name = "echo";
@@ -36,14 +22,4 @@ export class EchoProvider implements LLMProvider {
       await sleep(20);
     }
   }
-}
-
-function chunkString(s: string, size: number): string[] {
-  const out: string[] = [];
-  for (let i = 0; i < s.length; i += size) out.push(s.slice(i, i + size));
-  return out;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

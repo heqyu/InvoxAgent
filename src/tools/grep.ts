@@ -10,20 +10,13 @@ import { resolve } from "node:path";
 import { rgPath } from "@vscode/ripgrep";
 import { log } from "../log.js";
 import type { ToolSpec } from "../llm/types.js";
+import { DESCRIPTION_FIELD } from "./shared.js";
 import {
   errorResult,
   type Tool,
   type ToolExecContext,
   type ToolExecResult,
 } from "./types.js";
-
-const DESCRIPTION_FIELD = {
-  type: "string",
-  description:
-    "A short human-readable phrase describing what this call is doing, " +
-    "in the same language the user is using. Shown as the title of the " +
-    "tool call card in the user's editor.",
-} as const;
 
 const DEFAULT_MAX_BYTES = 256 * 1024; // 256 KiB output cap
 
