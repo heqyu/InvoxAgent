@@ -67,6 +67,7 @@ import {
 import { FileCache } from "../tools/cache.js";
 import { kindFromTier } from "../tools/permissions.js";
 import { listAvailableCommands } from "../tools/skill.js";
+import { loadClaudeMd } from "../discovery/claude-md.js";
 import { McpClientManager } from "../mcp/client.js";
 import { loadMcpConfig } from "../mcp/config.js";
 import { createMcpTool } from "../mcp/tool.js";
@@ -325,7 +326,7 @@ export class InvoxAgent implements Agent {
       id,
       cwd: params.cwd,
       history: [
-        systemMessageWithSkills(
+        systemMessageWithMemoryAndSkills(
           this.systemPromptById.get(defaultPromptId)!.prompt,
           params.cwd,
         ),
@@ -453,7 +454,10 @@ export class InvoxAgent implements Agent {
     if (restoredConfigValues.system_prompt) {
       const def = this.systemPromptById.get(restoredConfigValues.system_prompt);
       if (def) {
-        session.history[0] = systemMessageWithSkills(def.prompt, session.cwd);
+        session.history[0] = systemMessageWithMemoryAndSkills(
+          def.prompt,
+          session.cwd,
+        );
       }
     }
 
@@ -644,7 +648,10 @@ export class InvoxAgent implements Agent {
       session.configValues.system_prompt = value;
       // Replace history[0] in place — by construction of newSession /
       // loadSession that slot is always a system message.
-      session.history[0] = systemMessageWithSkills(def.prompt, session.cwd);
+      session.history[0] = systemMessageWithMemoryAndSkills(
+        def.prompt,
+        session.cwd,
+      );
     } else if (params.configId === "thinking") {
       if (!THINKING_VALUES.has(value)) {
         throw new Error(
@@ -1570,24 +1577,42 @@ function systemMessageForPrompt(prompt: string): LLMMessage {
 }
 
 /**
- * Build a system message that includes the list of available skills.
+ * Build a system message that includes CLAUDE.md memory and available skills.
  *
- * Modeled after Claude Code's skill listing format: each skill gets a
- * meaningful description extracted from its SKILL.md frontmatter, so the
- * LLM can semantically match user requests to the correct skill without
- * having to call Skill({ name: "list" }) first.
+ * Assembly order:
+ *   1. Base system prompt (from template)
+ *   2. CLAUDE.md memory sections (user-level, then project-level)
+ *   3. Available skill catalog
+ *
+ * This mirrors Claude Code's behavior where CLAUDE.md is injected into the
+ * system prompt as persistent "memory" that guides the LLM's behavior.
  */
-function systemMessageWithSkills(prompt: string, cwd: string): LLMMessage {
-  const commands = listAvailableCommands(cwd);
-  if (commands.length === 0) {
-    return { role: "system", content: prompt };
+function systemMessageWithMemoryAndSkills(
+  prompt: string,
+  cwd: string,
+): LLMMessage {
+  let content = prompt;
+
+  // 1. CLAUDE.md memory (user first, then project)
+  const memory = loadClaudeMd(cwd);
+  if (memory.length > 0) {
+    const sections = memory
+      .map((s) => `# CLAUDE.md [${s.source}]\n\n${s.content}`)
+      .join("\n\n---\n\n");
+    content += `\n\n# Memory\n\nThe following are from the user's CLAUDE.md files. Follow these instructions/preferences:\n\n${sections}`;
   }
-  const lines = commands.map((c) => `- ${c.name}: ${c.description}`);
-  const skillSection =
-    `\n\nThe following skills are available for use with the Skill tool:\n\n` +
-    lines.join("\n") +
-    `\n\nWhen the user types "/<skill-name>", invoke it via Skill. Only use skills listed above, don't guess.`;
-  return { role: "system", content: prompt + skillSection };
+
+  // 2. Available skills
+  const commands = listAvailableCommands(cwd);
+  if (commands.length > 0) {
+    const lines = commands.map((c) => `- ${c.name}: ${c.description}`);
+    content +=
+      `\n\n# Skills\n\nThe following skills are available for use with the Skill tool:\n\n` +
+      lines.join("\n") +
+      `\n\nWhen the user types "/<skill-name>", invoke it via Skill. Only use skills listed above, don't guess.`;
+  }
+
+  return { role: "system", content };
 }
 
 /** Allowed values for the `thinking` config option. Must match the
