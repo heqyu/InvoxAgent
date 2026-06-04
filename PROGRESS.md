@@ -13,18 +13,18 @@
 
 ---
 
-## 0. 当前快照（2026-06-04 18:30）
+## 0. 当前快照（2026-06-04 20:40）
 
 | 维度 | 状态 |
 |---|---|
 | 版本 | `0.0.1` |
-| 代码量 | ~7960 行 TS / 38 文件 |
+| 代码量 | ~8100 行 TS / 40 文件 |
 | 已完成 stage | 0–8（全部 `[VERIFIED]`） |
 | 传输 | stdio + WebSocket |
 | 工具 | Read / Write / Edit / Bash / Glob / Grep / Skill + MCP 桥接 |
 | 协议外特性 | 会话持久化 / Zed thread 同步 / 模型菜单 / token 计费 / system prompt 模板 / thinking 模式 / 三层 discovery / CLAUDE.md 记忆 / 插件 + Hook |
-| 测试 | **vitest 4.1.8**：127 个 case（100 单元 + 19 集成 + 8 其他）— 124 ✓ / 3 skip / 0 fail，20.02s |
-| 已知风险 | `agent.ts` 1991 行黑洞 / MCP 资源泄漏 / 2 个 stale smoke |
+| 测试 | **vitest 4.1.8**：161 个 case（133 单元 + 20 集成 + 8 其他）— 158 ✓ / 3 skip / 0 fail，22.85s |
+| 已知风险 | `agent.ts` 2030+ 行黑洞 / MCP 资源泄漏 / 2 个 stale smoke |
 
 ---
 
@@ -68,7 +68,7 @@
 | A2 | **拆分 `agent.ts`** → `agent/connection.ts` / `session.ts` / `prompt-loop.ts` / `usage-meter.ts` / `system-prompt.ts` / `hook-runner.ts` / `model-registry.ts`；单文件 ≤ 400 行 | P0 | 进行中（`usage-meter.ts` + `json.ts` 已就位） | 所有 smoke 仍 PASS；`agent/index.ts` re-export 旧符号保持外部 API 不变 |
 | A3 | 全局 `safeParseJSON`：替换所有裸 `JSON.parse(call.arguments)`（已知点：`agent.ts:987`），失败时把 error 作为 tool result 返还给 LLM 让其自我纠错 | P0 | **✅ Done**（17:05）<br/>新建 `src/agent/json.ts`（safeParseJSON + parseToolArguments）；`agent.ts:987` 改为 fast-fail 路径；`tools/router.ts` 同步收编<br/>新增 13 个单测 + `smoke-bad-json.ts` 黑盒验证（BadJsonProvider 模拟畸形→自我纠错全链路） | 新增 smoke 用畸形 JSON 触发，agent 不挂 |
 | A4 | `Session` 持有 `hooks: HookRegistry` 与 `mcpManager` 引用，循环里不再反复 `loadHooks(cwd)` | P1 | **✅ Done**（18:30）<br/>Session 接口加 `hooks: HookRegistry` 必选字段；newSession / loadSession 各调一次 `loadHooks` 填充；agent.ts 内 6 处旧调用（SessionStart / UserPromptSubmit / Stop / PreToolUse / PostToolUse / PostToolUseFailure）全部改为 `session.hooks`<br/>`mcpClient` 字段已在 Session 上（不变）；新增 1 个行为级断言验证缓存命中后磁盘 mutation 不可见 | 单测验证缓存命中次数 |
-| A5 | `stopReason` 完整映射：429 → `refusal`，stream 抛错 → 结构化 error，prompt 始终返回合法 `PromptResponse` | P1 | 待开始 | smoke 模拟 429 / 网络错误，断言 `stopReason` |
+| A5 | `stopReason` 完整映射：429 → `refusal`，stream 抛错 → 结构化 error，prompt 始终返回合法 `PromptResponse` | P1 | **✅ Done**（20:40）<br/>新建 `src/agent/error-mapping.ts`（`classifyProviderError` + `formatProviderErrorForUser`）；`runOneIteration` 不再 throw，stream 异常 → `{ kind: "stop", reason: "refusal", error }`；`prompt()` 加顶层 try/catch 兜底；新增 `FlakyProvider` + `INVOX_MOCK=flaky` + `INVOX_FLAKY_KIND` env<br/>新增 33 个单测 + 5 场景 smoke（429/500/auth/network/mid-stream）全部映射到 refusal | smoke 模拟 429 / 网络错误，断言 `stopReason` |
 
 ### Phase B — 「资源管理与可靠性」（目标 1–2 周）
 
@@ -150,7 +150,7 @@
 | K6 | `loadHooks(cwd)` 在 tool 循环内重复调用（虽缓存） | P1 | **✅ A4 落地**（18:30）—— `Session` 持有 `hooks: HookRegistry`，6 处旧调用全部收敛 |
 | K7 | WebSocket 默认无鉴权 | P1 | Phase D1 |
 | K8 | `CONTEXT_WINDOW_TABLE` 硬编码 | P2 | Backlog |
-| K9 | `stopReason` 不全（无 `refusal` 映射） | P1 | Phase A5 |
+| K9 | `stopReason` 不全（无 `refusal` 映射） | P1 | **✅ A5 落地**（20:40）—— 5 种 provider 错误全映射到 `refusal`，prompt 不再抛 RPC 异常 |
 | K10 | Hook 协议追着 Claude Code 跑 | P2 | Phase F3 |
 | K11 | `smoke-stage6-globgrep`（PascalCase 重命名后失效）& `smoke-stage7`（CLAUDE.md/skill 注入后断言失效）—— 两个 stale/fragile smoke，已 skip | P2 | 择期重写或淘汰；新覆盖由单测承担 |
 
@@ -196,14 +196,14 @@ Backlog → 进入 Phase 表 → 挪到 Doing（≤ 3 项）→ commit（带 has
 
 | 指标 | 当前 | 一个月目标 |
 |---|---|---|
-| `agent.ts` 行数 | 1991（A4 净 +10：新增 `hooks` 字段 + 2 行注入） | ≤ 400（拆完） |
-| 单元测试 case 数 | **100** | ≥ 80 ✅ |
-| 集成 smoke case 数 | **19**（16 ✓ / 3 skip） | 全 ≥ 90% pass ✅ |
-| `npm test` 总耗时 | 20.02s | ≤ 30s ✅ |
+| `agent.ts` 行数 | 2030+（A5 净 +50：error-mapping 路径 + 顶层兜底 catch） | ≤ 400（拆完 A2） |
+| 单元测试 case 数 | **133** | ≥ 80 ✅ |
+| 集成 smoke case 数 | **20**（17 ✓ / 3 skip） | 全 ≥ 90% pass ✅ |
+| `npm test` 总耗时 | 22.85s | ≤ 30s ✅ |
 | MCP 子进程峰值 / session 数 | N | 1（共享池） |
 | 长对话 OOM/turn | 偶发 | 0（C1 落地后） |
 | WS 默认鉴权 | 无 | 有（D1 落地后） |
 
 ---
 
-_最后更新：2026-06-04 18:30 ｜ Phase A4 落地_
+_最后更新：2026-06-04 20:40 ｜ Phase A5 落地（Phase A 仅剩 A2 拆分）_

@@ -258,7 +258,55 @@ K1（agent.ts 1991 行）继续等 A2；K3（MCP 进程池）等 Phase B；K11 s
 
 —— 写于 2026-06-04 18:30，下一个 commit 应该是 `feat(A4): hoist HookRegistry onto Session, drop redundant loadHooks calls`。
 
+---
+
+## 2026-06-04 ｜ Sprint 1 Day 1（晚间）：A5 落地——「provider 挂了，prompt 不挂」
+
+### 战果
+
+- **新建 `src/agent/error-mapping.ts`** —— LLM provider 错误到 ACP `stopReason` 的纯函数映射：
+  - `classifyProviderError(err)` 返回 `{ kind: "abort" } | { kind: "refusal", info }`
+  - `info.category` 五桶：`rate_limit` / `auth` / `server` / `network` / `bad_request` / `unknown`
+  - `formatProviderErrorForUser` 统一加 `⚠️` 前缀
+- **`runOneIteration` 不再 throw**：捕获后返回 `{ kind: "stop", reason: "refusal", error }`，并把已流出的 `assistantText` 先存进 history（不丢上下文）
+- **`prompt()` 顶层兜底 catch**：任何 hook 同步异常、连接断开、未知错误都映射到合法 stopReason；**prompt 始终返回合法 `PromptResponse`**
+- **错误信息回流给用户**：通过 `agent_message_chunk` emit 一行 `⚠️ <message>`，UI 直接看到根因（不需要 acp-beta flag）
+- **`stopReason` 类型扩容**：`prompt()` 局部变量从 3 元 union → 4 元（含 `"refusal"`）；`reportTurnUsage` 签名同步更新
+- **新增 `FlakyProvider`** + `INVOX_MOCK=flaky` + `INVOX_FLAKY_KIND` env，5 种 kind：`429` / `500` / `auth` / `network` / `mid-stream`
+- **新增 `examples/smoke-error-mapping.ts`**：在同一进程中跑 5 个 spawn 子场景，每个都验证 4 个不变式
+- **新增 33 个 error-mapping 单测**：含「永不抛异常矩阵」（10 种 evil input 包括 `null` / `undefined` / `Symbol`）
+
+### 数字
+
+```
+npm test
+  Test Files  11 passed (11)
+       Tests  158 passed | 3 skipped (161)
+    Duration  22.85s
+```
+
+A4 后 124 → A5 后 158（+33 单测 +1 smoke）。**Phase A 的 5 个任务，已落地 4 个（A1/A3/A4/A5），仅剩 A2 拆分**。
+
+### 教训三条
+
+1. **null guard 比 type assertion 早**：写 `classifyProviderError` 时第一版直接 `const e = err as {...}; e.message`，结果 `null.message` 直接 TypeError。**永不抛异常的契约**写在注释里没用，实际代码必须先 guard `null/undefined/标量`。这是单测「永不抛矩阵」一上来就抓住的坑——单测的价值之一就是让"绝不"这种过于乐观的口头承诺**有形化**。
+2. **错误信息要既给机器也给人**：log 里有结构化 `category/status/code/message`（机器吃），`agent_message_chunk` 里有一行 `⚠️ <human readable>`（人吃）。**别让"调试日志"和"用户看到的"是同一个**——前者要详细到能反查，后者要简短到能扫读。这次刚好两条路径都铺了。
+3. **mid-stream error 是最容易漏的场景**：很多 agent 实现只测"还没流就挂"，但用户报的最多的是"流到一半挂"——这时已经看到 `Starting reply, but then` 然后突然没了。我把 `mid-stream` 当作一个独立 smoke kind 是对的——它额外验证「已流出的 assistantText 入 history」这条不变式，否则下一轮 LLM 看不到自己说过的话。
+
+### 给下一个会话的接力棒
+
+Phase A 路线只剩 **A2（拆分 `agent.ts`）**：
+- 当前 `agent.ts` 已经搬出 `usage-meter.ts` / `json.ts` / `error-mapping.ts` 三个独立纯模块
+- A4 让 hooks 收敛到 `session.hooks` 字段，未来 `prompt-loop.ts` / `hook-runner.ts` 不再依赖 `loadHooks` import
+- 还差的拆分目标：`agent/connection.ts`（initialize/auth）/ `agent/session-store.ts`（newSession/loadSession/persist）/ `agent/prompt-loop.ts`（prompt + runOneIteration）/ `agent/system-prompt.ts`（systemMessageWithMemoryAndSkills + DEFAULT_SYSTEM_PROMPT + CONTEXT_WINDOW_TABLE）
+- 拆完后 `agent.ts` 应当 ≤ 400 行，仅做 InvoxAgent 类的"门面" + Session 接口定义
+
+A2 之后就该进 **Phase B（资源管理与可靠性）** —— B1 MCP 进程池是 P0，B2 session 销毁路径补全紧随其后。K3 那条 MCP 资源泄漏的悬剑已经挂了 4 天。
+
+—— 写于 2026-06-04 20:40，下一个 commit 应该是 `feat(A5): map provider errors to ACP stopReason; prompt() never throws`。
+
 <!-- 新的工作日记追加在这里之上 -->
+
 
 
 
