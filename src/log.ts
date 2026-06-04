@@ -1,16 +1,15 @@
-// Stderr + optional file logger. stdout is reserved for JSON-RPC framing on the
-// stdio transport (see PLAN.md §3 — first pitfall). All logs go to fd 2 unconditionally.
-// If INVOX_LOG_FILE is set, the same lines are also appended to that file —
-// useful when launched from Zed where stderr is hard to surface.
+// log：写 stderr + 可选写文件。stdout 在 stdio transport 上专用于
+// JSON-RPC 帧，这里所有日志一律走 fd 2。
+// 设置 INVOX_LOG_FILE 后会同时追加到该文件 —— Zed 启动时 stderr 不易看见，
+// 落盘日志方便排查。
 //
-// Levels gated by env var INVOX_LOG: "silent" | "error" | "warn" | "info" | "debug" | "trace".
-// Default: "info".  At "trace" we also dump full LLM payloads — DO NOT use
-// trace in production since prompts and tool outputs may contain secrets.
+// 等级由环境变量 INVOX_LOG 控制：
+//   "silent" | "error" | "warn" | "info" | "debug" | "trace"
+// 默认 "info"。trace 会 dump 完整 LLM payload —— 生产环境严禁开启，
+// prompt / 工具输出可能含密钥等敏感数据。
 //
-// Timestamps:
-//   default: local time MM-DD HH:mm:ss.SSS — easy on the eye when you're
-//   correlating with a real-world action.
-//   INVOX_LOG_UTC=1 falls back to ISO UTC (older format) for log shipping.
+// 时间戳：默认本地 "MM-DD HH:mm:ss.SSS"（人眼对照实际操作易读）；
+// INVOX_LOG_UTC=1 切回 ISO UTC 格式以便日志聚合。
 
 import { createWriteStream, type WriteStream } from "node:fs";
 
@@ -41,10 +40,10 @@ function getFileStream(): WriteStream | null {
   try {
     fileStream = createWriteStream(path, { flags: "a" });
     fileStream.on("error", (err) => {
-      // Don't recurse through log.error — write directly to stderr.
+      // 不递归调 log.error —— 直接写 stderr，避免循环。
       process.stderr.write(`[log] file stream error: ${err.message}\n`);
     });
-    // Boot marker so it's obvious where each invox session begins.
+    // 启动标记，方便区分每次 invox 会话的开始位置。
     fileStream.write(`\n--- invox started @ ${formatTimestamp(new Date())} pid=${process.pid} ---\n`);
     return fileStream;
   } catch (err) {
@@ -62,8 +61,7 @@ function pad3(n: number): string {
 
 function formatTimestamp(d: Date): string {
   if (process.env["INVOX_LOG_UTC"] === "1") return d.toISOString();
-  // Local time, "MM-DD HH:mm:ss.SSS" — short enough to keep room for the
-  // payload, unambiguous within a day.
+  // 本地时间 "MM-DD HH:mm:ss.SSS" —— 短而无歧义。
   return (
     pad2(d.getMonth() + 1) +
     "-" +
@@ -105,8 +103,7 @@ export const log = {
   info: (msg: string, ...rest: unknown[]): void => emit("info", msg, ...rest),
   debug: (msg: string, ...rest: unknown[]): void => emit("debug", msg, ...rest),
   trace: (msg: string, ...rest: unknown[]): void => emit("trace", msg, ...rest),
-  /** Returns true iff at least the given level would be emitted. Use to skip
-   * expensive payload preparation when nobody's listening. */
+  /** 当前等级是否会输出指定级别。用来跳过昂贵 payload 准备。 */
   isEnabled(level: Exclude<Level, "silent">): boolean {
     return RANK[currentLevel()] >= RANK[level];
   },

@@ -1,11 +1,9 @@
-// Shared helpers for filesystem operations that fall outside the workspace.
+// 工作区外文件 I/O 的共享 helper。
 //
-// When a resolved path lives inside `ctx.cwd` (the workspace root), tools
-// delegate to ACP's fs capabilities so Zed can track dirty buffers and
-// provide undo / editor integration. When the path is *outside* the workspace
-// (e.g. a different repository, a different drive on Windows, or a path the
-// user found via a Bash tool running in a Unix-emulation layer), we fall back
-// to plain Node.js `fs` — ACP has no jurisdiction there.
+// 当解析后的路径在 ctx.cwd 内时，工具走 ACP fs 能力（让 Zed 跟踪 dirty buffer
+// 并提供 undo / 编辑器集成）；当路径在工作区外（例如另一个仓库、Windows
+// 上的另一块盘、用户从 Bash 工具拿到的 Unix 模拟层路径），ACP 不再管辖，
+// 我们退回到 Node 原生 fs。
 
 import { dirname, normalize, sep, resolve } from "node:path";
 import { readFile, writeFile, access, mkdir } from "node:fs/promises";
@@ -13,19 +11,17 @@ import { constants as fsConstants } from "node:fs";
 import type { ToolExecContext } from "./types.js";
 
 /**
- * On Windows, convert a Git Bash / MSYS2 / Cygwin-style Unix path to a
- * native Windows path:
+ * Windows 下把 Git Bash / MSYS2 / Cygwin 风格的 Unix 路径转换为原生 Windows 路径：
  *   /d/foo/bar  →  D:\foo\bar
  *   /C/Users    →  C:\Users
  *   /d          →  D:\
- * These paths appear when the LLM reads output from the Bash tool (which
- * runs under Git Bash / MSYS2) and passes the path back into a file I/O
- * tool argument.
- * On POSIX, returns the path unchanged.
+ * LLM 从 Bash 工具（在 Git Bash / MSYS2 下运行）读到这种路径后，可能直接
+ * 把它当参数传回文件 I/O 工具。
+ * POSIX 上原样返回。
  */
 export function normalizeInputPath(input: string): string {
   if (process.platform !== "win32") return input;
-  // /X/rest  or  /X  (single drive letter at Unix root)
+  // /X/rest 或 /X（单字母盘符位于 Unix root）
   const m = input.match(/^\/([a-zA-Z])(\/.*)?$/);
   if (!m) return input;
   const drive = (m[1] as string).toUpperCase();
@@ -34,26 +30,24 @@ export function normalizeInputPath(input: string): string {
 }
 
 /**
- * Resolve a tool-supplied path (relative, absolute native, or Git Bash
- * style) against the session cwd, returning a normalized absolute path.
- * This is the single entry point for path resolution in all file I/O tools.
+ * 把工具传入的路径（相对 / 原生绝对 / Git Bash 风格）相对会话 cwd 解析为
+ * 规范化的绝对路径。所有文件 I/O 工具都从这里走单一入口。
  */
 export function resolveToolPath(cwd: string, input: string): string {
   return resolve(cwd, normalizeInputPath(input));
 }
 
 /**
- * Returns `true` when `resolvedPath` is (or is inside) `workspaceRoot`.
- * Both inputs should already be absolute paths (from resolveToolPath / ctx.cwd).
+ * 判断 resolvedPath 是否在 workspaceRoot 之内（含 root 自身）。
+ * 两个入参都应当已经是绝对路径。
  *
- * Uses prefix comparison rather than path.relative() for two reasons:
- *  1. Cross-drive paths on Windows: relative("G:\\a", "C:\\b") returns the
- *     absolute target path unchanged — impossible to detect as "outside"
- *     without an extra isAbsolute() guard.
- *  2. Conceptually simpler: "inside" means "starts with the root prefix".
+ * 用前缀比较而非 path.relative()，原因：
+ *  1. Windows 跨盘：relative("G:\\a", "C:\\b") 返回的就是 target 绝对路径，
+ *     很难仅靠返回值判断是否"在外"
+ *  2. 概念更简单："inside" = "starts with root prefix"
  *
- * Trailing-separator guard prevents "/workspace-extra" from matching
- * "/workspace". On Windows, comparison is case-insensitive (NTFS convention).
+ * 末尾分隔符兜底：避免 "/workspace-extra" 误匹配 "/workspace"。
+ * Windows 下大小写不敏感（NTFS 默认）。
  */
 export function isInsideWorkspace(
   resolvedPath: string,
@@ -72,14 +66,14 @@ export function isInsideWorkspace(
   return normPath === normRoot || normPath.startsWith(rootWithSep);
 }
 
-/** Read a text file directly via Node.js fs (bypasses ACP). */
+/** 通过 Node fs 直接读文本文件（绕过 ACP）。 */
 export async function readFileDirect(path: string): Promise<string> {
   return readFile(path, { encoding: "utf-8" });
 }
 
 /**
- * Write a text file directly via Node.js fs (bypasses ACP).
- * Creates any missing ancestor directories automatically (mkdir -p semantics).
+ * 通过 Node fs 直接写文本文件（绕过 ACP）。
+ * 自动 mkdir -p：缺失的父目录会被一次性创建。
  */
 export async function writeFileDirect(
   path: string,
@@ -90,14 +84,12 @@ export async function writeFileDirect(
 }
 
 /**
- * Read a file with cache and workspace-boundary awareness.
+ * 带缓存与工作区边界判定的读文件：
+ *   1. 命中缓存即返回
+ *   2. 否则按是否在工作区内走 ACP / 直接 fs
+ *   3. 写入缓存供后续命中
  *
- * 1. Returns from cache if available.
- * 2. Otherwise reads via ACP (inside workspace) or direct fs (outside).
- * 3. Populates the cache for subsequent calls.
- *
- * This is the single source of truth for "read a file into the cache"
- * shared by Read, Edit (auto-read), and any future tool that needs it.
+ * 这是 Read、Edit (auto-read)、未来需要"读到缓存里"的工具的唯一入口。
  */
 export async function readFileWithCache(
   resolvedPath: string,
@@ -124,7 +116,7 @@ export async function readFileWithCache(
   return content;
 }
 
-/** Check whether a file exists and is readable. */
+/** 检查文件是否存在且可读。 */
 export async function fileExists(path: string): Promise<boolean> {
   try {
     await access(path, fsConstants.R_OK);

@@ -1,6 +1,6 @@
-// MCP type definitions shared across the MCP subsystem.
+// MCP 子系统共享类型。
 
-/** One server entry from .claude/.mcp.json → mcpServers. */
+/** `.claude/.mcp.json` 中 mcpServers 的单条配置。 */
 export interface McpServerConfig {
   type: "stdio";
   command: string;
@@ -8,24 +8,24 @@ export interface McpServerConfig {
   env?: Record<string, string>;
 }
 
-/** Root shape of .claude/.mcp.json. */
+/** `.claude/.mcp.json` 的根结构。 */
 export interface McpConfigFile {
   mcpServers: Record<string, McpServerConfig>;
 }
 
-/** Wraps a single MCP tool — server name, tool name, invox-facing name. */
+/** 单个 MCP 工具的元信息 —— 包含原始服务器名 + 对外暴露的 invox 名。 */
 export interface McpToolDef {
-  /** The server key from .claude/.mcp.json (e.g. "codegraph"). */
+  /** `.claude/.mcp.json` 中的 server key（如 "codegraph"）。 */
   serverName: string;
-  /** The tool name reported by the MCP server (e.g. "codegraph_search"). */
+  /** MCP 服务器自己上报的工具名（如 "codegraph_search"）。 */
   toolName: string;
-  /** Invox-internal name: mcp__<server>__<tool>. */
+  /** invox 内部命名：mcp__<server>__<tool>，作为 LLM 看到的 function.name。 */
   invoxName: string;
-  /** The tool's description (may be undefined on servers that omit it). */
+  /** 工具描述；部分服务器不上报，可能为空。 */
   description?: string;
   /**
-   * JSON Schema for the tool's arguments. Already sanitised (no $schema,
-   * $defs, etc.) and guaranteed to have `type: "object"`.
+   * 工具参数的 JSON Schema。已被 sanitise（去除 $schema / $defs 等无关字段），
+   * 顶层一定带 `type: "object"`。
    */
   inputSchema: Record<string, unknown>;
 }

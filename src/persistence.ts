@@ -1,23 +1,18 @@
-// Session persistence: dump/load OpenAI-shape conversation history to disk.
+// 会话持久化：把 OpenAI 形状的会话 history 落到磁盘。
 //
-// Layout: <storeRoot>/<sessionId>.json
-//   storeRoot defaults to "<cwd>/.invox/sessions"
-//   override via INVOX_SESSION_DIR (absolute path)
+// 文件布局：<storeRoot>/<sessionId>.json
+//   storeRoot 默认 "<cwd>/.invox/sessions"
+//   可由 INVOX_SESSION_DIR（绝对路径）覆盖
 //
-// Stage 7.1 additions:
-//   - `title` field: short human label derived from the first user message.
-//     Surfaces in Zed's history panel instead of a UUID.
-//   - prune(): drop sessions older than INVOX_SESSION_TTL_DAYS (default 30).
-//     Run once on agent boot; cheap because we only stat updatedAt without
-//     parsing the full history.
-//
-// CHOICE: per-cwd default. The history is project-scoped — opening a
-// different project in Zed should bring up that project's past sessions,
-// not leak chats across unrelated repos. Honoring an absolute env override
-// keeps the door open for users who want a single global store.
-//
-// CHOICE: write-replace via temp file + rename. Avoids leaving a half-written
-// JSON on disk if the process is killed mid-write.
+// 设计选择：
+//   - 默认按 cwd 隔离 —— history 是项目级的；在 Zed 切到不同项目时应该看到
+//     该项目自己的历史，不要跨仓库串味。允许通过 env 设置全局绝对路径，给
+//     需要单全局存储的用户留口子。
+//   - 写文件用 tmp + rename 原子替换，避免进程被杀时留下半成品 JSON。
+//   - prune() 在 agent 启动时跑一次，按 INVOX_SESSION_TTL_DAYS（默认 30）
+//     淘汰过期 session；只看 updatedAt，不解析完整 history，开销极低。
+//   - title 字段：从首条 user message 派生的短可读标题，让 Zed 历史面板
+//     看到真正的内容而不是 UUID。
 
 import {
   existsSync,
@@ -34,39 +29,37 @@ import type { LLMMessage } from "./llm/types.js";
 import { contentToString } from "./llm/utils.js";
 
 export interface PersistedSession {
-  /** Schema version. Bump when breaking changes are made. */
+  /** schema 版本。破坏性变更时递增。 */
   version: 1;
   id: string;
   cwd: string;
-  /** Short human label. Synthesized from the first user message. */
+  /** 短可读标题，从首条 user message 派生。 */
   title?: string;
-  /** Wall-clock ms when this file was first written. */
+  /** 文件首次写入的 wall-clock 毫秒数。 */
   createdAt: number;
-  /** Wall-clock ms when last updated. */
+  /** 最近一次更新的 wall-clock 毫秒数。 */
   updatedAt: number;
-  /** OpenAI-shape conversation history (matches Session.history). */
+  /** OpenAI 形状的会话 history（与 Session.history 对齐）。 */
   history: LLMMessage[];
   /**
-   * The model the user picked for this session via `setSessionModel`.
-   * Optional and additive — older session JSONs lack this field, in which
-   * case the agent falls back to the default model. Schema version stays
-   * at 1: this is a backward-compatible extension.
+   * 用户通过 setSessionModel 选定的 model。可选 + 向后兼容 ——
+   * 旧 session 文件没这个字段，agent 会回退到默认 model。
+   * 字段是新增的，但 schema 版本仍保持 1（向后兼容扩展）。
    */
   selectedModel?: string;
   /**
-   * Per-session ACP `setSessionConfigOption` values, keyed by configId.
-   * Currently in use:
-   *   - `system_prompt` — id of the active system prompt template
-   *   - `thinking`      — "off" | "low" | "medium" | "high"
+   * 按 configId 索引的 ACP setSessionConfigOption 值。
+   * 当前使用：
+   *   - "system_prompt" —— 当前 system prompt 模板的 id
+   *   - "thinking"      —— "off" | "low" | "medium" | "high"
    *
-   * Optional + additive same as `selectedModel`. Unknown keys are
-   * dropped on load (forward-compat — a richer build may have written
-   * keys this build doesn't recognize).
+   * 与 selectedModel 一样是可选 + additive。读时丢弃未识别的 key
+   * （forward-compat：更新版本可能写入本版本不识别的 key）。
    */
   configValues?: Record<string, string>;
   /**
-   * Snapshot of the last completed turn's usage. Preserved across restarts
-   * so the user can see what the previous turn cost after session reload.
+   * 上一次完成的 turn 用量快照。重启后保留，让用户重新加载会话时仍能看到
+   * 上一轮花了多少 token。
    */
   lastTurnUsage?: {
     input: number;
@@ -85,11 +78,10 @@ const DEFAULT_TTL_DAYS = 30;
 const TITLE_MAX_LEN = 60;
 
 /**
- * Derive a short human label from a session's history. Picks the first
- * user message, normalizes whitespace, truncates to TITLE_MAX_LEN with an
- * ellipsis. Returns "(empty)" if no user message exists yet.
+ * 从 history 派生短标题：取第一条 user message，归一化空白，截断到
+ * TITLE_MAX_LEN 并加省略号。无 user message 时返回 "(empty)"。
  *
- * Exported so the agent can call it in-memory before persisting.
+ * 导出供 agent 在持久化前 in-memory 调用。
  */
 export function titleFromHistory(history: LLMMessage[]): string {
   for (const m of history) {
@@ -126,7 +118,7 @@ export class SessionStore {
     return existsSync(this.pathFor(sessionId));
   }
 
-  /** Delete a session file from disk. Returns true if deleted, false if not found. */
+  /** 删除磁盘上的 session 文件；存在并删除成功返 true，否则返 false。 */
   delete(sessionId: string): boolean {
     const target = this.pathFor(sessionId);
     try {
@@ -140,7 +132,7 @@ export class SessionStore {
     }
   }
 
-  /** Persist a session. Creates parent dirs. Atomic via tmp+rename. */
+  /** 持久化 session。自动创建父目录；通过 tmp + rename 原子写。 */
   save(snapshot: PersistedSession): void {
     const target = this.pathFor(snapshot.id);
     const tmp = `${target}.tmp`;
@@ -156,7 +148,7 @@ export class SessionStore {
     }
   }
 
-  /** Read a session by id. Returns null if missing or unparsable. */
+  /** 按 id 读 session；不存在 / 解析失败返 null。 */
   load(sessionId: string): PersistedSession | null {
     const target = this.pathFor(sessionId);
     try {
@@ -180,13 +172,11 @@ export class SessionStore {
   }
 
   /**
-   * Delete sessions whose `updatedAt` is older than `now - ttlDays`.
+   * 删除 updatedAt 早于 (now - ttlDays) 的 session。
    *
-   * ttlDays = 0 disables pruning entirely (caller convention; we still treat
-   * <=0 as "never prune" rather than "delete everything" since the latter
-   * is too dangerous to be a default).
-   *
-   * Returns the number of files deleted (or 0 if the dir doesn't exist).
+   * ttlDays = 0 表示完全关闭过期清理（约定：≤ 0 当作"永不清理"，避免
+   * 把"全部删除"当默认行为）。
+   * 返回实际删除的文件数（目录不存在返回 0）。
    */
   prune(ttlDays: number): number {
     if (!Number.isFinite(ttlDays) || ttlDays <= 0) return 0;
@@ -206,10 +196,9 @@ export class SessionStore {
       if (!f.endsWith(".json")) continue;
       const fp = join(this.root, f);
       try {
-        // Reading the JSON metadata is cheap (the json stays under a few KB
-        // typically; even a 100-message session is well under 100 KB). We
-        // need updatedAt anyway, and using mtime would conflate "I rewrote
-        // the file last week" with "the user touched it last week".
+        // 读 JSON 元数据成本很低（典型几 KB；100 条消息也很少超过 100 KB）。
+        // 我们要的就是 updatedAt；用 mtime 反而会把"上周重写过文件"误判为
+        // "用户上周才动过"。
         const raw = readFileSync(fp, "utf8");
         const obj = JSON.parse(raw) as Partial<PersistedSession>;
         const updatedAt = typeof obj.updatedAt === "number" ? obj.updatedAt : 0;
@@ -218,8 +207,7 @@ export class SessionStore {
           pruned += 1;
         }
       } catch {
-        // Corrupt or unreadable — leave alone, don't risk deleting unrelated
-        // user data.
+        // 损坏 / 不可读 —— 不动它，避免误删用户数据
       }
     }
     if (pruned > 0) {
@@ -230,11 +218,12 @@ export class SessionStore {
 }
 
 /**
- * Locate all Zed `db.sqlite` files under `$LOCALAPPDATA/Zed/db/` (Windows),
- * `$XDG_DATA_HOME/Zed/db/` (Linux), or
- * `~/Library/Application Support/Zed/db/` (macOS).
+ * 列出 Zed 的 db.sqlite 文件位置：
+ *   Windows  : $LOCALAPPDATA/Zed/db/
+ *   Linux    : $XDG_DATA_HOME/Zed/db/
+ *   macOS    : ~/Library/Application Support/Zed/db/
  *
- * Returns absolute paths sorted newest-first by mtime.
+ * 返回按 mtime 倒序排列的绝对路径。
  */
 function zedDbPaths(): string[] {
   const localAppData = process.env["LOCALAPPDATA"];
@@ -259,32 +248,30 @@ function zedDbPaths(): string[] {
         if (existsSync(dbFile)) result.push(dbFile);
       }
     } catch {
-      // Skip unreadable directories.
+      // 跳过不可读目录
     }
   }
   return result;
 }
 
 /**
- * Delete session files that Zed no longer tracks.
+ * 删除 Zed 已经不再追踪的 session 文件。
  *
- * Zed stores ACP session IDs in `sidebar_threads.session_id` inside its
- * per-channel `db.sqlite` databases (e.g. `db/0-stable/db.sqlite`).
- * When the user archives or deletes a thread, the row is either marked
- * `archived=1` or removed entirely — but the agent is never notified via
- * ACP `session/delete`.
+ * Zed 把 ACP session id 存在每个 channel 的 db.sqlite（如 `db/0-stable/db.sqlite`）
+ * 的 sidebar_threads.session_id 字段里。用户在 Zed 里归档 / 删除某个 thread
+ * 时，对应行被标 archived=1 或直接删除 —— 但 ACP `session/delete` 不会
+ * 通知 agent，于是磁盘上会留孤儿 .json。
  *
- * This function cross-references on-disk `.json` session files against
- * every `sidebar_threads` row whose `folder_paths` contains `cwd`, and
- * removes any session file whose ID is absent from the database.
+ * 本函数把磁盘上每个 .json 与 folder_paths 含 cwd 的 sidebar_threads 行
+ * 做交叉对比，删除那些 db 里已不存在的 session 文件。
  *
- * Returns the number of orphaned files deleted.
+ * 返回被删除的孤儿文件数。
  */
 export async function syncWithZedThreads(
   root: string,
   cwd: string,
 ): Promise<number> {
-  // Collect all session IDs currently on disk.
+  // 收集磁盘上的 session id
   let diskIds: string[];
   try {
     diskIds = readdirSync(root)
@@ -299,9 +286,8 @@ export async function syncWithZedThreads(
 
   if (diskIds.length === 0) return 0;
 
-  // Lazy-load better-sqlite3 so a missing native binary doesn't crash
-  // the entire process at import time. This function is best-effort —
-  // if the module can't load, we skip the sync silently.
+  // 懒加载 better-sqlite3：缺失原生二进制时不能让整个进程在 import 阶段挂掉。
+  // 本函数是 best-effort —— 模块加载失败就静默跳过。
   let Database: new (
     path: string,
     opts?: { readonly?: boolean },
@@ -321,7 +307,7 @@ export async function syncWithZedThreads(
     return 0;
   }
 
-  // Collect all session_ids known to Zed for this project.
+  // 收集 Zed 知道的、属于本项目的 session id
   const zedSessionIds = new Set<string>();
   const dbPaths = zedDbPaths();
 
@@ -329,8 +315,8 @@ export async function syncWithZedThreads(
     try {
       const db = new Database(dbPath, { readonly: true });
       try {
-        // sidebar_threads.session_id is the ACP session ID.
-        // folder_paths contains the project root (may be comma-separated).
+        // sidebar_threads.session_id 即 ACP session id；
+        // folder_paths 含项目根（可能是逗号分隔多项）。
         const rows = db
           .prepare(
             `SELECT session_id FROM sidebar_threads
@@ -342,8 +328,8 @@ export async function syncWithZedThreads(
       } finally {
         db.close();
       }
-    } catch (e) {
-      // Table may not exist in this database — skip silently.
+    } catch {
+      // 该 db 里可能没有这张表 —— 静默跳过
     }
   }
 
@@ -355,7 +341,7 @@ export async function syncWithZedThreads(
     return 0;
   }
 
-  // Delete sessions whose ID is NOT in Zed's thread list.
+  // 删除不在 Zed thread 列表里的 session
   let deleted = 0;
   for (const id of diskIds) {
     if (!zedSessionIds.has(id)) {
@@ -363,7 +349,7 @@ export async function syncWithZedThreads(
         unlinkSync(join(root, `${id}.json`));
         deleted += 1;
       } catch {
-        // Best-effort — don't crash on a single failure.
+        // best-effort —— 单个失败不致命
       }
     }
   }
@@ -381,8 +367,7 @@ export async function syncWithZedThreads(
 }
 
 /**
- * How many days to keep session histories. 0 (or negative / unparseable)
- * disables pruning entirely. Default 30.
+ * session 过期天数。0（或负值 / 解析失败）禁用过期清理。默认 30 天。
  */
 export function sessionTtlDays(): number {
   const raw = process.env["INVOX_SESSION_TTL_DAYS"];

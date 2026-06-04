@@ -1,4 +1,4 @@
-// Read: line-numbered, paginated reads with cache.
+// Read 工具：行号化、分页读，带缓存。
 
 import { log } from "../log.js";
 import type { ToolSpec } from "../llm/types.js";
@@ -67,7 +67,7 @@ async function execute(
     : undefined;
   const effectiveLimit = limit ?? DEFAULT_READ_LIMIT;
 
-  // Read with cache (shared helper handles workspace boundary + ACP/direct fs).
+  // 走共享 helper：缓存 + 工作区边界 + ACP/直接 fs
   let fullContent: string;
   try {
     fullContent = await readFileWithCache(path, ctx);
@@ -83,7 +83,7 @@ async function execute(
     );
   }
 
-  // Mark for read-before-edit gate.
+  // 标记为「已读」，给 Edit 的前置闸门用
   ctx.state.readPaths.add(path);
   log.debug("Read: completed", {
     path,
@@ -106,8 +106,7 @@ async function execute(
   }
 
   const allLines = fullContent.split("\n");
-  // If file ends with \n, split produces a trailing "" — drop it so we
-  // don't show a phantom blank last line.
+  // 文件以 \n 结尾时 split 会产生末尾空字符串 —— 丢掉避免渲染出幽灵空行
   if (allLines.length > 0 && allLines[allLines.length - 1] === "")
     allLines.pop();
 
@@ -159,11 +158,9 @@ async function execute(
 }
 
 function titleFor(args: Record<string, unknown>, rel: string): string {
-  // Title is path-first so Zed's tool card matches the "Read <path>" /
-  // "Go to File" affordance shown for first-party agents. The LLM's
-  // free-form `description` is intentionally NOT used as the title —
-  // a translated/paraphrased title would hide the path and break the
-  // jump-to-file UX. The description still flows into the result body.
+  // 标题以路径为主，对齐 Zed 第一方 agent 的 "Read <path>" / "Go to File"。
+  // 故意不用 LLM 自由文案的 description —— 翻译过的标题会盖住路径，破坏跳转 UX。
+  // description 仍然会进结果正文。
   const offset = args["offset"];
   return offset ? `Read ${rel} (lines ${String(offset)}+)` : `Read ${rel}`;
 }

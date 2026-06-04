@@ -1,14 +1,12 @@
-// MockToolProvider — deterministic stand-in that exercises the tool-calling
-// loop without a network round-trip.
+// MockToolProvider —— 离线跑 tool-calling 流程的确定性 stub。
 //
-// Behavior:
-//   - Turn 1: emit a tool_call requesting Read on a path mentioned in
-//     the user's message (looking for "read X" or quoted "X").
-//   - Turn 2 (after the agent feeds back the file content as a tool message):
-//     emit text deltas summarizing the file size, then finish.
+// 流程：
+//   - 第 1 轮：扫 user 消息找路径（"read X" 或 "X" 引号），emit 一个
+//     Read tool_call。
+//   - 第 2 轮（agent 把 Read 结果回灌为 tool message 后）：emit text
+//     deltas 总结字节数 + finish。
 //
-// This lets smoke-tools.ts assert the entire round-trip (LLM→tool→LLM→user)
-// without any LLM credentials.
+// smoke-tools.ts 借此断言整条链路 LLM→tool→LLM→user，无需 LLM 凭据。
 
 import type {
   LLMDelta,
@@ -27,12 +25,12 @@ export class MockToolProvider implements LLMProvider {
     const lastIsTool = req.messages.at(-1)?.role === "tool";
 
     if (!lastIsTool) {
-      // Phase 1: emit a tool_call. Look at the latest user message for a path hint.
+      // 第 1 阶段：emit Read tool_call。
       const userMsg = lastUserContent(req.messages);
       const path = extractPath(userMsg) ?? "package.json";
       this.callCounter += 1;
       const id = `mock_${this.callCounter}`;
-      // Stream a thinking phrase, then the tool call.
+      // 先吐一句"思考"，再吐 tool call。
       for (const piece of chunkString(`Let me read ${path} for you.`, 8)) {
         if (req.signal.aborted) return;
         yield { kind: "text", text: piece };
@@ -48,7 +46,7 @@ export class MockToolProvider implements LLMProvider {
       return;
     }
 
-    // Phase 2: tool result is in. Summarize it.
+    // 第 2 阶段：tool 结果已在，简短总结。
     const toolResult = contentToString(req.messages.at(-1)?.content);
     const summary = `Done. The file is ${toolResult.length} bytes long.`;
     for (const piece of chunkString(summary, 8)) {
@@ -56,9 +54,8 @@ export class MockToolProvider implements LLMProvider {
       yield { kind: "text", text: piece };
       await sleep(10);
     }
-    // Synthetic usage delta so the agent's per-turn report path is exercised
-    // by smoke-usage-model.ts. Numbers are fake but match the shape that
-    // OpenAIProvider would produce from `stream_options.include_usage`.
+    // 合成一个 usage delta，给 smoke-usage-model 测试 per-turn 计费路径用。
+    // 数字是假的，但形状与 OpenAIProvider 走 stream_options.include_usage 一致。
     yield {
       kind: "usage",
       usage: { input: 42, output: 7, total: 49, cached: 0 },
@@ -68,21 +65,12 @@ export class MockToolProvider implements LLMProvider {
 }
 
 /**
- * BadJsonProvider — A3 / K5 acceptance harness.
+ * BadJsonProvider —— 用来验证"畸形 tool args 不挂掉 prompt loop"。
  *
- * Phase 1: emit a Read tool_call with **deliberately malformed JSON**
- *   arguments (truncated string), simulating an LLM that occasionally
- *   ships broken tool args.
- *
- * Phase 2: agent should have written an error tool message back to history
- *   describing the parse failure (instead of crashing the prompt loop).
- *   We detect the error in history, then emit a corrected Read tool_call
- *   — modeling the LLM's "self-correction" path.
- *
- * Phase 3: after the corrected Read returns content, finish with a summary.
- *
- * This proves: bad JSON does not crash invox; LLM gets the error in
- * tool result and can recover.
+ * 第 1 轮：emit Read tool_call，arguments 故意是截断的非法 JSON。
+ * 第 2 轮：agent 应当把解析错误作为 tool message 写回；BadJson 检测到
+ *           后 emit 一个修正过的 Read，模拟 LLM 自我纠错。
+ * 第 3 轮：修正后的 Read 返回内容 → 收尾。
  */
 export class BadJsonProvider implements LLMProvider {
   readonly name = "mock-bad-json";
@@ -93,14 +81,14 @@ export class BadJsonProvider implements LLMProvider {
     const lastIsTool = lastMsg?.role === "tool";
 
     if (!lastIsTool) {
-      // Phase 1: emit malformed JSON tool_call.
+      // 第 1 阶段：emit 畸形 JSON tool_call。
       this.callCounter += 1;
       const id = `bad_${this.callCounter}`;
       yield { kind: "text", text: "Trying to read with bad args..." };
       const call: ParsedToolCall = {
         id,
         name: "Read",
-        // 截断的 JSON：缺收尾的引号和右大括号
+        // 截断 JSON：缺收尾的引号和右大括号
         arguments: '{"path": "package.json',
       };
       yield { kind: "tool_call", call };
@@ -108,14 +96,13 @@ export class BadJsonProvider implements LLMProvider {
       return;
     }
 
-    // Phase 2 / 3: 看上一条 tool message 的内容。如果是错误信息，重试一次
-    // 正确的 tool_call —— 模拟 LLM 自我纠错。如果是文件内容（recovery 已成
-    // 功），收尾。
+    // 第 2 / 3 阶段：检查上一条 tool message。若是错误信息则重试，
+    // 模拟 LLM 自我纠错；若是文件内容（已恢复）则收尾。
     const toolResult = contentToString(lastMsg?.content);
     const isError = /not valid JSON|must be a JSON object/.test(toolResult);
 
     if (isError) {
-      // Phase 2: self-correct.
+      // 第 2 阶段：自纠正。
       this.callCounter += 1;
       const id = `good_${this.callCounter}`;
       yield {
@@ -132,7 +119,7 @@ export class BadJsonProvider implements LLMProvider {
       return;
     }
 
-    // Phase 3: corrected read returned. Finish.
+    // 第 3 阶段：修正后的 Read 已返回，收尾。
     yield {
       kind: "text",
       text: ` Read succeeded (${toolResult.length} bytes).`,
@@ -150,7 +137,7 @@ function lastUserContent(msgs: LLMMessage[]): string {
 }
 
 function extractPath(s: string): string | null {
-  // Matches "read X", "read the X", or quoted "X".
+  // 匹配 "read X"、"read the X" 或 "X"（引号包围）
   const quoted = s.match(/"([^"]+)"/);
   if (quoted) return quoted[1] ?? null;
   const verbed = s.match(/\bread\s+(?:the\s+)?(\S+)/i);

@@ -1,63 +1,56 @@
-// Discovery module types.
+// Discovery 子系统 —— 三级配置目录的统一入口的类型定义。
 //
-// Three-tier discovery: user (~/.claude) → project (<cwd>/.claude) → plugins.
-// All consumers (skills, hooks, MCP, etc.) derive their data from a single
-// DiscoveryResult rather than independently re-scanning the filesystem.
+// 设计选择：把 hook wire-format 类型放在这里（而非从 plugins/hooks.ts
+// import）是为了打破设计循环：discovery/types → plugins/hooks → discovery/index。
+// 这些类型与 hooks.ts 里的形状完全一致，对应 settings.json / hooks.json
+// 文件中实际出现的 JSON 结构。
 
-// ── Hook wire-format types ─────────────────────────────────────────
-//
-// CHOICE: Define the hook JSON wire-format types here (not imported from
-// plugins/hooks.ts) to break a design cycle: discovery/types → plugins/hooks
-// → discovery/index. These types mirror the shapes in hooks.ts exactly and
-// represent what appears in settings.json and hooks.json files.
+// ── Hook wire-format ────────────────────────────────────────────────
 
-/** One shell command inside a hook group. */
+/** hook group 中的一条 shell 命令。 */
 export interface HookCommand {
   type: "command";
   command: string;
-  /** Timeout in seconds. Default: no limit. */
+  /** 超时秒数；默认无限制。 */
   timeout?: number;
-  /** If true, fire-and-forget — process result is ignored. */
+  /** true 表示 fire-and-forget，结果被忽略。 */
   async?: boolean;
 }
 
 /**
- * A group of hook commands with an optional matcher.
- * This is the wire-format shape found in both settings.json and hooks.json.
+ * 一组 hook 命令 + 可选 matcher。
+ * settings.json 与 hooks.json 都用这个 wire 形状。
  */
 export interface HookGroup {
-  /** Regex pattern to filter by tool name (PreToolUse / PostToolUse only). */
+  /** 按 tool name 过滤的正则（仅 PreToolUse / PostToolUse 生效）。 */
   matcher?: string;
   description?: string;
   hooks: HookCommand[];
 }
 
-// ── Plugin entry (resolved from .claude/plugins.json) ────────────────
+// ── Plugin entry（来自 .claude/plugins.json）─────────────────────────
 
 /**
- * One resolved plugin directory.
+ * 一条已解析的 plugin 目录条目。
  *
- * CHOICE: We keep the full PluginConfig shape (from plugins.json) so
- * downstream consumers have all the metadata they need without re-parsing.
+ * 设计选择：保留 plugins.json 的全部字段，下游消费者就不必再次读文件。
  */
 export interface PluginEntry {
-  /** Absolute path to the plugin root directory. */
+  /** plugin 根目录的绝对路径。 */
   root: string;
-  /** Whether this plugin is enabled. Default: true. */
+  /** 是否启用；默认 true。 */
   enabled: boolean;
-  /** Per-skill enable/disable toggle. Undefined = all enabled. */
+  /** 单 skill 的开关；undefined 表示全部启用。 */
   skills?: Record<string, boolean>;
 }
 
-// ── Settings.json shape ─────────────────────────────────────────────
+// ── settings.json ───────────────────────────────────────────────────
 
 /**
- * The fields we extract from settings.json. We do NOT model the full
- * Claude Code settings schema — only the parts invox consumes.
+ * 我们关心的 settings.json 字段；不建模 Claude Code 全部 schema。
  *
- * CHOICE: hooks use the existing HookGroup[] type (identical schema).
- * mcpServers uses an opaque Record because the user/project formats
- * differ and will be normalized by the consumer.
+ * 设计选择：hooks 复用 HookGroup[]（schema 完全一致）；
+ * mcpServers 留 opaque 类型，由消费者按需归一化。
  */
 export interface SettingsJson {
   hooks?: Record<string, HookGroup[]>;
@@ -65,31 +58,25 @@ export interface SettingsJson {
   [key: string]: unknown;
 }
 
-// ── Discovery result ────────────────────────────────────────────────
+// ── DiscoveryResult ─────────────────────────────────────────────────
 
-/**
- * The output of DiscoverDirs(cwd). Provides everything downstream
- * consumers need to load their specific resources.
- */
+/** discoverDirs(cwd) 的输出，下游所有消费者从这里取数据。 */
 export interface DiscoveryResult {
-  // ── Resolved directories ──────────────────────────────────────────
-  /** ~/.claude — the user-level config directory. */
+  /** ~/.claude —— 用户级配置目录。 */
   userDir: string;
-  /** <cwd>/.claude — the project-level config directory. */
+  /** <cwd>/.claude —— 项目级配置目录。 */
   projectDir: string;
 
-  // ── Raw settings (user settings loaded first, project overrides) ──
-  /** User-level settings.json contents (null if absent). */
+  /** 用户级 settings.json 内容（不存在为 null）。 */
   userSettings: SettingsJson | null;
-  /** Project-level settings.json contents (null if absent). */
+  /** 项目级 settings.json 内容（不存在为 null）。 */
   projectSettings: SettingsJson | null;
 
-  // ── Plugins ───────────────────────────────────────────────────────
   /**
-   * Resolved plugin entries from .claude/plugins.json.
+   * 来自 .claude/plugins.json 的已解析 plugin 列表。
    *
-   * CHOICE: first-found-wins — if project plugins.json exists, user-level
-   * is skipped (matches existing behavior in loader.ts loadConfigs).
+   * 设计选择：first-found-wins —— 项目级 plugins.json 存在时跳过用户级，
+   * 与 loader.ts 既有行为一致。
    */
   plugins: PluginEntry[];
 }

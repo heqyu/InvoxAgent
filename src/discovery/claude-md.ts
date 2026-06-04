@@ -1,33 +1,27 @@
-// CLAUDE.md loader — reads static memory files and resolves @references.
+// CLAUDE.md 加载器 —— 读取静态记忆文件并解析 @reference。
 //
-// Claude Code's "memory" system uses CLAUDE.md files at two levels:
-//   1. User:    ~/.claude/CLAUDE.md       (personal preferences, always active)
-//   2. Project: <cwd>/.claude/CLAUDE.md   (project-specific context)
+// Claude Code "memory" 体系有两级 CLAUDE.md：
+//   1. User    : ~/.claude/CLAUDE.md       （个人偏好，全局生效）
+//   2. Project : <cwd>/.claude/CLAUDE.md   （项目特定上下文）
+// Plugin 目录不支持 CLAUDE.md。
 //
-// Plugin directories do NOT support CLAUDE.md.
+// CLAUDE.md 中的 `@filename` 引用按文件所在目录解析。例如
+// ~/.claude/CLAUDE.md 中的 `@RTK.md` 会读取 ~/.claude/RTK.md。
 //
-// Within a CLAUDE.md, `@filename` references are resolved by reading the
-// file relative to the CLAUDE.md's parent directory. For example,
-// `@RTK.md` in ~/.claude/CLAUDE.md reads ~/.claude/RTK.md.
-//
-// CHOICE: Only one level of @resolution (no nested @ inside included files)
-// to keep behavior predictable and avoid infinite loops.
+// 设计选择：只解析一层 @ 引用（被包含文件里的 @ 不再展开），
+// 行为可预测，避免循环引用。
 
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { log } from "../log.js";
 import { discoverDirs } from "./index.js";
 
-// ── Types ───────────────────────────────────────────────────────────
-
 export interface ClaudeMdSection {
-  /** "user" or "project" — where this CLAUDE.md was found. */
+  /** 该段落来源 —— "user" 或 "project"。 */
   source: "user" | "project";
-  /** The resolved content (with @references inlined). */
+  /** 已展开 @reference 后的内容。 */
   content: string;
 }
-
-// ── Cache ───────────────────────────────────────────────────────────
 
 const claudeMdCache = new Map<string, ClaudeMdSection[]>();
 
@@ -36,16 +30,10 @@ export function clearClaudeMdCache(cwd?: string): void {
   else claudeMdCache.clear();
 }
 
-// ── Public API ──────────────────────────────────────────────────────
-
 /**
- * Load and resolve CLAUDE.md from user and project directories.
- *
- * Returns an array of sections (user first, then project), each with
- * a `source` label and resolved `content`. Empty array if no CLAUDE.md
- * files exist.
- *
- * Cached by cwd — repeated calls within the same session skip re-reading.
+ * 加载并解析 user / project 两级 CLAUDE.md。
+ * 返回数组（user 在前，project 在后），都不存在则返回空数组。
+ * 按 cwd 缓存，本会话内重复调用零开销。
  */
 export function loadClaudeMd(cwd: string): ClaudeMdSection[] {
   const cached = claudeMdCache.get(cwd);
@@ -54,7 +42,7 @@ export function loadClaudeMd(cwd: string): ClaudeMdSection[] {
   const discovery = discoverDirs(cwd);
   const sections: ClaudeMdSection[] = [];
 
-  // 1. User-level CLAUDE.md (lowest priority, always present if exists)
+  // 1. 用户级 CLAUDE.md
   const userContent = readAndResolve(
     join(discovery.userDir, "CLAUDE.md"),
     discovery.userDir,
@@ -63,7 +51,7 @@ export function loadClaudeMd(cwd: string): ClaudeMdSection[] {
     sections.push({ source: "user", content: userContent });
   }
 
-  // 2. Project-level CLAUDE.md (highest priority)
+  // 2. 项目级 CLAUDE.md（优先级更高，但顺序追加在后面，由消费方决定语义）
   const projectContent = readAndResolve(
     join(discovery.projectDir, "CLAUDE.md"),
     discovery.projectDir,
@@ -83,21 +71,13 @@ export function loadClaudeMd(cwd: string): ClaudeMdSection[] {
   return sections;
 }
 
-// ── @reference resolution ───────────────────────────────────────────
-
 /**
- * Read a CLAUDE.md file and resolve all `@filename` references.
+ * 读 CLAUDE.md 并解析 `@filename` 引用。
  *
- * References are resolved relative to `baseDir` (the directory containing
- * the CLAUDE.md). Only top-level `@` on its own line are resolved.
- *
- * Pattern: `@<filename>` where filename is a non-whitespace path.
- * Examples:
- *   @RTK.md          → reads <baseDir>/RTK.md
- *   @scripts/foo.sh  → reads <baseDir>/scripts/foo.sh
- *
- * CHOICE: Only resolve `@` that starts a line (possibly with leading
- * whitespace). Inline `@mentions` in prose are left alone.
+ * 引用相对 baseDir（CLAUDE.md 所在目录）解析；只匹配「行首（允许前导空白）
+ * 的 @」，行内 `@mention` 一律保留原样。例：
+ *   @RTK.md          → 读 <baseDir>/RTK.md
+ *   @scripts/foo.sh  → 读 <baseDir>/scripts/foo.sh
  */
 function readAndResolve(filePath: string, baseDir: string): string | null {
   if (!existsSync(filePath)) return null;
@@ -115,7 +95,6 @@ function readAndResolve(filePath: string, baseDir: string): string | null {
 
   if (!raw) return null;
 
-  // Resolve @filename references (line-start only)
   const resolved = raw.replace(
     /^(\s*)@(\S[^\n]*)$/gm,
     (_match, indent: string, refPath: string) => {

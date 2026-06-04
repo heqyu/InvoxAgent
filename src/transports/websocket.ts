@@ -1,21 +1,16 @@
-// WebSocket transport. Each WS connection = one ACP peer = one InvoxAgent.
+// WebSocket transport：每个 WS 连接 = 一个 ACP peer = 一个 InvoxAgent。
 //
-// Frame format (documented in README):
-//   - Each WebSocket text message is exactly one JSON-RPC 2.0 envelope
-//     (request, response, or notification).
-//   - No NDJSON delimiter — WebSocket already provides message framing.
+// 帧格式（README 文档化）：
+//   - 每条 WebSocket 文本消息恰好是一份 JSON-RPC 2.0 信封（请求 / 响应 / 通知）。
+//   - 不用 NDJSON 分隔符 —— WebSocket 自身已经提供消息分帧。
 //
-// CHOICE: per-message-mapped Stream<AnyMessage> directly, NOT bytes through
-// ndJsonStream. Reasons:
-//   - WS already frames messages → an extra newline-delimited byte layer
-//     would be wasteful and bug-prone (PLAN §3 "sharing a parser across
-//     transports" pitfall).
-//   - The ACP package's `Stream` type is `WritableStream<AnyMessage>` /
-//     `ReadableStream<AnyMessage>` — going message-typed avoids round-tripping
-//     through bytes.
+// 设计选择：直接 per-message 映射 Stream<AnyMessage>，不走 ndJsonStream。
+//   - WS 已经分帧，再加一层 newline-delimited 字节既浪费又容易踩坑
+//   - SDK 的 Stream 类型本身就是 WritableStream<AnyMessage> /
+//     ReadableStream<AnyMessage>，走 message-typed 避免 round-trip 字节
 //
-// Multi-client: the same agent process can serve N concurrent WS clients;
-// each gets its own InvoxAgent instance via the cli.ts `onPeer` callback.
+// 多客户端：同一进程可同时服务 N 个 WS client，每个通过 cli.ts 的 onPeer
+// 回调拿到独立的 InvoxAgent 实例。
 
 import { WebSocketServer, type WebSocket } from "ws";
 import type { AnyMessage, Stream } from "@agentclientprotocol/sdk";
@@ -80,9 +75,9 @@ export class WebSocketTransport implements Transport {
 }
 
 /**
- * Bridge a single WebSocket connection into the ACP message Stream contract.
- * One inbound WS message → one AnyMessage. One outbound AnyMessage → one
- * WS message. No batching, no buffering beyond the OS socket.
+ * 把单个 WS 连接桥接成 ACP 的消息 Stream 契约：
+ * 一条 WS 入站消息 → 一个 AnyMessage；一个出站 AnyMessage → 一条 WS 消息。
+ * 不做批量缓冲，仅依赖底层 socket buffer。
  */
 function wsToStream(socket: WebSocket): Stream {
   const readable = new ReadableStream<AnyMessage>({
@@ -94,15 +89,14 @@ function wsToStream(socket: WebSocket): Stream {
           controller.enqueue(msg);
         } catch (err) {
           log.warn("ws: dropping malformed JSON frame", String(err));
-          // Don't error the controller — one bad frame shouldn't kill the
-          // whole connection. The peer can recover by sending valid frames.
+          // 不让 controller 报错 —— 单帧问题不应弄死整个连接，对端发后续合法帧仍能恢复。
         }
       });
       socket.on("close", () => {
         try {
           controller.close();
         } catch {
-          // already closed
+          // 已经 close
         }
       });
       socket.on("error", (err) => {
@@ -110,7 +104,7 @@ function wsToStream(socket: WebSocket): Stream {
         try {
           controller.error(err);
         } catch {
-          // already closed
+          // 已经 close
         }
       });
     },
@@ -118,7 +112,7 @@ function wsToStream(socket: WebSocket): Stream {
       try {
         socket.close();
       } catch {
-        // already closed
+        // 已经 close
       }
     },
   });
@@ -136,14 +130,14 @@ function wsToStream(socket: WebSocket): Stream {
       try {
         socket.close(1000, "agent closed stream");
       } catch {
-        // already closed
+        // 已经 close
       }
     },
     abort() {
       try {
         socket.terminate();
       } catch {
-        // already closed
+        // 已经 close
       }
     },
   });

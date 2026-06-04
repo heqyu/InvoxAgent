@@ -1,8 +1,7 @@
-// Edit: precise string replacement with uniqueness enforcement.
+// Edit 工具：精确字符串替换 + 唯一性强制。
 //
-// Forces read-before-edit so the LLM can't blindly modify a file. Reads from
-// the cache (populated by Read) when available; otherwise re-reads via
-// ACP since the read flag is set.
+// 强制 read-before-edit，让 LLM 不能盲目改文件。
+// 没读过会自动通过 fs-utils 走缓存或 ACP 读一次（read flag 同时置位）。
 
 import { log } from "../log.js";
 import type { ToolSpec } from "../llm/types.js";
@@ -111,7 +110,7 @@ async function execute(
     outsideWorkspace: !inside,
   });
 
-  // Auto-read via shared helper (handles cache + workspace boundary + ACP/direct fs).
+  // auto-read（共享 helper：缓存 + 边界 + ACP/直接 fs）
   const hasBeenRead = ctx.state.readPaths.has(path);
   let currentText: string;
   try {
@@ -132,7 +131,7 @@ async function execute(
     ctx.state.readPaths.add(path);
   }
 
-  // Compute new content with strict semantics.
+  // 严格语义计算新内容
   let newText: string;
   let occurrenceCount: number;
   if (replaceAll) {
@@ -184,7 +183,7 @@ async function execute(
     );
   }
 
-  // Write back (ACP for workspace files, direct fs for external).
+  // 写回（工作区内走 ACP，工作区外走直接 fs）
   try {
     if (inside) {
       log.debug("Edit: writing via ACP", { path, bytes: newText.length });
@@ -212,8 +211,7 @@ async function execute(
     );
   }
 
-  // Update cache to the post-edit content. We deliberately do NOT invalidate;
-  // we replace, since we know exactly what's on disk now.
+  // 缓存直接替换为新内容（不走 invalidate —— 我们准确知道磁盘上是什么）
   ctx.state.cache.set(path, newText);
   log.debug("Edit: completed", {
     path,
@@ -241,9 +239,7 @@ async function execute(
 }
 
 function titleFor(_args: Record<string, unknown>, rel: string): string {
-  // Path-first title — see read-file.ts for rationale (keeps "Go to File"
-  // glance-able and prevents an LLM-translated description from hiding
-  // the path).
+  // 标题以路径为主 —— 详细理由见 read-file.ts。
   return `Edited ${rel}`;
 }
 

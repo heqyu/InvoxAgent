@@ -1,13 +1,10 @@
-// Stdio transport. Wraps process.stdin / process.stdout as Web Streams of bytes,
-// then hands them to ACP's `ndJsonStream` which produces a typed message Stream.
+// stdio transport：把 process.stdin/stdout 包装成 ACP 需要的 Web Streams。
 //
-// One peer ever (the launching client) — Zed, in normal use.
-// `start` invokes `onPeer` once and resolves. `stop` is a no-op for stdio
-// because there's nothing to unbind — closing stdin is the client's job.
+// 终生只服务一个对端（启动 invox 的客户端，比如 Zed）。
+// stop() 是 no-op —— 关 stdin 是客户端的事，我们不持有底层 fd。
 //
-// CHOICE: `Readable.toWeb` / `Writable.toWeb` from node:stream. Native to Node 18+,
-// produces the exact `ReadableStream<Uint8Array>` / `WritableStream<Uint8Array>`
-// that `ndJsonStream` consumes. No manual byte-pump loop, no chunk-boundary bugs.
+// 设计选择：用 Node 18+ 的 Readable.toWeb / Writable.toWeb，直接得到
+// ndJsonStream 需要的 ReadableStream<Uint8Array>，避免手写字节泵和分片 bug。
 
 import { Readable, Writable } from "node:stream";
 import { ndJsonStream } from "@agentclientprotocol/sdk";
@@ -27,6 +24,6 @@ export class StdioTransport implements Transport {
   }
 
   async stop(): Promise<void> {
-    // Nothing to unbind: we don't own the underlying fd.
+    // 不持有底层 fd，无需解绑。
   }
 }

@@ -1,23 +1,15 @@
-// 指数退避（仅 connect 阶段）—— B3 / Phase B 验收。
+// 指数退避（仅 connect 阶段）。
 //
 // 仅在「stream 还没开始」之前重试，因为：
-//   - mid-stream 重放会破坏 ACP UI 的增量渲染（用户已经看到字符冒出来，
-//     回卷到第 0 帧再来一遍是糟糕体验）
-//   - tool_call 部分流出时重放会触发重复执行，违反幂等假设
+//   - mid-stream 重放会破坏 ACP UI 的增量渲染（用户已看到字符冒出来，
+//     回卷重来的体验糟糕）
+//   - tool_call 部分流出后再重放会触发重复执行，违反幂等假设
 //
-// 可重试场景：
-//   - HTTP 429（rate limit）
-//   - HTTP 5xx（server）
-//   - 常见网络错误码（ECONNRESET / ETIMEDOUT / ECONNREFUSED / ENOTFOUND /
-//     EAI_AGAIN / UND_ERR_*）
-//
-// 不可重试 / 跳过：
-//   - 4xx 非 429（请求本身有问题，重试无意义）
-//   - AbortError（用户取消，立刻冒泡）
-//   - 任何未知形态错误
+// 可重试场景：HTTP 429 / 5xx / 常见网络错误码。
+// 不可重试：4xx 非 429 / AbortError / 未知错误。
 //
 // env 调参：
-//   INVOX_LLM_RETRIES        默认 3，设为 0 完全关闭
+//   INVOX_LLM_RETRIES         默认 3，0 完全关闭
 //   INVOX_LLM_BACKOFF_BASE_MS 默认 500
 //   INVOX_LLM_BACKOFF_MAX_MS  默认 8000
 
@@ -28,7 +20,7 @@ export interface BackoffConfig {
   baseMs: number;
   /** 单次退避上限毫秒。 */
   maxMs: number;
-  /** 抖动比率 0..1：实际延迟在 [delay*(1-jitter), delay*(1+jitter)] 内随机。 */
+  /** 抖动比率 0..1：实际延迟 ∈ [delay*(1-jitter), delay*(1+jitter)]。 */
   jitter: number;
 }
 
@@ -39,9 +31,7 @@ export const DEFAULT_BACKOFF: BackoffConfig = {
   jitter: 0.3,
 };
 
-/**
- * 从 process.env 读取 backoff 配置。非法值（NaN / 负数）回退到默认。
- */
+/** 从 process.env 读取 backoff 配置；非法值（NaN / 负数）回退默认。 */
 export function backoffConfigFromEnv(env: NodeJS.ProcessEnv): BackoffConfig {
   return {
     maxRetries: parsePositiveInt(env["INVOX_LLM_RETRIES"], DEFAULT_BACKOFF.maxRetries),
@@ -65,8 +55,8 @@ function parsePositiveInt(raw: string | undefined, fallback: number): number {
 }
 
 /**
- * 判断一个 connect 阶段错误是否值得重试。null / 标量 / 普通 Error 都返回
- * false —— 我们只在确定可恢复的场景才掏退避成本。
+ * 判定一个 connect 阶段错误是否值得重试。null / 标量 / 普通 Error 都返 false ——
+ * 只有"明确可恢复"才掏退避成本。
  */
 export function isRetryableConnectError(err: unknown): boolean {
   if (!err || typeof err !== "object") return false;
@@ -124,7 +114,7 @@ export function backoffDelayMs(
 export interface RetryHooks {
   /** abort 信号：触发后下一轮 sleep 立刻 reject AbortError。 */
   signal?: AbortSignal;
-  /** 每次重试前回调，便于上层 log。attempt 是即将进行的第几次重试（1-based）。 */
+  /** 每次重试前回调，便于上层记录日志。attempt 是即将进行的第几次重试（1-based）。 */
   onRetry?: (attempt: number, err: unknown, delayMs: number) => void;
   /** 测试可注入的 sleep（默认 setTimeout）。 */
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
@@ -136,9 +126,9 @@ export interface RetryHooks {
  * 用 backoff 策略包裹一个 connect-like 的 task。task 必须幂等（典型场景：
  * 打开 streaming 连接但还没消费 chunk）。
  *
- * - signal 在 task 调用之间检查；task 自身需要尊重 AbortSignal 通过参数传入
- * - onRetry 回调在每次「决定重试 + 已计算延迟 + 还没 sleep」时触发
- * - 重试不可恢复错误立刻冒泡；用尽 maxRetries 后冒泡最后一次错误
+ * - signal 在每次 task 调用之间检查；task 内部需要自行尊重 AbortSignal
+ * - onRetry 在「决定重试 + 已计算延迟 + 还没 sleep」时触发
+ * - 不可恢复错误立刻冒泡；用尽 maxRetries 后冒泡最后一次错误
  */
 export async function withConnectBackoff<T>(
   task: () => Promise<T>,

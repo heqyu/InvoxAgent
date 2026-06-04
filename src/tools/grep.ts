@@ -1,9 +1,9 @@
-// Grep: full-text search via ripgrep. The @vscode/ripgrep package ships a
-// platform-specific binary so we don't need the system `rg` to be installed.
+// Grep 工具：用 ripgrep 做全文搜索。
+// @vscode/ripgrep 自带平台特定二进制，无需用户系统装 rg。
 //
-// Output mode: line-oriented `path:lineno:content` by default. The LLM can
-// ask for files-only (-l) or count-per-file. Context lines (-A/-B/-C) and
-// case-insensitive (-i) are exposed.
+// 输出模式：默认 line-oriented `path:lineno:content`；
+// LLM 可指定 files-only (-l) 或 count-per-file (-c)。
+// 支持上下文行 (-C)、忽略大小写 (-i)。
 
 import { spawn } from "node:child_process";
 import { resolve } from "node:path";
@@ -18,7 +18,7 @@ import {
   type ToolExecResult,
 } from "./types.js";
 
-const DEFAULT_MAX_BYTES = 256 * 1024; // 256 KiB output cap
+const DEFAULT_MAX_BYTES = 256 * 1024; // 输出字节硬上限：256 KiB
 
 const spec: ToolSpec = {
   type: "function",
@@ -115,13 +115,12 @@ async function execute(
   if (outputMode === "files_with_matches") rgArgs.push("-l");
   else if (outputMode === "count") rgArgs.push("-c");
   else {
-    // content mode default
+    // content 模式默认开启行号、不分组、关闭 ANSI 颜色
     rgArgs.push("-n", "--no-heading", "--color=never");
     if (context > 0) rgArgs.push(`-C${context}`);
   }
   if (globRestrict) rgArgs.push("-g", globRestrict);
-  // Belt-and-suspenders: always ignore these huge dirs even if .gitignore
-  // doesn't list them (e.g. dist after fresh clone).
+  // belt-and-suspenders：即使 .gitignore 漏列也兜底屏蔽这几个大目录
   rgArgs.push(
     "--glob",
     "!node_modules",
@@ -132,7 +131,7 @@ async function execute(
     "--glob",
     "!build",
   );
-  // Use -- to terminate flag parsing so a pattern starting with '-' is safe.
+  // 用 -- 终止参数解析，让以 '-' 开头的 pattern 也安全
   rgArgs.push("--", pattern, searchRoot);
 
   log.info("tool: Grep", {
@@ -165,8 +164,7 @@ async function execute(
             .toString("utf8")
             .slice(0, Math.max(0, DEFAULT_MAX_BYTES - (bytes - d.length)));
         }
-        // Past the cap: drop the rest. Don't kill the process — let rg
-        // finish so we get a clean exit code, but stop accumulating.
+        // 超过上限后丢弃；不杀 rg —— 让它自然退出，我们仍能拿到干净的 exit code
       } else {
         stdout += d.toString("utf8");
       }
@@ -180,7 +178,7 @@ async function execute(
       try {
         child.kill();
       } catch {
-        // already exited
+        // 已退出
       }
     };
     ctx.signal.addEventListener("abort", onAbort, { once: true });
@@ -203,7 +201,7 @@ async function execute(
       settled = true;
       ctx.signal.removeEventListener("abort", onAbort);
 
-      // ripgrep exit codes: 0 = matches, 1 = no matches, 2 = error.
+      // ripgrep 退出码：0 = 有匹配，1 = 无匹配，2 = 错误
       if (exitCode === 2) {
         resolveResult(
           errorResult(
@@ -216,7 +214,7 @@ async function execute(
       }
 
       let display = stdout;
-      // Optional line cap on top of the byte cap.
+      // 字节上限之上再叠加可选行数上限
       if (limit > 0) {
         const lines = display.split("\n");
         if (lines.length > limit) {

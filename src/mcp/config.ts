@@ -1,18 +1,18 @@
-// Config loader — reads .claude/.mcp.json from a working directory.
+// .claude/.mcp.json 配置加载器。
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { log } from "../log.js";
 import type { McpConfigFile, McpServerConfig } from "./types.js";
 
-/** Parse .claude/.mcp.json from `cwd`. Returns null if absent or invalid. */
+/** 解析 cwd 下的 .claude/.mcp.json；文件不存在 / 解析失败 / 无可用条目都返回 null。 */
 export function loadMcpConfig(cwd: string): McpConfigFile | null {
   const path = join(cwd, ".claude", ".mcp.json");
   let raw: string;
   try {
     raw = readFileSync(path, "utf8");
   } catch {
-    return null; // file doesn't exist → no MCP servers
+    return null; // 文件不存在 → 当作没配置 MCP
   }
 
   let parsed: unknown;

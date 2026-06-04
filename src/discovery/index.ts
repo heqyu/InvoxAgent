@@ -1,13 +1,12 @@
-// Discovery module — three-tier config directory resolution.
+// Discovery 模块 —— 三级配置目录的统一解析入口。
 //
-// Discovers and loads configuration from three sources (lowest → highest):
-//   1. User:    ~/.claude/                   (settings.json, plugins.json)
-//   2. Project: <cwd>/.claude/               (settings.json, plugins.json)
-//   3. Plugins: directories listed in plugins.json (hooks/hooks.json, skills/)
+// 来源（低 → 高优先级）：
+//   1. User    : ~/.claude/                  (settings.json, plugins.json)
+//   2. Project : <cwd>/.claude/              (settings.json, plugins.json)
+//   3. Plugins : plugins.json 列出的目录     (hooks/hooks.json, skills/)
 //
-// All downstream consumers (hooks, skills, MCP, etc.) should call
-// discoverDirs(cwd) to get a unified DiscoveryResult rather than
-// independently re-scanning the filesystem.
+// 所有下游消费者（hooks / skills / MCP …）一律调 discoverDirs(cwd) 拿
+// 同一份 DiscoveryResult，不要各自再扫一遍文件系统。
 
 import { existsSync, readFileSync } from "node:fs";
 import { join, isAbsolute, resolve } from "node:path";
@@ -15,13 +14,9 @@ import { homedir } from "node:os";
 import { log } from "../log.js";
 import type { DiscoveryResult, PluginEntry, SettingsJson } from "./types.js";
 
-// ── Constants ───────────────────────────────────────────────────────
-
 const SETTINGS_JSON = "settings.json";
 const PLUGINS_JSON = "plugins.json";
 const CLAUDE_DIR = ".claude";
-
-// ── Cache ───────────────────────────────────────────────────────────
 
 const discoveryCache = new Map<string, DiscoveryResult>();
 
@@ -30,13 +25,8 @@ export function clearDiscoveryCache(cwd?: string): void {
   else discoveryCache.clear();
 }
 
-// ── Public API ──────────────────────────────────────────────────────
-
 /**
- * Discover all configuration directories for the given cwd.
- *
- * Result is cached — repeated calls within the same session skip
- * re-scanning the filesystem.
+ * 解析给定 cwd 的所有配置目录。结果按 cwd 缓存，本会话内重复调用零开销。
  */
 export function discoverDirs(cwd: string): DiscoveryResult {
   const cached = discoveryCache.get(cwd);
@@ -45,11 +35,11 @@ export function discoverDirs(cwd: string): DiscoveryResult {
   const userDir = join(homedir(), CLAUDE_DIR);
   const projectDir = join(cwd, CLAUDE_DIR);
 
-  // 1. Load settings.json from both levels (null if absent)
+  // 1. 两级 settings.json（缺省返回 null）
   const userSettings = loadSettingsJson(join(userDir, SETTINGS_JSON));
   const projectSettings = loadSettingsJson(join(projectDir, SETTINGS_JSON));
 
-  // 2. Load plugins.json (first-found-wins: project → user)
+  // 2. plugins.json —— first-found-wins：项目级优先，否则用户级
   const plugins = loadPluginsJson(
     join(projectDir, PLUGINS_JSON),
     cwd,
@@ -79,7 +69,7 @@ export function discoverDirs(cwd: string): DiscoveryResult {
   return result;
 }
 
-// ── Settings.json reader ────────────────────────────────────────────
+// ── settings.json reader ────────────────────────────────────────────
 
 function loadSettingsJson(filePath: string): SettingsJson | null {
   if (!existsSync(filePath)) return null;
@@ -100,15 +90,12 @@ function loadSettingsJson(filePath: string): SettingsJson | null {
   }
 }
 
-// ── Plugins.json reader ─────────────────────────────────────────────
+// ── plugins.json reader ─────────────────────────────────────────────
 
 /**
- * Parse .claude/plugins.json into PluginEntry[].
- *
- * CHOICE: Replicates the existing loadConfigs() path-normalization logic
- * (relative paths resolved against basePath) to ensure backward compat.
- *
- * Returns null if the file doesn't exist or is unparseable.
+ * 解析 .claude/plugins.json 为 PluginEntry[]。
+ * 路径规范化：相对路径以 basePath 为基准 resolve 到绝对路径。
+ * 文件不存在或解析失败一律返回 null（让上层走 first-found-wins 链）。
  */
 function loadPluginsJson(
   filePath: string,

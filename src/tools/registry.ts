@@ -1,7 +1,7 @@
-// Tool registry — the single place that lists every tool.
+// 工具注册表 —— 唯一列出所有内置工具的位置。
 //
-// Adding a new tool: write src/tools/<name>.ts that exports `Tool`, then
-// add it to TOOLS below. The router auto-discovers via name.
+// 新增工具：在 src/tools/ 下新建 <name>.ts 导出 Tool，再加进 TOOLS 即可，
+// router 通过 name 自动派发。
 
 import type { ToolSpec } from "../llm/types.js";
 import { bashTool } from "./bash.js";
@@ -25,10 +25,10 @@ export const TOOLS: readonly Tool[] = [
 
 const TOOL_BY_NAME = new Map<string, Tool>(TOOLS.map((t) => [t.name, t]));
 
-/** Look up a tool by name; returns undefined if unknown. */
+/** 按名查工具；未找到返回 undefined。 */
 export function getTool(name: string): Tool | undefined {
   return TOOL_BY_NAME.get(name);
 }
 
-/** OpenAI specs for all registered tools — passed to the LLM. */
+/** 所有内置工具的 OpenAI 规范，传给 LLM 用。 */
 export const TOOL_SPECS: ToolSpec[] = TOOLS.map((t) => t.spec);

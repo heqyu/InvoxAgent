@@ -1,10 +1,10 @@
-// Glob: find files matching a glob pattern, sorted by mtime descending.
+// Glob 工具：按 glob 模式找文件，按 mtime 倒序返回。
 //
-// Uses fast-glob — pure JS, no external binaries needed. Default search
-// root is the session cwd; .gitignore patterns are honored when present.
+// 用 fast-glob，纯 JS 实现，免外部二进制。默认搜索根是会话 cwd；
+// 默认尊重 .gitignore，并屏蔽 node_modules / .git / dist / build。
 //
-// CHOICE: results sorted by mtime (newest first) the way Claude Code's
-// glob does. Newer files are usually more relevant for recent work.
+// 设计选择：按 mtime 倒序排（最新的在前），与 Claude Code glob 一致 ——
+// 最近修改的文件通常更相关。
 
 import { statSync } from "node:fs";
 import { resolve, sep } from "node:path";
@@ -82,8 +82,7 @@ async function execute(
       onlyFiles: true,
       dot: false,
       followSymbolicLinks: false,
-      // Skip noisy / large directories. node_modules in particular would
-      // kill performance and flood results in any non-trivial repo.
+      // 屏蔽噪声 / 大目录 —— node_modules 不屏蔽会拖死任何非 trivial 仓库
       ignore: ["**/node_modules/**", "**/.git/**", "**/dist/**", "**/build/**"],
     });
   } catch (e) {
@@ -94,8 +93,7 @@ async function execute(
     );
   }
 
-  // Sort by mtime descending (newest first). statSync is fast in batch on
-  // local FS; for huge result sets the cap below limits how many we stat.
+  // 按 mtime 倒序排。本地 FS 上 statSync 批量很快；超大集合用 STAT_CAP 防爆。
   const STAT_CAP = 2000;
   const toSort = entries.slice(0, STAT_CAP);
   const withMtime = toSort.map((p) => {
@@ -103,7 +101,7 @@ async function execute(
     try {
       mtime = statSync(p).mtimeMs;
     } catch {
-      // ignore unstattable
+      // 不可 stat 的项忽略
     }
     return { p, mtime };
   });
@@ -133,9 +131,8 @@ async function execute(
 }
 
 function normalizePath(p: string): string {
-  // fast-glob returns posix-style paths even on Windows when absolute:true.
-  // For Zed's chip-detection (which underlines paths in chat) and for users
-  // copy-pasting, prefer the OS-native separator.
+  // fast-glob 在 absolute:true 时即使 Windows 也返 posix 风格路径。
+  // Zed 的 chip 检测和用户复制粘贴都偏好原生分隔符，此处转一道。
   return sep === "\\" ? p.replace(/\//g, "\\") : p;
 }
 

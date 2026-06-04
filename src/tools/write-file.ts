@@ -1,7 +1,7 @@
-// Write: full-file create/overwrite via ACP fs/write_text_file.
+// Write 工具：通过 ACP fs/write_text_file 整体创建或覆盖文件。
 //
-// Soft read-before-overwrite hint when the file already exists but the LLM
-// hasn't read it. Cache is updated post-write so subsequent reads hit.
+// 当文件存在但 LLM 还没 Read 过时，给一句"软提示" advisory 提醒 LLM
+// 优先 Read → Edit。写完更新缓存供后续 Read 命中。
 
 import { log } from "../log.js";
 import type { ToolSpec } from "../llm/types.js";
@@ -71,7 +71,7 @@ async function execute(
     );
   }
 
-  // Resolve old text: prefer cache, else read (ACP or direct fs), else null (new file).
+  // 取旧文本：优先缓存，再走 ACP / 直接 fs，找不到则视为新文件
   let oldText: string | null = null;
   const cached = ctx.state.cache.get(path);
   if (cached) {
@@ -156,7 +156,7 @@ async function execute(
     );
   }
 
-  // After a successful write, the new content is the on-disk content.
+  // 写成功后缓存即等于磁盘内容，并标记已读
   ctx.state.cache.set(path, content);
   ctx.state.readPaths.add(path);
   log.debug("Write: completed", {
@@ -188,7 +188,7 @@ function titleFor(
   rel: string,
   existed: boolean,
 ): string {
-  // Path-first title — see read-file.ts for rationale.
+  // 标题以路径为主 —— 详细理由见 read-file.ts。
   return existed ? `Wrote ${rel}` : `Created ${rel}`;
 }
 

@@ -1,6 +1,5 @@
-// Tool router — thin dispatcher: parses args, gates permission, calls the
-// tool's execute(). Each tool's actual logic lives in its own file under
-// src/tools/.
+// 工具调度器 —— 解析参数 → 走权限闸门 → 调用工具 execute()。
+// 工具自身的逻辑都在各自文件里，这里只负责派发。
 
 import { log } from "../log.js";
 import { parseToolArguments } from "../agent/json.js";
@@ -18,8 +17,7 @@ export async function executeTool(
     return errorResult(`unknown tool: ${name}`, "other", name);
   }
 
-  // A3 / K5：用共享的 parseToolArguments 替代本地 try/catch；它和 agent.ts 走
-  // 同一套语义（空字符串 → {}，非对象 → err，畸形 JSON → err with preview）。
+  // 与 agent.ts 共用同一套语义：空字符串 → {}，非对象 → err，畸形 JSON → err（带预览）。
   const argsResult = parseToolArguments(rawArgs);
   if (!argsResult.ok) {
     return errorResult(argsResult.error, "other", `${name}(?)`);

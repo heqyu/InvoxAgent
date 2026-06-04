@@ -1,15 +1,15 @@
-// Plugin hook system — lifecycle events that plugins subscribe to via
-// shell commands. Modeled after the Claude Code / CodeBuddy hook protocol.
+// 插件 hook 系统 —— 通过 shell 命令订阅生命周期事件。
+// 协议参考 Claude Code / CodeBuddy。
 //
-// Hook points:
-//   SessionStart          — after a new session is created
-//   UserPromptSubmit      — when the user submits a prompt
-//   PreToolUse            — before a tool executes
-//   PostToolUse           — after a tool succeeds
-//   PostToolUseFailure      — after a tool fails
-//   Stop                  — when the agentic loop ends
+// Hook 触发点：
+//   SessionStart       —— 新会话创建后
+//   UserPromptSubmit   —— 用户提交 prompt 时
+//   PreToolUse         —— 工具执行前
+//   PostToolUse        —— 工具执行成功后
+//   PostToolUseFailure —— 工具执行失败后
+//   Stop               —— agent loop 自然结束时
 //
-// Configuration file: <pluginRoot>/hooks/hooks.json
+// 配置文件：<pluginRoot>/hooks/hooks.json
 //   {
 //     "hooks": {
 //       "SessionStart": [
@@ -20,20 +20,16 @@
 //         }
 //       ],
 //       "PreToolUse": [
-//         {
-//           "matcher": "Write|Edit",
-//           "hooks": [ ... ]
-//         }
+//         { "matcher": "Write|Edit", "hooks": [ ... ] }
 //       ]
 //     }
 //   }
 //
-// Each hook command receives context as JSON on stdin and returns a
-// JSON response on stdout:
+// 每条 hook 命令把 context 作为 JSON 写入 stdin，从 stdout 读 JSON 返回：
 //   { "continue": true, "systemMessage": "..." }
-// Exit code 2 means "block the operation" (deny tool / prevent stop).
-// async: true commands are fire-and-forget (result is ignored).
-// matcher: regex filter for tool name (PreToolUse / PostToolUse only).
+// 退出码 2 表示"阻塞操作"（拒绝工具 / 阻止结束）。
+// async: true 则 fire-and-forget，结果忽略。
+// matcher 仅 PreToolUse / PostToolUse 生效，按 tool name 正则过滤。
 
 import { spawn } from "node:child_process";
 import { log } from "../log.js";
@@ -41,19 +37,19 @@ import { discoverDirs } from "../discovery/index.js";
 import { join } from "node:path";
 import { readFileSync, existsSync } from "node:fs";
 
-// ── Hook configuration types ───────────────────────────────────────
+// ── Hook 配置类型 ───────────────────────────────────────────────────
 
 export interface HookCommand {
   type: "command";
   command: string;
-  /** Timeout in seconds. Default: no limit. */
+  /** 超时秒数；默认无限制。 */
   timeout?: number;
-  /** If true, fire-and-forget — process result is ignored. */
+  /** true 表示 fire-and-forget，结果忽略。 */
   async?: boolean;
 }
 
 export interface HookGroup {
-  /** Regex pattern to filter by tool name (PreToolUse / PostToolUse only). */
+  /** 按 tool name 过滤的正则（仅 PreToolUse / PostToolUse 生效）。 */
   matcher?: string;
   description?: string;
   hooks: HookCommand[];
@@ -67,18 +63,18 @@ export type HookEventName =
   | "PostToolUseFailure"
   | "Stop";
 
-// ── Hook context types (stdin JSON passed to hook commands) ────────
+// ── 写到 hook stdin 的 context 类型 ────────────────────────────────
 
 export interface HookContextBase {
   hook_event_name: HookEventName;
   session_id: string;
   cwd: string;
   transcript_path?: string;
-  /** LLM model id used for the current session. */
+  /** 当前会话使用的 LLM model id。 */
   model: string;
-  /** Client name reported during ACP initialize (e.g. "Zed", "Claude Code"). */
+  /** ACP initialize 时上报的客户端名（如 "Zed"、"Claude Code"）。 */
   client: string;
-  /** Agent (invox) package version. */
+  /** invox 自身的 package 版本。 */
   version: string;
 }
 
@@ -125,24 +121,23 @@ export type HookContext =
   | PostToolUseFailureCtx
   | StopCtx;
 
-// ── Hook response (parsed from stdout JSON) ────────────────────────
+// ── Hook 命令的 stdout JSON ────────────────────────────────────────
 
 export interface HookResponse {
   continue?: boolean;
   suppressOutput?: boolean;
   systemMessage?: string;
   /**
-   * Claude Code convention for Stop-hook blocks: the detailed instruction
-   * text that should be injected as a user message so the agent knows
-   * *what* to do next.  In Claude Code the runtime reads `reason` directly;
-   * in InvoxAgent we merge it into `systemMessage` during normalisation
-   * (see the `decision:"block"` branch in runHookCommand) so the existing
-   * Stop handler in agent.ts picks it up transparently.
+   * Claude Code 约定：Stop hook 阻塞时，reason 是要注入回话的指令文本，
+   * 让 agent 知道下一步该做什么。
+   * Claude Code 直接读 reason；invox 在 runHookCommand 的 decision:"block"
+   * 分支里把它合并进 systemMessage，让 agent.ts 的现有 Stop 处理逻辑
+   * 透明拿到。
    */
   reason?: string;
 }
 
-// ── Resolved hook (a hook group with its owning plugin) ─────────────
+// ── 已解析的 hook 组（含归属 plugin）─────────────────────────────────
 
 export interface ResolvedHookGroup {
   pluginRoot: string;
@@ -163,21 +158,19 @@ export class HookRegistry {
   stop: ResolvedHookGroup[] = [];
 }
 
-// ── Cache ───────────────────────────────────────────────────────────
-
 const hookCache = new Map<string, HookRegistry>();
 
 /**
- * Load hooks from all three tiers: user settings.json, project settings.json,
- * and plugin hooks.json files. Results are cached by cwd.
+ * 加载三层 hook：用户 settings.json + 项目 settings.json + 各 plugin 的 hooks.json。
+ * 按 cwd 缓存。
  *
- * Merge order (lowest → highest priority):
- *   1. User settings.json hooks
- *   2. Project settings.json hooks
- *   3. Each enabled plugin's hooks/hooks.json
+ * 合并顺序（低 → 高优先级）：
+ *   1. 用户 settings.json
+ *   2. 项目 settings.json
+ *   3. 各启用 plugin 的 hooks/hooks.json
  *
- * CHOICE: Within each event, hook groups are appended (not replaced).
- * This matches Claude Code's behavior where all matching hooks run.
+ * 设计选择：同事件下的 hook group 是追加（不替换），与 Claude Code 一致 ——
+ * 所有匹配的 hook 都会跑。
  */
 export function loadHooks(cwd: string): HookRegistry {
   const cached = hookCache.get(cwd);
@@ -186,12 +179,12 @@ export function loadHooks(cwd: string): HookRegistry {
   const registry = new HookRegistry();
   const discovery = discoverDirs(cwd);
 
-  // 1. User settings.json hooks
+  // 1. 用户 settings.json hooks
   if (discovery.userSettings?.hooks) {
     mergeSettingsHooks(discovery.userSettings.hooks, registry, "user settings");
   }
 
-  // 2. Project settings.json hooks
+  // 2. 项目 settings.json hooks
   if (discovery.projectSettings?.hooks) {
     mergeSettingsHooks(
       discovery.projectSettings.hooks,
@@ -200,7 +193,7 @@ export function loadHooks(cwd: string): HookRegistry {
     );
   }
 
-  // 3. Plugin hooks.json (only enabled plugins)
+  // 3. plugin hooks.json（仅启用的 plugin）
   for (const plugin of discovery.plugins) {
     if (!plugin.enabled) continue;
     loadHooksFromPlugin(plugin.root, registry);
@@ -215,12 +208,11 @@ export function clearHookCache(cwd?: string): void {
   else hookCache.clear();
 }
 
-// ── Settings.json hook merging ──────────────────────────────────────
+// ── settings.json 中的 hooks 合并 ───────────────────────────────────
 
 /**
- * Registry map keys for event name → registry array lookup.
- * CHOICE: Defined as a function (not a constant) to avoid stale references
- * if the registry is mutated between calls.
+ * 事件名 → registry 数组的映射。
+ * 设计选择：实现成函数而非常量 —— 避免 registry 被外部修改后映射失效。
  */
 function registryMap(
   registry: HookRegistry,
@@ -236,14 +228,13 @@ function registryMap(
 }
 
 /**
- * Merge hooks from a settings.json `hooks` field into the registry.
- *
- * The hooks field has the same wire format as hooks.json:
+ * 把 settings.json 中的 hooks 字段合并进 registry。
+ * settings.json 的 hooks 字段与 hooks.json 同 wire 格式：
  *   { "EventName": [{ "matcher": "...", "hooks": [{ "type": "command", ... }] }] }
  *
- * @param settingsHooks - The hooks object from settings.json
- * @param registry - Target registry to merge into
- * @param source - Label for logging ("user settings" or "project settings")
+ * @param settingsHooks settings.json 的 hooks 对象
+ * @param registry      合并目标
+ * @param source        日志标签（"user settings" / "project settings"）
  */
 function mergeSettingsHooks(
   settingsHooks: Record<string, unknown>,
@@ -287,7 +278,7 @@ function mergeSettingsHooks(
       if (commands.length === 0) continue;
 
       target.push({
-        pluginRoot: "", // No plugin root for settings.json hooks
+        pluginRoot: "", // settings.json hooks 没有 plugin root
         pluginName: source,
         description:
           typeof g["description"] === "string" ? g["description"] : undefined,
@@ -298,7 +289,7 @@ function mergeSettingsHooks(
   }
 }
 
-// ── Plugin hook loading ─────────────────────────────────────────────
+// ── plugin hooks 加载 ───────────────────────────────────────────────
 
 function loadHooksFromPlugin(pluginRoot: string, registry: HookRegistry): void {
   const hooksJsonPath = join(pluginRoot, "hooks", "hooks.json");
@@ -322,7 +313,7 @@ function loadHooksFromPlugin(pluginRoot: string, registry: HookRegistry): void {
 
   const pluginName = loadPluginName(pluginRoot);
 
-  // Map event names to registry arrays
+  // 事件名 → registry 数组
   const registryMap: Record<string, ResolvedHookGroup[]> = {
     SessionStart: registry.sessionStart,
     UserPromptSubmit: registry.userPromptSubmit,
@@ -389,45 +380,43 @@ function loadPluginName(pluginRoot: string): string {
       return String(raw["name"]);
     }
   } catch {
-    // Fall through
+    // 退到目录名
   }
-  // Fallback: derive from directory name
   const sep = pluginRoot.includes("\\") ? "\\" : "/";
   const parts = pluginRoot.replace(/[\\/]+$/, "").split(sep);
   return parts[parts.length - 1] ?? pluginRoot;
 }
 
-// ── Matcher helper ──────────────────────────────────────────────────
+// ── matcher 工具 ────────────────────────────────────────────────────
 
 /**
- * 判定一个 tool name 是否匹配 hook group 的 matcher 正则。
+ * 判定 toolName 是否匹配 hook group 的 matcher 正则。
  *
- * 设计要点（PROGRESS A1 单测覆盖）：
- *   - matcher 为空 / undefined → 全匹配（设计：default-allow）
- *   - 非法正则不抛错 —— 退化为字面量精确匹配，避免一个错误的 plugin 配置把
- *     整个 hook 系统弄挂
- *   - 正则未锚定（不带 ^...$）—— 与 Claude Code 行为对齐：含子串即匹配
+ * 设计要点：
+ *   - matcher 为空 / undefined → 全匹配（default-allow）
+ *   - 非法正则不抛错 —— 退化为字面量精确匹配，避免单条错误配置弄挂整个
+ *     hook 系统
+ *   - 正则未锚定（不带 ^...$）—— 与 Claude Code 一致：含子串即匹配
  */
 export function matchesTool(
   matcher: string | undefined,
   toolName: string,
 ): boolean {
-  if (!matcher) return true; // No matcher = match all
+  if (!matcher) return true;
   try {
     return new RegExp(matcher).test(toolName);
   } catch {
-    // Invalid regex — treat as literal string match
+    // 非法正则 → 字面量比较
     return matcher === toolName;
   }
 }
 
-// ── Command execution ───────────────────────────────────────────────
+// ── Hook 命令执行 ───────────────────────────────────────────────────
 
 /**
- * Run a single hook command. Pass context as JSON on stdin, parse
- * JSON response from stdout.
- *
- * Returns parsed HookResponse, or null if the command was async or failed.
+ * 执行单条 hook 命令：context 写入 stdin，从 stdout 解析 JSON 响应。
+ * 返回：解析后的 HookResponse + 退出码 + stderr 文本。
+ * 命令是 async（fire-and-forget）或失败时 response 为 null。
  */
 function runHookCommand(
   cmd: HookCommand,
@@ -497,15 +486,13 @@ function runHookCommand(
       resolved = true;
       if (timer) clearTimeout(timer);
 
-      // Claude Code spec: "Exit 2 means a blocking error. Claude Code
-      // ignores stdout and any JSON in it. Instead, stderr text is fed
-      // back as an error message."  We must check exit code BEFORE
-      // parsing stdout to honor this.
+      // Claude Code 规范：「退出码 2 表示阻塞错误。Claude Code 忽略 stdout，
+      // 任何 stdout 中的 JSON 都不解析；改用 stderr 文本作为错误说明。」
+      // 所以必须先看 exit code 再决定是否解析 stdout。
       let response: HookResponse | null = null;
 
       if (code === 2) {
-        // Exit code 2 = blocking signal. Stdout is ignored per spec.
-        // stderr carries the human-readable reason.
+        // 退出码 2 = 阻塞信号，stdout 按规范忽略。stderr 是给人看的原因。
         const errText = stderr.trim();
         response = {
           continue: false,
@@ -513,10 +500,10 @@ function runHookCommand(
           systemMessage: errText || `blocked by ${hookEvent} hook`,
         };
       } else if (stdout.trim()) {
-        // Exit 0 (or other): parse stdout JSON for structured control.
+        // 退出码 0 或其他：尝试解析 stdout JSON 作为结构化指令
         try {
           response = JSON.parse(stdout.trim()) as HookResponse;
-          // Normalize Claude Code convention: decision → continue
+          // 归一化 Claude Code 约定：decision → continue
           if (
             response &&
             typeof (response as Record<string, unknown>).decision === "string"
@@ -525,8 +512,7 @@ function runHookCommand(
               .decision as string;
             if (decision === "block" && response.continue === undefined) {
               response.continue = false;
-              // Claude Code convention: `reason` is the instruction text
-              // injected as context so the agent knows what to do next.
+              // reason 是注入回会话的指令文本，让 agent 知道接下来该做什么
               if (response.reason && response.reason.length > 0) {
                 response.systemMessage = response.reason;
               }
@@ -538,7 +524,7 @@ function runHookCommand(
             }
           }
         } catch {
-          // Non-JSON stdout is ignored (e.g. debug output)
+          // 非 JSON stdout 忽略（debug 输出等）
         }
       }
 
@@ -554,7 +540,7 @@ function runHookCommand(
       resolve({ response, exitCode: code, stderr });
     });
 
-    // Write context JSON to stdin and close
+    // 把 context JSON 写到 stdin 并关闭
     log.debug("hook stdin", {
       hookEvent,
       command: cmd.command.substring(0, 120),
@@ -566,9 +552,8 @@ function runHookCommand(
 }
 
 /**
- * Resolve environment variable references in a command string.
- * Replaces ${CLAUDE_PLUGIN_ROOT} and ${CODEBUDDY_PLUGIN_ROOT} with
- * the actual plugin root path.
+ * 把命令字符串里的 ${CLAUDE_PLUGIN_ROOT} / ${CODEBUDDY_PLUGIN_ROOT}
+ * 替换成实际 plugin 根目录。
  */
 function resolveEnvInCommand(command: string, pluginRoot: string): string {
   return command
@@ -576,11 +561,9 @@ function resolveEnvInCommand(command: string, pluginRoot: string): string {
     .replace(/\$\{CODEBUDDY_PLUGIN_ROOT\}/g, pluginRoot);
 }
 
-// ── Hook runners (called from agent.ts) ─────────────────────────────
+// ── Hook runner（agent.ts 调用入口）─────────────────────────────────
 
-/**
- * Collect all hook groups for a given event, filtering by matcher (tool name).
- */
+/** 收集事件下的 hook group 并按 toolName 过滤 matcher。 */
 function collectGroups(
   registry: HookRegistry | undefined,
   event: HookEventName,
@@ -614,12 +597,9 @@ function eventKey(event: HookEventName): string {
 }
 
 /**
- * Run all hook commands across all matching groups.
- *
- * - async commands: spawned in background (fire-and-forget)
- * - non-async commands: awaited, results aggregated
- *
- * Returns aggregated HookResponse.
+ * 跑事件下匹配的所有 hook 命令：
+ * - async 命令后台 spawn 不等
+ * - 同步命令 await 后聚合结果；首个 continue=false 立即停下，返回带 reason 的聚合
  */
 async function runHooks(
   registry: HookRegistry | undefined,
@@ -639,7 +619,7 @@ async function runHooks(
       const timeoutMs = cmd.timeout ? cmd.timeout * 1000 : undefined;
 
       if (cmd.async) {
-        // Fire-and-forget: spawn but don't await
+        // fire-and-forget：spawn 但不 await
         runHookCommand(
           { ...cmd, command: resolvedCmd },
           jsonCtx,
@@ -662,8 +642,7 @@ async function runHooks(
         if (response) {
           if (response.continue === false) {
             agg.continue = false;
-            // Per Claude Code spec: when a hook blocks, stop processing
-            // subsequent hooks immediately. The first block wins.
+            // Claude Code 规范：一旦阻塞，立即停下后续 hook，第一个阻塞胜出
             if (response.reason) agg.reason = response.reason;
             if (response.systemMessage)
               agg.systemMessage = response.systemMessage;
@@ -690,14 +669,14 @@ async function runHooks(
   return agg;
 }
 
-// ── Public hook runner functions ────────────────────────────────────
+// ── 对外 hook 触发函数 ──────────────────────────────────────────────
 
 export async function runSessionStart(
   registry: HookRegistry | undefined,
   ctx: SessionStartCtx,
 ): Promise<void> {
   if (!registry?.sessionStart.length) return;
-  // SessionStart hooks are fire-and-forget — don't block session creation.
+  // SessionStart hook 是 fire-and-forget，不阻塞会话创建
   await runHooks(registry, ctx).catch(() => {});
 }
 

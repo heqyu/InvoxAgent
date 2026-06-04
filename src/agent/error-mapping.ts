@@ -1,24 +1,20 @@
-// LLM provider 错误 → ACP `stopReason` 映射 —— Phase A5 / K9
+// LLM provider 错误 → ACP `stopReason` 映射。
 //
 // 设计点：
 //   - prompt() 必须始终返回合法 PromptResponse，绝不向 ACP RPC 抛异常 ——
-//     否则客户端看到的是裸 RPC error，没有 stopReason，UI 不知道发生了什么
-//   - OpenAI SDK 的 APIError 暴露 `status` 数字，按 HTTP 语义分桶
-//   - 网络错误（ECONNRESET / ENOTFOUND / ETIMEDOUT）直接走 refusal
+//     否则客户端只能看到裸 RPC error，没有 stopReason，UI 不知道发生了什么
+//   - OpenAI SDK 的 APIError 暴露 status，按 HTTP 语义分桶
+//   - 网络错误（ECONNRESET / ENOTFOUND / ETIMEDOUT 等）直接走 refusal
 //   - AbortError 单独识别 —— 它是 cancellation 不是失败
 //
-// ACP 协议规定的 stopReason 字面量（见 PLAN §4 / sdk schema）：
+// 协议规定的 stopReason 字面量：
 //   "end_turn" | "max_tokens" | "max_turn_requests" | "refusal" | "cancelled"
-//
-// 我们仅在 error 路径产出 "refusal" 或 "cancelled"；正常完成 / 超迭代分别由
-// "end_turn" / "max_turn_requests" 在调用方决定。
+// 我们仅在错误路径产出 "refusal" / "cancelled"；
+// "end_turn" / "max_turn_requests" 由调用方在正常流程上决定。
 
-/**
- * Provider 错误的可读元数据 —— 既用于日志，也用于回流给 LLM / 用户的
- * agent_message_chunk 文本。
- */
+/** Provider 错误的可读元信息：日志 + 回流给用户的 agent_message_chunk 共用。 */
 export interface ProviderErrorInfo {
-  /** 短分类：rate_limit / auth / server / network / unknown，便于客户端做 UI */
+  /** 短分类 —— 便于客户端做 UI 区分。 */
   category:
     | "rate_limit"
     | "auth"
@@ -26,15 +22,15 @@ export interface ProviderErrorInfo {
     | "network"
     | "bad_request"
     | "unknown";
-  /** 一句话描述（可直接展示给用户） */
+  /** 一句话描述，可直接展示给用户。 */
   message: string;
-  /** HTTP status（若有） */
+  /** HTTP status（若有）。 */
   status?: number;
-  /** Node 错误 code（如 ECONNRESET），若有 */
+  /** Node 错误码（如 ECONNRESET，若有）。 */
   code?: string;
 }
 
-/** classifyProviderError 的返回 —— discriminated union 让调用方按 kind 分流。 */
+/** classifyProviderError 的 discriminated union 返回。 */
 export type ClassifiedError =
   | { kind: "abort" }
   | { kind: "refusal"; info: ProviderErrorInfo };
@@ -48,10 +44,10 @@ export type ClassifiedError =
  *                            通过 agent_message_chunk 告诉用户
  */
 export function classifyProviderError(err: unknown): ClassifiedError {
-  // 1. AbortError —— 用户主动取消，这是合法状态，不算失败
+  // 1. AbortError —— 用户主动取消，合法状态，不算失败
   if (isAbortError(err)) return { kind: "abort" };
 
-  // null / undefined / 标量值：直接走 unknown 桶，避免后续解构抛错
+  // null / undefined / 标量：归 unknown 桶，避免后续解构抛错
   if (err === null || err === undefined || typeof err !== "object") {
     return refusal({
       category: "unknown",
@@ -115,7 +111,7 @@ export function classifyProviderError(err: unknown): ClassifiedError {
     });
   }
 
-  // 4. fetch 风格的"TypeError: fetch failed"也归网络
+  // 4. fetch 风格的 "TypeError: fetch failed" 也归网络
   if (/fetch failed|network|ECONN/i.test(message)) {
     return refusal({
       category: "network",
@@ -134,24 +130,20 @@ export function classifyProviderError(err: unknown): ClassifiedError {
   });
 }
 
-/**
- * 把 ProviderErrorInfo 渲染成给最终用户的友好文本（会塞进
- * agent_message_chunk）。短小，一行能读完。
- */
+/** 把 ProviderErrorInfo 渲染成给用户看的友好文本（塞进 agent_message_chunk）。 */
 export function formatProviderErrorForUser(info: ProviderErrorInfo): string {
   return `⚠️ ${info.message}`;
 }
 
 /**
- * 把 ProviderErrorInfo 序列化成可放入 ACP `_meta["invox/error"]` 的 plain
- * object —— B4 / Phase B。
+ * 把 ProviderErrorInfo 序列化成可塞入 ACP `_meta["invox/error"]` 的对象。
  *
  * 设计点：
- *   - 只输出 ACP 协议官方 `_meta` 文档说的 "additional metadata"；客户端
- *     若不识别该 key 应当原样忽略
- *   - 不要把 stack trace / 内部 SDK 字段塞进去 —— 那是 log 的事
- *   - 字段顺序固定（category / message / status / code），方便客户端做断言
- *   - JSON.stringify 友好：所有字段都是 string | number | undefined
+ *   - 仅输出协议官方 `_meta` 文档允许的"附加元数据"；客户端不识别该 key
+ *     时应当原样忽略
+ *   - 不把 stack trace / SDK 内部字段塞进来 —— 那是日志的事
+ *   - 字段顺序固定（category / message / status / code）方便客户端断言
+ *   - JSON.stringify 友好：字段都是 string | number | undefined
  */
 export function serializeRefusalForMeta(
   info: ProviderErrorInfo,
@@ -167,7 +159,7 @@ export function serializeRefusalForMeta(
 
 // ── 内部 ─────────────────────────────────────────────────────────────
 
-/** Node 已知的网络层错误码 */
+/** Node 已知的网络层错误码。 */
 const NETWORK_CODES = new Set([
   "ECONNRESET",
   "ECONNREFUSED",

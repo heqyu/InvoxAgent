@@ -1,10 +1,7 @@
-// EchoProvider — deterministic, no-network LLM stub. Used when INVOX_API_KEY
-// is absent (dev mode) and by the smoke test (offline acceptance).
+// EchoProvider —— 不联网的确定性 LLM stub，供离线开发 / smoke test 使用。
 //
-// Behavior: returns `invox echo: you said "<last user message>". streaming works ✓`
-// chunked into 8-char pieces with a small per-chunk delay so streaming is
-// observable. Format preserved from stage 1 so the existing smoke assertions
-// pass unchanged.
+// 行为：把最后一条 user 消息原样回声回去，按 8 字符分片以模拟流式输出。
+// 输出格式与 stage 1 保持一致，避免破坏既有 smoke 断言。
 
 import type { LLMDelta, LLMProvider, LLMRequest } from "./types.js";
 import { chunkString, contentToString, sleep } from "./utils.js";

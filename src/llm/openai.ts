@@ -1,23 +1,18 @@
-// OpenAI-compatible provider with tool_call support.
+// OpenAI 兼容 provider，支持 tool_call 流式拼装。
 //
-// Streaming behavior:
-//   - text content deltas → yield { kind: "text" }
-//   - tool_call deltas: accumulate per-index id/name/arguments. When stream
-//     ends, yield one { kind: "tool_call", call } per assembled tool call.
-//     This dodges PLAN §3 pitfall ("LLM tool_call streaming arg deltas:
-//     naive concat misses indices") by tracking a per-index buffer.
-//   - on stream end, yield { kind: "finish", reason }.
+// 流式行为：
+//   - text 内容增量 → yield { kind: "text" }
+//   - tool_call 增量：按 index 累加每个调用的 id / name / arguments；
+//     stream 结束后再按 index 顺序 emit 一次 `tool_call`，避免分片漏接
+//   - 最后一个 chunk 含 usage 对象（要求开启 stream_options.include_usage）
+//   - stream 结束 yield 一次 `finish`，附带 reason
 //
-// Logging discipline:
-//   info  — one line per request boundary (start with model+counts, end with
-//           timing+token-bytes-totals). Default level so users see "is the
-//           LLM call alive?".
-//   debug — chunk-level events: first byte received, every Nth chunk, errors
-//           with full HTTP status. Useful to localize "where it stalled".
-//   trace — full request payload (messages + tools) and full response.
-//           NEVER set this in production (leaks secrets if your prompts
-//           include API keys, tokens, etc.).
-//
+// 日志策略：
+//   info  —— 每个请求的开始 / 结束摘要（model + counts → 时延 + token）
+//   debug —— chunk 级事件（首字节、长 gap）；带完整 HTTP 状态便于定位卡点
+//   trace —— 完整请求 payload（messages + tools）和组装好的 tool calls。
+//            **生产严禁开启** —— prompt / tool 输出可能含 API key、密钥等。
+
 import OpenAI from "openai";
 import { log } from "../log.js";
 import {
@@ -39,9 +34,7 @@ export interface OpenAIProviderConfig {
   baseURL: string;
   apiKey: string;
   model: string;
-  /**
-   * 可选 backoff 覆盖（测试用）。生产代码不传，从环境变量读取。
-   */
+  /** 测试可注入的 backoff 覆盖；生产代码不传，从 env 读。 */
   backoff?: BackoffConfig;
 }
 
@@ -51,7 +44,7 @@ export class OpenAIProvider implements LLMProvider {
   private model: string;
   private baseURL: string;
   private backoff: BackoffConfig;
-  /** Monotonic counter so each LLM call has a short id in logs. */
+  /** 单调递增计数，给每次 LLM 调用分配一个短日志 id。 */
   private nextCallSeq = 1;
 
   constructor(cfg: OpenAIProviderConfig) {
@@ -64,8 +57,7 @@ export class OpenAIProvider implements LLMProvider {
   async *stream(req: LLMRequest): AsyncIterable<LLMDelta> {
     const callId = `c${this.nextCallSeq++}`;
     const startedAt = Date.now();
-    // Per-call model override (set by setSessionModel). Falls back to the
-    // provider's default if the agent didn't pin a model on this session.
+    // 单次调用的 model 覆盖（来自 setSessionModel）；未设则用 provider 默认。
     const modelForCall = req.model ?? this.model;
 
     log.info("llm: request", {
@@ -86,28 +78,25 @@ export class OpenAIProvider implements LLMProvider {
 
     let stream;
     try {
-      // B3：connect 阶段套指数退避（429 / 5xx / 网络错误）。stream 一旦
-      // 开始消费就不再重试 —— mid-stream 重放会破坏 ACP UI 的增量渲染。
+      // connect 阶段套指数退避（429 / 5xx / 网络）。
+      // stream 一旦开始消费就不再重试 —— mid-stream 重放会破坏 ACP UI 的增量渲染。
       stream = await withConnectBackoff(
         () =>
           this.client.chat.completions.create(
             {
               model: modelForCall,
               stream: true,
-              // Ask the upstream to emit a final usage-only chunk so we can
-              // surface real token counts. Some self-hosted OAI-compat backends
-              // ignore this flag — that's fine, we just don't get a usage delta.
+              // 让上游在最末发一个 usage-only chunk，给我们真实 token 数。
+              // 部分自托管 OAI-compat 后端会忽略这个 flag —— 没关系，我们就拿不到 usage delta。
               stream_options: { include_usage: true },
               messages: req.messages.map(toOpenAIMessage),
               ...(req.tools && req.tools.length > 0
                 ? { tools: req.tools, tool_choice: "auto" }
                 : {}),
-              // Pass through reasoning_effort when the agent has thinking
-              // enabled. OpenAI's chat API documents this as `none | minimal
-              // | low | medium | high | xhigh`. Backends that don't recognize
-              // the field typically ignore it; strict ones may 400 — that's
-              // a backend-vs-config mismatch the user can resolve via the
-              // dropdown.
+              // 启用 thinking 时透传 reasoning_effort。OpenAI 文档枚举：
+              // none | minimal | low | medium | high | xhigh。后端不识别该字段时
+              // 通常忽略；严格的后端可能 400 —— 那是后端 vs 配置不匹配，
+              // 用户可在下拉里换个值。
               ...(req.reasoningEffort && req.reasoningEffort !== "none"
                 ? { reasoning_effort: req.reasoningEffort }
                 : {}),
@@ -137,12 +126,7 @@ export class OpenAIProvider implements LLMProvider {
       throw err;
     }
 
-    // log.debug("llm: stream opened", {
-    //   callId,
-    //   elapsedMs: Date.now() - startedAt,
-    // });
-
-    // tool_call accumulator: index → partial call
+    // tool_call 累加器：index → 部分调用
     const partials = new Map<
       number,
       { id: string; name: string; argsBuf: string }
@@ -153,10 +137,9 @@ export class OpenAIProvider implements LLMProvider {
     let firstByteAt = 0;
     let lastChunkAt = startedAt;
     /**
-     * Final usage-only chunk from `stream_options.include_usage`. Per OpenAI
-     * spec the `usage` field is non-null only on the very last chunk (which
-     * also has an empty `choices` array). We capture it here and emit one
-     * `LLMDelta { kind: "usage" }` after the stream drains.
+     * `stream_options.include_usage` 产生的 usage-only 结尾 chunk。
+     * OpenAI 规定 usage 字段仅在最后一个 chunk 上非空（且该 chunk 的 choices
+     * 数组为空）。我们捕获之后在 stream 排干后 emit 一次 `kind: "usage"`。
      */
     let usageRaw: {
       prompt_tokens?: number;
@@ -171,13 +154,8 @@ export class OpenAIProvider implements LLMProvider {
         const now = Date.now();
         if (firstByteAt === 0) {
           firstByteAt = now;
-          // log.debug("llm: first chunk", {
-          //   callId,
-          //   ttfbMs: now - startedAt,
-          // });
         }
-        // Stall heuristic: gap > 5s between chunks is unusual for chat
-        // completions and worth surfacing.
+        // 卡顿启发：chunk 间隔 > 5s 不正常，记一条 debug 便于定位。
         if (now - lastChunkAt > 5000) {
           log.debug("llm: chunk gap", {
             callId,
@@ -187,8 +165,8 @@ export class OpenAIProvider implements LLMProvider {
         }
         lastChunkAt = now;
 
-        // Capture usage BEFORE the `!choice` guard — usage-only chunks have
-        // no choices entry, so the guard would otherwise drop them.
+        // 在 `!choice` 兜底之前先抓 usage —— usage-only chunk 的 choices 是空，
+        // 否则会被那个守卫吃掉。
         if (chunk.usage) {
           usageRaw = chunk.usage;
         }
@@ -243,9 +221,8 @@ export class OpenAIProvider implements LLMProvider {
         }
       : null;
 
-    // Always log the RAW usage chunk from the provider so we can cross-check
-    // against the OpenAI dashboard (or any upstream billing portal). This is
-    // the ground-truth data before any Invox mapping/accumulation.
+    // 总是把 provider 原始 usage 写进日志 —— 方便对照 OpenAI 计费 dashboard，
+    // 验证 invox 显示的数字是否准确。
     log.info("llm: response", {
       callId,
       elapsedMs: Date.now() - startedAt,
@@ -254,11 +231,9 @@ export class OpenAIProvider implements LLMProvider {
       textBytes,
       toolCalls: partials.size,
       finishReason,
-      // Raw provider usage (prompt_tokens / completion_tokens / total_tokens)
-      // — compare this against the upstream billing dashboard to verify
-      // whether Invox's displayed numbers are accurate.
+      // 原始用量（prompt_tokens / completion_tokens / total_tokens）—— 与上游账单核对用
       rawUsage: usageRaw ?? "(provider did not return usage)",
-      // Mapped internal usage (what accumulates into turnUsage).
+      // 映射后内部用量（进入 turnUsage 的部分）
       ...(usage ? { usage } : {}),
     });
 
@@ -274,7 +249,7 @@ export class OpenAIProvider implements LLMProvider {
       });
     }
 
-    // Emit assembled tool_calls in index order.
+    // 按 index 顺序 emit 组装好的 tool_call
     const indices = [...partials.keys()].sort((a, b) => a - b);
     for (const idx of indices) {
       const p = partials.get(idx);
@@ -296,11 +271,10 @@ export class OpenAIProvider implements LLMProvider {
 }
 
 /**
- * Convert internal LLMMessage → OpenAI ChatCompletionMessageParam.
- *
- * - system/assistant/tool: content is always string. Pass directly.
- * - user: content may be string or ChatCompletionContentPart[] (image_url).
- *   Pass through as-is — it's already in OpenAI format.
+ * 把内部 LLMMessage 转成 OpenAI ChatCompletionMessageParam。
+ * - system / assistant / tool：content 恒为 string，原样传
+ * - user：content 可能是 string 或 ChatCompletionContentPart[]（image_url），
+ *   也是原样透传（已是 OpenAI 形状）
  */
 function toOpenAIMessage(
   m: LLMMessage,
@@ -309,7 +283,7 @@ function toOpenAIMessage(
     case "system":
       return { role: "system", content: m.content as string };
     case "user":
-      // m.content is UserContent = string | ChatCompletionContentPart[]
+      // m.content = string | ChatCompletionContentPart[]
       return { role: "user", content: m.content as UserContent };
     case "assistant":
       return {
@@ -345,9 +319,8 @@ function mapFinishReason(
 }
 
 /**
- * Pull the most useful diagnostic fields out of an OpenAI / fetch error.
- * APIError from the SDK has `status` and `error` (the JSON body the upstream
- * sent back). We never include the request URL/headers (apiKey could leak).
+ * 从 OpenAI / fetch 错误里抽出最有用的诊断字段。SDK 的 APIError 带 status 和
+ * error（上游返回的 JSON body）。**绝不**把 URL / headers 写进来 —— apiKey 会泄漏。
  */
 function describeError(err: unknown): Record<string, unknown> {
   if (err && typeof err === "object") {

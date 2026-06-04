@@ -1,4 +1,4 @@
-// MCP client manager — connects to MCP servers, discovers tools, forwards calls.
+// MCP client manager —— 连接 MCP 服务器、发现工具、转发调用。
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -6,26 +6,20 @@ import { log } from "../log.js";
 import type { ToolSpec } from "../llm/types.js";
 import type { McpServerConfig, McpToolDef } from "./types.js";
 
-/** Result JSON payload returned by the MCP server to the client. */
+/** MCP 服务器返回的结果 payload。 */
 interface McpToolContent {
   type: "text";
   text: string;
 }
 
-/**
- * Internal per-server state: the MCP client + transport + a snapshot of
- * this server's tools.
- */
+/** 单个 server 的内部状态：MCP client + transport + 工具快照。 */
 interface ServerEntry {
   client: Client;
   transport: StdioClientTransport;
   tools: McpToolDef[];
 }
 
-/**
- * Shape of ToolSpec.function.parameters — the subset of JSON Schema that
- * OpenAI's tool-calling API expects.
- */
+/** ToolSpec.function.parameters 的形状 —— OpenAI tool calling 期望的 JSON Schema 子集。 */
 type OpenAIParameters = {
   type: "object";
   properties: Record<string, unknown>;
@@ -33,26 +27,25 @@ type OpenAIParameters = {
 };
 
 /**
- * Owns the lifecycle of one or more MCP servers. Created per-session in
- * InvoxAgent.newSession / loadSession and torn down when the session ends.
+ * 持有一个或多个 MCP 服务器的生命周期。
+ * 由 InvoxAgent.newSession / loadSession 创建，session 结束时拆除。
  */
 export class McpClientManager {
   private servers = new Map<string, ServerEntry>();
-  /** Flattened tool defs across all servers, keyed by invoxName. */
+  /** 跨服务器的扁平工具表，按 invoxName 索引。 */
   private tools = new Map<string, McpToolDef>();
-  /** Pre-computed OpenAI tool specs for all discovered MCP tools. */
+  /** 预计算好的 OpenAI 工具规范，覆盖所有发现到的 MCP 工具。 */
   private toolSpecs: ToolSpec[] = [];
 
-  // ---------- public API ----------
+  // ---------- 公共 API ----------
 
   /**
-   * Parse configs, spawn child processes, perform the MCP handshake and
-   * discover tools. Errors for individual servers are logged but do not
-   * prevent other servers (or the session) from working.
+   * 解析配置 → spawn 子进程 → 完成 MCP 握手 → 列出工具。
+   * 单个 server 失败仅记日志，不影响其他 server 或会话本身。
    */
   async connect(configs: Record<string, McpServerConfig>): Promise<void> {
     for (const [serverName, cfg] of Object.entries(configs)) {
-      if (cfg.type !== "stdio") continue; // only stdio supported
+      if (cfg.type !== "stdio") continue; // 当前仅支持 stdio
       try {
         const transport = new StdioClientTransport({
           command: cfg.command,
@@ -100,19 +93,19 @@ export class McpClientManager {
     this.toolSpecs = this.buildToolSpecs();
   }
 
-  /** OpenAI tool specs for all discovered MCP tools. */
+  /** 返回所有 MCP 工具的 OpenAI tool spec。 */
   getToolSpecs(): ToolSpec[] {
     return this.toolSpecs;
   }
 
-  /** Look up an MCP tool def by invoxName (mcp__<server>__<tool>). */
+  /** 按 invoxName（mcp__<server>__<tool>）查 MCP 工具元信息。 */
   getMcpTool(name: string): McpToolDef | undefined {
     return this.tools.get(name);
   }
 
   /**
-   * Forward a tool call to the appropriate MCP server.
-   * Returns the raw result for the tool factory to wrap in a ToolExecResult.
+   * 把一次工具调用转发到对应的 MCP 服务器。
+   * 返回原始结果，由 mcp/tool.ts 的 factory 负责包装成 ToolExecResult。
    */
   async callTool(
     serverName: string,
@@ -142,7 +135,7 @@ export class McpClientManager {
     };
   }
 
-  /** Shut down all MCP connections and kill subprocesses. */
+  /** 关闭所有 MCP 连接并 kill 子进程。 */
   async disconnect(): Promise<void> {
     for (const [name, entry] of this.servers) {
       try {
@@ -160,12 +153,11 @@ export class McpClientManager {
     this.toolSpecs = [];
   }
 
-  // ---------- internal helpers ----------
+  // ---------- 内部 ----------
 
   /**
-   * Convert MCP inputSchema (JSON Schema) to the OpenAI ToolSpec
-   * `parameters` shape. Strips MCP-specific fields and ensures `type`,
-   * `properties`, and optionally `required` are present.
+   * 把 MCP inputSchema（JSON Schema）转换成 OpenAI ToolSpec 的 `parameters` 形状。
+   * 剥掉 MCP 专有字段，确保 type / properties 必在，required 可选。
    */
   private static toOpenAIParameters(
     inputSchema: Record<string, unknown>,

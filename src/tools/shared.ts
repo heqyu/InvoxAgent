@@ -1,12 +1,9 @@
-// Shared constants across all tool specs.
-//
-// CHOICE: centralise the `description` parameter schema object that every
-// tool includes. Updating the wording (e.g. for localisation) now requires
-// a single edit instead of 7.
+// 工具规范共享常量。
 
 /**
- * The common `description` parameter schema shared by every tool spec.
- * Shown as the user-facing hint in the editor's tool-call card.
+ * 所有工具 spec 共用的 `description` 参数 schema。
+ * LLM 在每次调用工具时会传入一段简短文案，作为编辑器中工具卡片的标题。
+ * 集中定义便于统一调整文案。
  */
 export const DESCRIPTION_FIELD = {
   type: "string",

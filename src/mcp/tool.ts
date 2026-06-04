@@ -1,4 +1,4 @@
-// MCP tool factory — wraps an MCP tool as an invox Tool instance.
+// MCP tool factory —— 把一个 MCP 工具包装成符合 invox `Tool` 契约的实例。
 
 import type { ToolSpec } from "../llm/types.js";
 import { DESCRIPTION_FIELD } from "../tools/shared.js";
@@ -11,7 +11,7 @@ import {
 import type { McpClientManager } from "./client.js";
 import type { McpToolDef } from "./types.js";
 
-/** Shape of ToolSpec.function.parameters. */
+/** ToolSpec.function.parameters 的形状。 */
 type OpenAIParameters = {
   type: "object";
   properties: Record<string, unknown>;
@@ -19,9 +19,8 @@ type OpenAIParameters = {
 };
 
 /**
- * Convert an MCP `inputSchema` to the OpenAI `ToolSpec` the invox agent
- * sends to the LLM. The only addition is the shared `description` field
- * that every invox tool carries.
+ * 将 MCP `inputSchema` 转换成给 LLM 的 OpenAI `ToolSpec`，并补上 invox 共享的
+ * `description` 字段（每个 invox 工具都有，用作工具卡标题）。
  */
 function inputSchemaToToolSpec(def: McpToolDef): ToolSpec {
   const it = def.inputSchema.type;
@@ -34,8 +33,8 @@ function inputSchemaToToolSpec(def: McpToolDef): ToolSpec {
     typeof def.inputSchema.properties === "object" &&
     !Array.isArray(def.inputSchema.properties)
   ) {
-    // Merge in the shared description param (the LLM provides a
-    // user-facing label for tool cards, same as every other invox tool).
+    // 合并共享 description 字段 —— LLM 给一段用户可见的卡片标题，
+    // 与其他 invox 工具的写法保持一致。
     props = {
       ...(def.inputSchema.properties as Record<string, unknown>),
       ...DESCRIPTION_FIELD,
@@ -65,7 +64,7 @@ function inputSchemaToToolSpec(def: McpToolDef): ToolSpec {
   };
 }
 
-/** Create an invox `Tool` that forwards to an MCP server. */
+/** 创建一个把调用转发到指定 MCP 服务器的 invox `Tool`。 */
 export function createMcpTool(
   def: McpToolDef,
   manager: McpClientManager,
@@ -79,8 +78,7 @@ export function createMcpTool(
       args: Record<string, unknown>,
       _ctx: ToolExecContext,
     ): Promise<ToolExecResult> {
-      // Strip the shared description before forwarding to MCP — it's an
-      // invox-internal field, not part of the tool's actual input schema.
+      // 转发前剥掉 description —— 它是 invox 内部字段，不属于 MCP 工具的真实输入。
       const mcpArgs = { ...args };
       delete mcpArgs.description;
 
@@ -91,7 +89,7 @@ export function createMcpTool(
           mcpArgs,
         );
 
-        // Best-effort text extraction from MCP content blocks.
+        // 尽力从 MCP content blocks 抽出文本。
         const parts: string[] = [];
         for (const block of result.content) {
           if (block.type === "text") {

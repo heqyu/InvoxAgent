@@ -1,10 +1,9 @@
-// Entry point. Selects transport(s) per CLI flags / env, then constructs
-// `AgentSideConnection` per peer.
+// CLI 入口：根据命令行 / 环境变量挑 transport，给每个对端构造 AgentSideConnection。
 //
-// Stages 1-4: stdio + WebSocket. Each peer (1 stdio, N ws clients) gets its
-// own InvoxAgent instance for isolation.
+// stdio + WebSocket 同时可用：每个对端（1 个 stdio 或 N 个 ws 客户端）拿到
+// 自己的 InvoxAgent 实例，会话彼此隔离。
 //
-// Hard rule: nothing here writes to stdout. The stdio transport owns stdout for JSON-RPC.
+// **铁律**：本文件绝不写 stdout —— stdio transport 把 stdout 专用于 JSON-RPC 帧。
 
 import { AgentSideConnection } from "@agentclientprotocol/sdk";
 import type { ModelInfo } from "@agentclientprotocol/sdk";
@@ -72,11 +71,11 @@ function parseArgs(argv: string[]): Args {
         args.showHelp = true;
         break;
       default:
-        // Unknown flag: ignore for forward-compat; log at debug.
+        // 未知 flag：忽略以保留 forward-compat，仅 debug 级日志。
         log.debug("unknown arg ignored", { arg: a });
     }
   }
-  // Default: stdio. Zed launches us with no flags, so stdio must be the default.
+  // 默认走 stdio —— Zed 启动 invox 时不带任何 flag，stdio 必须是默认。
   if (args.transports.size === 0) args.transports.add("stdio");
   return args;
 }
@@ -99,7 +98,7 @@ USAGE:
 
 FLAGS:
   --stdio          Speak ACP over stdio (default if no transport flag given)
-  --ws             Listen for ACP-over-WebSocket clients (stage 4+)
+  --ws             Listen for ACP-over-WebSocket clients
   --port N         WebSocket port (default 9999)
   --host H         WebSocket bind host (default 127.0.0.1)
   -v, --version    Print version and exit
@@ -107,11 +106,11 @@ FLAGS:
 
 ENVIRONMENT:
   INVOX_LOG                       silent | error | warn | info | debug   (default: info)
-  INVOX_BASE_URL                  OpenAI-compatible base URL                              (stage 2+)
-  INVOX_MODEL                     Default model name passed to provider                   (stage 2+)
-  INVOX_MODELS                    Comma-separated selectable models                       (stage 8+)
-  INVOX_API_KEY                   Provider API key                                        (stage 2+)
-  INVOX_PROMPT_TEMPLATES_FILE     Path to JSON file of system-prompt templates            (stage 9+)
+  INVOX_BASE_URL                  OpenAI-compatible base URL
+  INVOX_MODEL                     Default model name passed to provider
+  INVOX_MODELS                    Comma-separated selectable models
+  INVOX_API_KEY                   Provider API key
+  INVOX_PROMPT_TEMPLATES_FILE     Path to JSON file of system-prompt templates
   INVOX_PLUGIN_DIR                Path to plugin marketplace root (.plugins-cache.json)
 `,
   );
@@ -154,9 +153,8 @@ async function main(): Promise<void> {
     );
   }
 
-  // Wire each transport: every peer gets its own InvoxAgent instance via the
-  // factory passed to AgentSideConnection. This is the per-connection isolation
-  // promised in PLAN.md §1.
+  // 给每个 transport 接线：每个对端通过工厂获得自己的 InvoxAgent 实例，
+  // 这是 PLAN.md §1 所讲的"per-connection 隔离"。
   await Promise.all(
     transports.map((t) =>
       t.start((peer) => {
@@ -164,13 +162,13 @@ async function main(): Promise<void> {
           (conn) => new InvoxAgent(conn, provider, policy, models, configs),
           peer,
         );
-        // The connection auto-runs once constructed. We hold no reference here
-        // because the package keeps it alive via the stream readers.
+        // AgentSideConnection 构造完成即自动开跑；ACP 包通过 stream readers
+        // 把它保活，无需在这里持引用。
       }),
     ),
   );
 
-  // Graceful shutdown when stdin closes (Zed disconnects = stdin EOF).
+  // stdin 关闭即 graceful shutdown（Zed 断开 = stdin EOF）。
   if (args.transports.has("stdio")) {
     process.stdin.on("end", () => {
       log.info("stdin closed, shutting down");
@@ -178,10 +176,9 @@ async function main(): Promise<void> {
     });
   }
 
-  // B2 / K3：进程级信号处理 —— 确保任何退出路径都不留 MCP 僵尸子进程。
-  // SIGINT  : Ctrl+C
-  // SIGTERM : kill / supervisord 触发
-  // 'exit'  : Node 自然退出（无 await 余地，仅同步清理）
+  // 进程级信号处理：确保任何退出路径都不留 MCP 僵尸子进程。
+  //   SIGINT  : Ctrl+C
+  //   SIGTERM : kill / supervisord 触发
   let shuttingDown = false;
   const shutdownAndExit = async (code: number): Promise<void> => {
     if (shuttingDown) return;
@@ -204,24 +201,25 @@ async function main(): Promise<void> {
     void shutdownAndExit(143);
   });
 
-  // Keep main() alive while transports are bound. stdin reader (stdio) and
-  // WebSocketServer (ws) each hold an active handle, so the process won't
-  // exit naturally — but the explicit wait makes intent obvious.
+  // 在 transport 绑定期间保活 main()。stdio reader 和 WebSocketServer 都会
+  // 持有活动 handle，进程不会自然退出 —— 但显式 wait 让意图更清晰。
   if (transports.length > 0) {
     await new Promise<void>(() => {
-      /* transports hold the process open via their handles */
+      /* transports 通过 handle 保活进程 */
     });
   }
 }
 
 /**
- * Provider selection rules:
- *   - INVOX_MOCK=tools                     → MockToolProvider (offline tool-flow tests)
- *   - INVOX_MOCK=1                         → EchoProvider (offline; no tools)
- *   - INVOX_API_KEY + INVOX_BASE_URL set   → OpenAIProvider
- *   - otherwise                            → EchoProvider with a warn
+ * provider 选择规则：
+ *   - INVOX_MOCK=tools                     → MockToolProvider（离线 tool 测试）
+ *   - INVOX_MOCK=bad-json                  → BadJsonProvider（验证畸形 JSON 自纠错）
+ *   - INVOX_MOCK=flaky                     → FlakyProvider（注入 provider 故障）
+ *   - INVOX_MOCK=1                         → EchoProvider（离线，无 tools）
+ *   - INVOX_API_KEY + INVOX_BASE_URL 都有  → OpenAIProvider
+ *   - 其他                                  → EchoProvider，并 warn 提示
  *
- * INVOX_MODEL defaults to "gpt-4o-mini" if unset (only matters for OpenAIProvider).
+ * INVOX_MODEL 未设置时默认 "gpt-4o-mini"（仅 OpenAIProvider 路径用得到）。
  */
 function pickProvider(): LLMProvider {
   const mock = process.env["INVOX_MOCK"];
@@ -230,13 +228,11 @@ function pickProvider(): LLMProvider {
     return new MockToolProvider();
   }
   if (mock === "bad-json") {
-    // A3 / K5 验收 mock：第一轮吐畸形 JSON tool_call，第二轮自我纠错。
     log.info("provider: mock-bad-json (INVOX_MOCK=bad-json)");
     return new BadJsonProvider();
   }
   if (mock === "flaky") {
-    // A5 / K9 验收 mock：故意抛 provider 错误。具体类型由 INVOX_FLAKY_KIND
-    // 控制（429 / 500 / auth / network / mid-stream），默认 429。
+    // 故障种类由 INVOX_FLAKY_KIND 控制：429 / 500 / auth / network / mid-stream
     const kind = (process.env["INVOX_FLAKY_KIND"] ?? "429") as FlakyKind;
     log.info("provider: mock-flaky", { kind });
     return new FlakyProvider(kind);
@@ -259,10 +255,10 @@ function pickProvider(): LLMProvider {
 }
 
 /**
- * Permission policy selection (stage 5 polish):
- *   - never  (default): no permission requests; agent runs tools directly
- *   - writes: writes/execute go through session/request_permission; reads pass
- *   - always: every tool call is gated
+ * 权限策略选择：
+ *   - never  (默认)：不发起权限请求，agent 直接跑工具
+ *   - writes：write / execute 走 session/request_permission；read 直接通过
+ *   - always：每次工具调用都过权限闸门
  */
 function pickPolicy(): PermissionPolicy {
   const raw = (process.env["INVOX_PERMISSIONS"] ?? "never").toLowerCase();
@@ -272,21 +268,18 @@ function pickPolicy(): PermissionPolicy {
 }
 
 /**
- * Build the model menu advertised to ACP clients.
+ * 构造对客户端公布的 model 菜单。
  *
- * Sources (priority order):
- *   - INVOX_MODELS=id1,id2,id3   — comma-separated user-curated list
- *   - INVOX_MODEL                — falls back as the only / default entry
- *   - hard-coded "gpt-4o-mini"   — final fallback so the menu is never empty
+ * 来源（优先级从高到低）：
+ *   - INVOX_MODELS=id1,id2,id3  —— 用户自定义列表
+ *   - INVOX_MODEL                —— 唯一 / 默认条目兜底
+ *   - 写死 "gpt-4o-mini"          —— 终极兜底，保证菜单非空
  *
- * Rule: the default model is ALWAYS included in the menu (unshifted to the
- * front if missing). Otherwise a Zed user could land on a session whose
- * "currentModelId" isn't in availableModels and the dropdown would render
- * blank.
+ * 规则：默认 model **永远**出现在菜单里（不在则被 unshift 到首位）。否则 Zed
+ * 用户可能落到一个 currentModelId 不在 availableModels 的会话，UI 下拉框空白。
  *
- * Naming: `name` shown in the dropdown defaults to the modelId; we keep them
- * identical because OAI-compat providers don't surface friendly names. Users
- * who want a polished label can redefine via separate config later.
+ * name 字段默认就用 modelId —— OAI 兼容 provider 不会上报友好显示名；
+ * 想要更好看的标签可以后续单独加配置。
  */
 function pickModels(): AgentModelConfig {
   const fallback = process.env["INVOX_MODEL"] ?? "gpt-4o-mini";
@@ -301,22 +294,21 @@ function pickModels(): AgentModelConfig {
 }
 
 /**
- * Build the AgentConfigOptions surfaced as ACP `setSessionConfigOption`
- * dropdowns. Today this is the System Prompt template selector
- * (the Thinking dropdown is hard-coded inside InvoxAgent — its values
- * are dictated by the OpenAI `reasoning_effort` enum).
+ * 构造 ACP `setSessionConfigOption` 暴露的下拉项。
+ * 当前是系统提示词模板选择器（thinking 下拉硬编码在 InvoxAgent 内部，
+ * 它的取值由 OpenAI 的 reasoning_effort 枚举决定，不可配置）。
  *
- * Source order:
- *   1. `INVOX_PROMPT_TEMPLATES_FILE` — JSON array of `SystemPromptDef`s.
- *      Wins when present and parses cleanly.
- *   2. Built-in 3-template menu (default / concise / review).
+ * 来源顺序：
+ *   1. INVOX_PROMPT_TEMPLATES_FILE —— `SystemPromptDef[]` 的 JSON 文件
+ *      存在且解析成功时优先采用
+ *   2. 内置 3 模板（default / concise / review）
  *
- * Failure modes (file missing, malformed JSON, empty array) all warn
- * and fall through to the built-in defaults rather than aborting startup.
+ * 失败模式（文件缺失 / JSON 损坏 / 空数组）一律 warn 并回退到内置模板，
+ * 不让启动卡死。
  */
 function pickConfigOptions(): AgentConfigOptions {
   const systemPrompts = loadPromptTemplates();
-  const defaultId = systemPrompts[0]!.id; // Non-null: load() always returns ≥ 1 entry.
+  const defaultId = systemPrompts[0]!.id; // load() 总能返回 ≥ 1 条，可断言
   return {
     systemPrompts,
     defaultSystemPromptId: defaultId,

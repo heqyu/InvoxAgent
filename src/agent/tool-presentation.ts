@@ -1,26 +1,22 @@
-// Tool call 渲染助手 —— Phase A2.2 拆分
+// 工具调用呈现助手 —— LLM tool_call 在 ACP UI 上的渲染相关纯函数：
+//   - previewArgs       —— 给日志看的参数预览（截断长字符串）
+//   - startTitleFor     —— tool_call 通知卡片的标题；文件类工具刻意把路径
+//                          放进标题，让 Zed 的 "Go to File" 能识别
+//   - startLocationsFor —— tool_call 通知的 locations 字段，让客户端
+//                          UI 在工具运行期间高亮目标文件
 //
-// 从 agent.ts 抽出 LLM tool_call 在 ACP UI 上的呈现相关纯函数：
-//   - previewArgs —— 给日志用的参数预览（截断长字符串）
-//   - startTitleFor —— tool_call 通知卡片的标题（针对 file-touching 工具
-//     特殊处理路径，让 Zed 的 "Go to File" 能识别）
-//   - startLocationsFor —— tool_call 通知的 locations 字段，用于让客户端
-//     UI 在工具运行期间高亮目标文件
-//
-// 这些都是无副作用的纯渲染函数；它们都依赖 safeParseJSON 来安全解析 LLM
-// 提供的 tool args（畸形 JSON 时优雅降级到 fallback 文案）。
+// 这些都是无副作用的纯渲染函数，依赖 safeParseJSON 安全解析 LLM 提供的
+// 参数（畸形 JSON 时优雅降级）。
 
 import type { ParsedToolCall } from "../llm/types.js";
 import { safeParseJSON } from "./json.js";
 
 /**
- * 把 tool 的 raw args 字符串渲染成给日志看的预览。
+ * 把 tool 的 raw args 字符串渲染成日志预览。
  *
  * 策略：
  *   - 解析失败（畸形 JSON）→ 截断到 100 字符的原始字符串
- *   - 解析成功 → 把每个字符串字段截到 100 字符（"…(+N)" 标记后续字节数）
- *
- * 这是 INVOX_LOG=info / debug 级别下的可读性优化，不影响行为。
+ *   - 解析成功 → 把每个字符串字段截到 100 字符（带 "…(+N)" 长度标记）
  */
 export function previewArgs(rawArgs: string): unknown {
   const parsed = safeParseJSON(rawArgs);
@@ -41,12 +37,12 @@ export function previewArgs(rawArgs: string): unknown {
 /**
  * 为 tool_call 通知卡片选一个标题。
  *
- * 文件类工具（Read/Write/Edit）刻意忽略 LLM 自报的 description —— 我们把
- * 文件路径放在标题里，让 Zed 的 "Go to File" affordance 能正确识别点击
- * 目标。description 仍然会通过 tool result body 流给用户。
+ * 文件类工具（Read / Write / Edit）刻意忽略 LLM 自报的 description ——
+ * 把文件路径放在标题里，让 Zed 的 "Go to File" 能正确识别点击目标。
+ * description 仍会通过 tool result body 流给用户。
  *
- * Bash 用反引号包裹命令前 80 字符。Skill 显示 skill 名。其余非文件类
- * 工具回退到 LLM 提供的 description；都没有则用工具名兜底。
+ * Bash 用反引号包裹命令前 80 字符；Skill 显示 skill 名；其他非文件类工具
+ * 回退到 LLM 提供的 description；都没有则用工具名兜底。
  */
 export function startTitleFor(call: ParsedToolCall): string {
   const parsed = safeParseJSON(call.arguments);
@@ -81,7 +77,7 @@ export function startTitleFor(call: ParsedToolCall): string {
       }
     }
   }
-  // Non-file tools fall back to the LLM's free-form description.
+  // 非文件类工具回退到 LLM 提供的自由描述
   const desc =
     typeof parsed?.["description"] === "string"
       ? parsed["description"].trim()
@@ -91,10 +87,9 @@ export function startTitleFor(call: ParsedToolCall): string {
 }
 
 /**
- * Build ACP `locations` for the initial tool_call notification, so Zed's
- * "Go to File" / follow-along UI lights up while the tool is still
- * running (not just after completion). Only the file-touching tools
- * have a meaningful path at call-time.
+ * 构造首次 tool_call 通知的 ACP `locations`，让 Zed 的 "Go to File"
+ * 在工具仍在运行时就能亮起（而非等执行完再亮）。
+ * 仅文件类工具在调用时刻就能拿到有意义的路径。
  */
 export function startLocationsFor(
   call: ParsedToolCall,

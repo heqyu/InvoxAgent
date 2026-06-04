@@ -1,21 +1,19 @@
-// InvoxAgent: implements the ACP `Agent` interface.
+// InvoxAgent：实现 ACP 的 `Agent` 接口。
 //
-// One ACP connection = one InvoxAgent. One agent owns N sessions
-// (one per session/new request). Each session has its own history,
-// its own AbortController for cancellation, and its own SessionToolState
-// (read-paths set + file content cache) shared across the session's
-// tool calls.
+// 一条 ACP 连接 = 一个 InvoxAgent；一个 agent 持有 N 个 session
+// （每次 session/new 一份）。每个 session 有自己的 history、AbortController
+// 和 SessionToolState（read-paths 集合 + 文件内容缓存，跨同会话工具调用共享）。
 //
-// prompt() loop:
-//   append user msg → up to MAX_ITERATIONS:
-//     stream LLM → emit agent_message_chunks, collect tool_calls
-//     on finish:
-//       no tool_calls   → end_turn
-//       has tool_calls  → for each: emit tool_call, run, emit tool_call_update,
-//                          append tool result → continue
-//   exceeded → max_turn_requests
+// prompt() 主循环：
+//   把 user message 追加到 history → 最多 MAX_ITERATIONS 次：
+//     stream LLM → emit agent_message_chunk，收集 tool_calls
+//     finish 时：
+//       无 tool_calls → end_turn
+//       有 tool_calls → 逐个 emit tool_call、跑、emit tool_call_update、
+//                        把结果追加到 history → 继续
+//   超额 → max_turn_requests
 //
-// MAX_ITERATIONS defaults to 50; override via INVOX_MAX_ITERATIONS env.
+// MAX_ITERATIONS 默认 50，可通过 INVOX_MAX_ITERATIONS env 覆盖。
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import {
@@ -83,23 +81,14 @@ import {
 import { accumulateTurnUsage, emptyTurnUsage } from "./usage-meter.js";
 import { safeParseJSON, parseToolArguments } from "./json.js";
 import {
-  // A2.2：抽出到 ./tool-presentation.js
   previewArgs,
   startTitleFor,
   startLocationsFor,
 } from "./tool-presentation.js";
+import { humanizeTokens, contextWindowFor } from "./token-meter.js";
+import { agentVersion, maxIterations } from "./agent-helpers.js";
 import {
-  // A2.3：抽出到 ./token-meter.js
-  humanizeTokens,
-  contextWindowFor,
-} from "./token-meter.js";
-import {
-  // A2.4：抽出到 ./agent-helpers.js
-  agentVersion,
-  maxIterations,
-} from "./agent-helpers.js";
-import {
-  // A2.1：抽出到 ./system-prompt.js；agent.ts re-export 这些符号以保持
+  // system-prompt.ts 中定义的符号；agent.ts 这里 re-export 以保持
   // 外部 API（cli.ts 等）的稳定，避免破坏 import 路径。
   DEFAULT_SYSTEM_PROMPT,
   systemMessageWithMemoryAndSkills,
@@ -115,9 +104,6 @@ import {
   type ProviderErrorInfo,
 } from "./error-mapping.js";
 
-/** Read the agent package version once, cache for the process lifetime.
- *  agentVersion / maxIterations 已抽到 ./agent-helpers.ts（A2.4）。 */
-
 interface Session {
   id: string;
   cwd: string;
@@ -127,57 +113,51 @@ interface Session {
   store?: SessionStore;
   createdAt: number;
   /**
-   * Model id picked via `unstable_setSessionModel`. Undefined → fall back
-   * to the agent's default model (the first entry of `availableModels`,
-   * which is itself derived from `INVOX_MODEL`).
+   * 通过 unstable_setSessionModel 选定的 model id。
+   * undefined 时回退到 agent 默认 model（availableModels[0]，源自 INVOX_MODEL）。
    */
   selectedModel?: string;
   /**
-   * Per-session configuration option values, keyed by configId. Drives
-   * the dropdowns surfaced via ACP `setSessionConfigOption`. Values are
-   * always strings (we only emit `select` kinds for now).
+   * 按 configId 索引的会话级配置值，驱动 ACP setSessionConfigOption 的下拉项。
+   * 值类型恒为 string（当前只产出 select kind）。
    *
-   * Reserved keys (managed by InvoxAgent, see DEFAULT_CONFIG_IDS):
-   *   - "system_prompt" — id of the active system prompt template
-   *   - "thinking"      — "off" | "low" | "medium" | "high" (mapped to
-   *                        OpenAI's reasoning_effort field at request time)
+   * InvoxAgent 内部管理的保留 key（见 DEFAULT_CONFIG_IDS）：
+   *   - "system_prompt" —— 当前 system prompt 模板的 id
+   *   - "thinking"      —— "off" | "low" | "medium" | "high"
+   *                        （请求时映射到 OpenAI 的 reasoning_effort 字段）
    */
   configValues: Record<string, string>;
   /**
-   * Token accounting accumulated across all LLM calls within the current
-   * `prompt()` turn. Reset at the top of every prompt() call. Surfaced to
-   * the client right before the turn ends as an `agent_thought_chunk`
-   * with an `invox/usage` _meta extension.
+   * 当前 prompt() turn 内累计的 token 计费；进入 prompt() 时重置。
+   * turn 末尾通过 agent_thought_chunk + `invox/usage` _meta 扩展上报给客户端。
    */
   turnUsage: {
     input: number;
     output: number;
     total: number;
     calls: number;
-    /** Largest prompt_tokens seen in any single LLM call this turn —
-     *  represents the actual context-window footprint (each call re-sends
-     *  the full history, so the sum of prompt_tokens across calls is NOT
-     *  the context usage). */
+    /** 本 turn 内单次调用 prompt_tokens 的最大值 —— 实际 context 占用峰值。
+     *  每次调用都 resend 整段 history，故 SUM(prompt_tokens) ≠ context 占用，max 才是。 */
     maxPrompt: number;
-    /** Tokens served from prompt cache across all calls this turn. */
+    /** 本 turn 内所有调用 cache 命中 tokens 之和。 */
     cached: number;
-    /** Cache tokens from the call that produced maxPrompt (aligned pair). */
+    /** 与 maxPrompt 来自同一次调用的 cached tokens。 */
     maxCached: number;
   };
-  /** Wall-clock ms when prompt() started — used to compute turn elapsed. */
+  /** prompt() 起始的 wall-clock ms —— 用来算 turn 耗时。 */
   turnStartedAt: number;
-  /** MCP client manager — owns connected MCP servers for this session. */
+  /** MCP client manager —— 持有该会话连接的 MCP servers。 */
   mcpClient?: McpClientManager;
   /**
-   * 本会话生效的 hook 注册表（A4 / K6）—— 在 newSession / loadSession 时一次
-   * 加载并缓存到 session 上，prompt loop / 各 hook 触发点全部走 `session.hooks`
-   * 不再反复 `loadHooks(cwd)`。底层 `hookCache` 仍然按 cwd 缓存，但显式持有
+   * 本会话生效的 hook 注册表。在 newSession / loadSession 时一次性加载并
+   * 缓存到 session 上，prompt loop / 各 hook 触发点全部走 `session.hooks`，
+   * 不再反复 `loadHooks(cwd)`。底层 hookCache 仍按 cwd 缓存，但显式持有
    * 引用让代码意图更清晰、单测注入更容易。
    */
   hooks: HookRegistry;
   /**
-   * Persisted snapshot of the last completed turn's usage. Survives restarts
-   * so the user can see what the previous turn cost after reloadSession.
+   * 上一次完成的 turn 用量持久化快照，重启后保留，让 reloadSession 后用户
+   * 仍能看到上一轮花了多少。
    */
   lastTurnUsage?: {
     input: number;
@@ -192,43 +172,40 @@ interface Session {
   };
 }
 
-/** Configuration injected at construction time describing the model menu the
- *  user can choose from in their client. The first entry is the default. */
+/** 构造 InvoxAgent 时注入的 model 菜单配置。第一项是默认 model。 */
 export interface AgentModelConfig {
-  /** Models advertised to the client. MUST be non-empty. */
+  /** 对客户端公布的 model 列表，必须非空。 */
   available: ModelInfo[];
-  /** Default model id; must appear in `available`. Used when a session has
-   *  not yet pinned a model via `setSessionModel`. */
+  /** 默认 model id，必须在 available 中。会话尚未通过 setSessionModel 选择
+   *  model 时使用。 */
   defaultModelId: string;
 }
 
 /**
- * One row in the system-prompt menu rendered as an ACP `select`-kind
- * `SessionConfigOption` (id="system_prompt"). Picking a row replaces
- * `Session.history[0]` with `prompt`.
+ * 系统提示词菜单中的一行 —— 渲染为 ACP `select` kind 的 SessionConfigOption
+ * （id="system_prompt"）。选中某行会替换 Session.history[0] 为 prompt 文本。
  */
 export interface SystemPromptDef {
-  /** Unique stable id; used as the SessionConfigSelectOption.value. */
+  /** 唯一稳定 id，作为 SessionConfigSelectOption.value。 */
   id: string;
-  /** Human-readable label rendered in the dropdown. */
+  /** 下拉菜单显示的可读名。 */
   name: string;
-  /** Optional description shown as hover text by the client. */
+  /** 鼠标悬浮提示（可选）。 */
   description?: string;
-  /** The actual text injected as the `system` message at history[0]. */
+  /** 真正注入到 history[0] 的 system message 文本。 */
   prompt: string;
 }
 
 /**
- * Bundles every dropdown invox advertises beyond the model selector.
- * Currently: system-prompt template + thinking/reasoning level.
+ * model 选择器之外的全部下拉项配置。
+ * 当前包括：system prompt 模板。
  *
- * The thinking option is hard-coded (off/low/medium/high mapping to
- * OpenAI's `reasoning_effort`) — there's no env knob because the values
- * are fixed by the upstream API surface.
+ * thinking 选项是硬编码的（off / low / medium / high，对应 OpenAI 的
+ * reasoning_effort）—— 取值由上游 API 决定，不开 env 调参。
  */
 export interface AgentConfigOptions {
   systemPrompts: SystemPromptDef[];
-  /** Must be one of `systemPrompts[*].id`. */
+  /** 必须是 systemPrompts[*].id 之一。 */
   defaultSystemPromptId: string;
 }
 
@@ -243,8 +220,7 @@ export class InvoxAgent implements Agent {
   private availableModelIds: Set<string>;
   private configs: AgentConfigOptions;
   private systemPromptById: Map<string, SystemPromptDef>;
-  /** Tracks whether syncWithZedThreads has already run for this agent
-   *  lifetime. We want it to fire exactly once, not per-session. */
+  /** syncWithZedThreads 在 agent 生命周期内只跑一次，与 session 数量解耦。 */
   private syncedZed = false;
 
   constructor(
@@ -257,9 +233,8 @@ export class InvoxAgent implements Agent {
     this.conn = conn;
     this.provider = provider;
     this.policy = policy;
-    // Sensible fallback when callers (e.g. unit tests) don't pass a config:
-    // synthesize a single-entry menu from the provider name so types stay
-    // coherent. CLI always passes a real config.
+    // 调用方（如单元测试）没传 model 配置时给个合理兜底：
+    // 用 provider name 合成单条菜单，保证类型不出错。CLI 路径总会传真值。
     this.models =
       models && models.available.length > 0
         ? models
@@ -271,13 +246,12 @@ export class InvoxAgent implements Agent {
       this.models.available.map((m) => m.modelId),
     );
     if (!this.availableModelIds.has(this.models.defaultModelId)) {
-      // Defensive: ensure default is reachable. Not expected to fire in
-      // normal use because cli.ts unshifts the default.
+      // 防御性：保证默认 model 一定可达。正常路径 cli.ts 已 unshift 默认值。
       this.availableModelIds.add(this.models.defaultModelId);
     }
 
-    // configs default: the original SYSTEM_PROMPT as a single "default" row.
-    // CLI always passes a richer config, but unit tests can omit.
+    // 配置兜底：原 SYSTEM_PROMPT 作为单条 "default"。CLI 总会传更丰富的配置，
+    // 单测可省略。
     this.configs =
       configs && configs.systemPrompts.length > 0
         ? configs
@@ -291,8 +265,7 @@ export class InvoxAgent implements Agent {
       this.configs.systemPrompts.map((p) => [p.id, p]),
     );
     if (!this.systemPromptById.has(this.configs.defaultSystemPromptId)) {
-      // Same defensive fallback as availableModelIds: surface a sane default
-      // if the caller's config disagrees with itself.
+      // 同 availableModelIds 的防御性兜底：调用方配置自相矛盾时取首项。
       const first = this.configs.systemPrompts[0]!;
       this.configs.defaultSystemPromptId = first.id;
     }
@@ -316,7 +289,7 @@ export class InvoxAgent implements Agent {
           delete: {},
         },
         promptCapabilities: {
-          image: true, // now we support image_url via OpenAI content-part array
+          image: true, // 现已支持 image_url（OpenAI content-part 数组）
           audio: false,
           embeddedContext: false,
         },
@@ -365,12 +338,11 @@ export class InvoxAgent implements Agent {
     this.sessions.set(id, session);
     log.info("session created", { id, cwd: params.cwd });
 
-    // Connect to MCP servers defined in .claude/.mcp.json.
-    // Graceful degradation: if config is missing or any server fails,
-    // the session continues without MCP tools.
+    // 连接 .claude/.mcp.json 中定义的 MCP servers。
+    // 优雅降级：配置缺失或某 server 启动失败，会话仍可继续，只是没 MCP 工具。
     await this.initMcpForSession(session);
 
-    // Fire SessionStart hooks (non-blocking, best-effort).
+    // 触发 SessionStart hook（不阻塞，best-effort）
     runSessionStart(session.hooks, {
       hook_event_name: "SessionStart",
       ...this.hookBase(session),
@@ -382,16 +354,13 @@ export class InvoxAgent implements Agent {
       );
     });
 
-    // Advertise available skills as `/` commands in Zed's UI.
+    // 把可用 skill 作为 `/` 命令通知 Zed 的 UI。
     //
-    // IMPORTANT: Must be deferred to the next macrotask. The ACP SDK's
-    // Connection.writeQueue serialises writes — if we call sendMessage()
-    // (for the notification) before processMessage() calls sendMessage()
-    // (for the session/new response), the notification lands on the wire
-    // BEFORE the response. Clients that process messages in arrival order
-    // then silently drop the notification because the session doesn't
-    // exist yet. Deferring via setTimeout(fn, 0) ensures the response is
-    // queued first (microtask), then the notification (macrotask).
+    // **重要**：必须延后到下一个宏任务发送。ACP SDK 的 Connection.writeQueue
+    // 把写出顺序串行化 —— 如果在 processMessage() 调 sendMessage()（响应 session/new）
+    // 之前我们就调 sendMessage()（发通知），通知会出现在响应之前。客户端按到达
+    // 顺序处理时会因 session 还不存在而静默丢弃通知。setTimeout(fn, 0) 把通知
+    // 排到响应（微任务）之后的宏任务，从而保证响应先走。
     setTimeout(() => this.sendAvailableCommands(session).catch(() => {}), 0);
 
     return {
@@ -419,8 +388,8 @@ export class InvoxAgent implements Agent {
       configValues: snapshot.configValues,
     });
 
-    // Restore configValues, dropping any keys whose values are no longer
-    // valid (e.g. user narrowed INVOX_PROMPT_TEMPLATES_FILE since last save).
+    // 恢复 configValues，丢掉本版本不再合法的 key（例如用户上次保存后
+    // 把 INVOX_PROMPT_TEMPLATES_FILE 收窄了）。
     const restoredConfigValues: Record<string, string> = {
       system_prompt: this.configs.defaultSystemPromptId,
       thinking: "off",
@@ -432,8 +401,7 @@ export class InvoxAgent implements Agent {
         } else if (k === "thinking" && THINKING_VALUES.has(v)) {
           restoredConfigValues[k] = v;
         }
-        // Unknown configIds are silently dropped — forward-compat for old
-        // clients that wrote values from a richer build.
+        // 未知 configId 静默丢弃 —— 让旧版本写入的新 key 兼容向前
       }
     }
 
@@ -448,9 +416,8 @@ export class InvoxAgent implements Agent {
       },
       store,
       createdAt: snapshot.createdAt,
-      // Restore the picked model only if the disk value still appears in our
-      // current menu. If the user has since narrowed INVOX_MODELS, fall
-      // through to default rather than honor an unavailable id.
+      // 仅当磁盘上的 selectedModel 仍在当前菜单里才恢复；
+      // 用户后来收窄了 INVOX_MODELS 时回退默认，而非沿用不存在的 id。
       selectedModel:
         snapshot.selectedModel &&
         this.availableModelIds.has(snapshot.selectedModel)
@@ -464,11 +431,11 @@ export class InvoxAgent implements Agent {
     };
     this.sessions.set(session.id, session);
 
-    // Connect to MCP servers defined in .claude/.mcp.json.
+    // 连接 MCP servers（同 newSession）
     await this.initMcpForSession(session);
 
-    // Refresh the system prompt with the current skill list — the persisted
-    // history[0] may have a stale version (or none) from a previous session.
+    // 用当前 skill 列表刷新 system prompt —— 持久化的 history[0] 可能是
+    // 上一次会话留下的旧版本（或没有）。
     if (restoredConfigValues.system_prompt) {
       const def = this.systemPromptById.get(restoredConfigValues.system_prompt);
       if (def) {
@@ -481,18 +448,16 @@ export class InvoxAgent implements Agent {
 
     await this.replayHistory(session);
 
-    // Advertise available skills as `/` commands in Zed's UI.
-    // Same deferred-send pattern as newSession() — see comment there.
+    // 同 newSession，延后一次宏任务发 available commands
     setTimeout(() => this.sendAvailableCommands(session).catch(() => {}), 0);
 
-    // Send last turn usage AFTER replayHistory so the agent_thought_chunk
-    // renders at the bottom of the thread (after the last message), which
-    // is where users expect to see it.
+    // lastTurnUsage 在 replayHistory **之后**发，让 agent_thought_chunk 渲染
+    // 在线程末尾（最后一条消息之后），符合用户预期。
     if (session.lastTurnUsage) {
       const lu = session.lastTurnUsage;
       const used = lu.maxPrompt + lu.output;
 
-      // 1. usage_update for the toolbar chip
+      // 1. 工具栏小芯片
       await this.conn.sessionUpdate({
         sessionId: session.id,
         update: {
@@ -502,7 +467,7 @@ export class InvoxAgent implements Agent {
         },
       });
 
-      // 2. agent_thought_chunk so the usage text appears in the thread
+      // 2. agent_thought_chunk 让 usage 文案出现在线程里
       const ctxFmt = humanizeTokens(used);
       const sizeFmt = humanizeTokens(contextWindowFor(lu.model));
       const elapsedSec = lu.elapsedMs
@@ -533,23 +498,21 @@ export class InvoxAgent implements Agent {
   }
 
   /**
-   * Handle ACP `session/delete`. Called by the client (e.g. Zed) when the
-   * user deletes a thread from the session list. We remove the persisted
-   * JSON file from `<cwd>/.invox/sessions/<id>.json` so the two sides
-   * stay in sync.
+   * 处理 ACP `session/delete`。客户端（如 Zed）在用户删除一条线程时调用。
+   * 我们同步删除磁盘上的 `<cwd>/.invox/sessions/<id>.json`，让两边状态一致。
    */
   async unstable_deleteSession(
     params: DeleteSessionRequest,
   ): Promise<DeleteSessionResponse> {
-    // Try all known sessions first (in-memory).
+    // 优先在内存中查找
     const session = this.sessions.get(params.sessionId);
     if (session) {
-      // B1 / B2 / K3：abort 进行中的 prompt + 释放 MCP 池引用。
-      // abort 不抛错（AbortController 多次 abort 是 no-op）。
+      // abort 进行中的 prompt + 释放 MCP 池引用。
+      // abort 多次调是 no-op，不会抛错。
       try {
         session.abort.abort();
       } catch {
-        // already aborted；忽略
+        // already aborted
       }
       await this.releaseSessionMcp(session);
       const s = new SessionStore(session.cwd);
@@ -560,10 +523,8 @@ export class InvoxAgent implements Agent {
         cwd: session.cwd,
       });
     } else {
-      // Session not in memory — attempt to delete from disk using the cwd
-      // from the session file itself. We don't know cwd at this point, so
-      // we scan the store root. This is only reached when the agent was
-      // restarted between the load and the delete.
+      // 不在内存里 —— 我们没法直接知道 cwd，扫一下 store root。
+      // 这条路径仅在 agent 在 load 与 delete 之间重启过时进入。
       const scanRoots = [process.cwd()];
       const envOverride = process.env["INVOX_SESSION_DIR"];
       if (envOverride) scanRoots.unshift(envOverride);
@@ -582,11 +543,9 @@ export class InvoxAgent implements Agent {
   }
 
   /**
-   * Handle ACP `session/set_model`. Renamed to `unstable_setSessionModel`
-   * in the @agentclientprotocol/sdk@0.23 API (the protocol method name on
-   * the wire is unchanged; only the JS handler name carries the
-   * `unstable_` prefix because the spec still gates this behind
-   * `unstable_session_model`).
+   * 处理 ACP `session/set_model`。在 SDK 0.23 中改名为 `unstable_setSessionModel`
+   * （wire 上的 method 名没变，仅 JS 处理器加 `unstable_` 前缀，因为 spec
+   * 仍把该能力放在 `unstable_session_model` 后面）。
    */
   async unstable_setSessionModel(
     params: SetSessionModelRequest,
@@ -603,28 +562,24 @@ export class InvoxAgent implements Agent {
       sessionId: session.id,
       modelId: params.modelId,
     });
-    // Persist immediately so a crash before the next prompt() doesn't lose
-    // the user's choice.
+    // 立即落盘，避免 next prompt() 之前崩溃丢失用户选择
     this.persist(session);
     return {};
   }
 
   /**
-   * Handle ACP `session/set_config_option`. Powers the custom dropdowns
-   * advertised via NewSessionResponse.configOptions:
+   * 处理 ACP `session/set_config_option`，驱动 NewSessionResponse.configOptions
+   * 公布的自定义下拉：
    *
-   *   - `system_prompt` — replaces `Session.history[0]` with the chosen
-   *     template's prompt. Existing user/assistant messages remain
-   *     unchanged; the new prompt only influences turns that haven't
-   *     started yet (next user message onward).
+   *   - `system_prompt` —— 替换 Session.history[0] 为模板的 prompt。已有的
+   *     user / assistant 消息保持不动；新 prompt 仅影响后续轮次。
    *
-   *   - `thinking` — stored as a string; the value is mapped to OpenAI's
-   *     `reasoning_effort` field at request time in `runOneIteration`.
+   *   - `thinking` —— 字符串值在 runOneIteration 时映射到 OpenAI 的
+   *     reasoning_effort。
    *
-   * Per ACP spec the response carries the FULL refreshed list — even if
-   * only one option changed — so the client can re-render the whole
-   * toolbar without a separate notification. We also persist immediately
-   * to survive a crash before the next prompt().
+   * 按 ACP 规范，响应携带"完整刷新后的 options 列表"——即使只有一项变化也全
+   * 量回送，让客户端能整段 re-render 工具栏，无需额外通知。同时立即落盘以
+   * 抗 next prompt() 之前的崩溃。
    */
   async setSessionConfigOption(
     params: SetSessionConfigOptionRequest,
@@ -632,9 +587,8 @@ export class InvoxAgent implements Agent {
     const session = this.sessions.get(params.sessionId);
     if (!session) throw new Error(`unknown sessionId: ${params.sessionId}`);
 
-    // We only emit `select`-kind options, so the value MUST be a string.
-    // The protocol's union admits `boolean` too, but rejecting it here
-    // keeps the failure mode loud rather than silently coercing.
+    // 我们只 emit `select` kind，因此 value 必须是 string。
+    // 协议的 union 还接受 boolean，这里显式拒绝以保持失败响亮，避免静默强转。
     if (typeof params.value !== "string") {
       throw new Error(
         `configId ${params.configId}: only string-valued (select) options are supported`,
@@ -643,17 +597,17 @@ export class InvoxAgent implements Agent {
     const value: string = params.value;
 
     if (params.configId === "model") {
-      // Re-expose model switching through the config option path so it
-      // works when configOptions replaces the native model_selector in Zed's
-      // toolbar (they're mutually exclusive — see thread_view.rs:3811).
+      // 通过 config option 路径再暴露一次 model 切换：当 configOptions 被填充时
+      // Zed 的工具栏会用 config_options_view 替代原生 model_selector
+      // （二者互斥，见 thread_view.rs:3811）。我们把 model 重新作为
+      // 一等 SessionConfigOption(category:"model") 暴露，让用户不丢失换 model 的能力。
       if (!this.availableModelIds.has(value)) {
         throw new Error(
           `unknown model value: ${value} (available: ${[...this.availableModelIds].join(", ")})`,
         );
       }
       session.selectedModel = value;
-      // Reflect the change in configValues so configOptionsFor() returns
-      // the new currentValue immediately.
+      // 同步到 configValues，让 configOptionsFor 返回新的 currentValue
       session.configValues.model = value;
     } else if (params.configId === "system_prompt") {
       const def = this.systemPromptById.get(value);
@@ -663,8 +617,7 @@ export class InvoxAgent implements Agent {
         );
       }
       session.configValues.system_prompt = value;
-      // Replace history[0] in place — by construction of newSession /
-      // loadSession that slot is always a system message.
+      // 就地替换 history[0]：newSession / loadSession 构造保证该位永远是 system message
       session.history[0] = systemMessageWithMemoryAndSkills(
         def.prompt,
         session.cwd,
@@ -696,8 +649,7 @@ export class InvoxAgent implements Agent {
     if (!session) throw new Error(`unknown sessionId: ${params.sessionId}`);
 
     session.abort = new AbortController();
-    // Reset turn-level token accounting. We deliberately do NOT carry usage
-    // across turns — the per-turn box matches what the user just asked for.
+    // 重置本 turn 的 token 计费 —— 不跨 turn 累加，per-turn 数字才对得上"用户刚问的这次"
     session.turnUsage = emptyTurnUsage();
     session.turnStartedAt = Date.now();
 
@@ -709,8 +661,7 @@ export class InvoxAgent implements Agent {
       model: session.selectedModel ?? this.models.defaultModelId,
     });
 
-    // Run UserPromptSubmit hooks — plugins can inject additional context
-    // or block the prompt entirely.
+    // 跑 UserPromptSubmit hook —— 插件可注入额外 context 或彻底拦下 prompt
     const submitResult = await runUserPromptSubmit(session.hooks, {
       hook_event_name: "UserPromptSubmit",
       ...this.hookBase(session),
@@ -722,8 +673,7 @@ export class InvoxAgent implements Agent {
       return { stopReason: "end_turn" };
     }
 
-    // Merge hook-provided systemMessage into the system prompt
-    // for this turn only (not persisted).
+    // 把 hook 提供的 systemMessage 仅本轮合并进 system prompt（不持久化）
     if (submitResult.systemMessage) {
       const sys = session.history[0];
       const prefix =
@@ -748,20 +698,20 @@ export class InvoxAgent implements Agent {
       | "max_turn_requests"
       | "refusal" = "max_turn_requests";
     /**
-     * B4 / Phase B：refusal 时携带 ProviderErrorInfo，最终落到 PromptResponse
-     * 的 _meta["invox/error"]。给 ACP 客户端一个可机读的错误根因，
-     * 同时不破坏向后兼容（_meta 是协议官方扩展点）。
+     * refusal 时携带 ProviderErrorInfo，最终落到 PromptResponse 的
+     * _meta["invox/error"]。给 ACP 客户端一个可机读的错误根因，同时不破坏
+     * 向后兼容（_meta 是协议官方扩展点）。
      */
     let refusalInfo: ProviderErrorInfo | undefined;
     const hookBase = this.hookBase(session);
-    // Mirrors Claude Code: true only after a Stop hook actually blocked and the
-    // loop continued. Reset to false when the hook放行 or on first call.
+    // 与 Claude Code 一致：只有当 Stop hook 真正阻塞过、loop 继续了，下一次
+    // Stop hook 调用才置 true；hook 放行或首次调用都为 false。
     let stopHookActive = false;
     try {
       for (let iter = 0; iter < max; iter++) {
         const result = await this.runOneIteration(session);
         if (result.kind === "stop") {
-          // refusal：直接收尾，不跑 Stop hook（错误流已经流出，再跑 hook
+          // refusal：直接收尾，不跑 Stop hook（错误流已经发出，再跑 hook
           // 容易掩盖根因）
           if (result.reason === "refusal") {
             stopHookActive = false;
@@ -769,9 +719,8 @@ export class InvoxAgent implements Agent {
             refusalInfo = result.error;
             break;
           }
-          // Only fire Stop hook on natural end_turn — cancelled and max_iterations
-          // go straight through (matches Claude Code: Stop hook only runs when the
-          // model naturally decides to stop).
+          // 仅 end_turn 触发 Stop hook —— cancelled 和 max_iterations 直接跳过
+          // （与 Claude Code 一致：只有模型自然停下时才跑）
           if (result.reason === "end_turn") {
             const stopResult = await runStop(session.hooks, {
               hook_event_name: "Stop",
@@ -815,9 +764,9 @@ export class InvoxAgent implements Agent {
         log.warn("prompt: hit max iterations", { sessionId: session.id, max });
       }
     } catch (err) {
-      // A5 / K9：兜底 catch —— prompt() 必须始终返回合法 PromptResponse。
-      // 任何 runOneIteration 之外的意外（hook 同步异常、stream 写失败、
-      // 其它编程错误）都映射成 refusal，避免裸 RPC 错误漏出去。
+      // 兜底 catch：prompt() 必须始终返回合法 PromptResponse。
+      // runOneIteration 之外的意外（hook 同步异常、stream 写失败等）都
+      // 映射成 refusal，避免裸 RPC 错误漏出去。
       const classified = classifyProviderError(err);
       stopReason = classified.kind === "abort" ? "cancelled" : "refusal";
       if (classified.kind === "refusal") {
@@ -832,9 +781,8 @@ export class InvoxAgent implements Agent {
             : "abort signaled at top level",
       });
     } finally {
-      // Always emit a usage summary (even on cancel / max iterations) so the
-      // user sees what the partial turn cost. Best-effort: a failure to send
-      // must not hide the underlying stopReason.
+      // 任何收尾路径（含 cancel / max iterations）都尽力上报一次 usage，
+      // 让用户看到 partial turn 花了多少。best-effort：上报失败不应掩盖 stopReason。
       try {
         await this.reportTurnUsage(session, stopReason);
       } catch (err) {
@@ -845,17 +793,14 @@ export class InvoxAgent implements Agent {
       }
       this.persist(session);
     }
-    // Build a PromptResponse with the optional `usage` field. In
-    // @agentclientprotocol/sdk@0.23 this is a typed field on PromptResponse
-    // (used to require an `as unknown as` cast under the deprecated
-    // @zed-industries package). Zed's acp_thread.rs:2504 pulls these
-    // tokens into thread.token_usage when AcpBetaFeatureFlag is on,
-    // redundantly with the SessionUpdate::UsageUpdate path. Carrying
-    // both maximizes the chance the bottom-bar token chip lights up.
+    // 构造带可选 usage 字段的 PromptResponse。在 SDK 0.23 中 usage 是 PromptResponse
+    // 的强类型字段（旧的 @zed-industries 包还需要 cast）。Zed 的 acp_thread.rs:2504
+    // 把这些 token 拉进 thread.token_usage（受 AcpBetaFeatureFlag 控制），
+    // 与 SessionUpdate::UsageUpdate 路径冗余 —— 两条都发能最大化点亮底栏 token chip 的概率。
     //
-    // B4：refusal 时往 _meta["invox/error"] 塞 ProviderErrorInfo —— ACP
-    // 协议明确把 _meta 列为扩展点（types.gen.d.ts:3856-3866），客户端要
-    // 看就能机读，不看也不破坏 stopReason 的标准语义。
+    // refusal 时往 _meta["invox/error"] 塞 ProviderErrorInfo —— ACP 协议把
+    // _meta 列为扩展点（types.gen.d.ts:3856-3866），客户端识别就能机读，
+    // 不识别也不破坏 stopReason 的标准语义。
     const u = session.turnUsage;
     const meta = refusalInfo
       ? { "invox/error": serializeRefusalForMeta(refusalInfo) }
@@ -876,11 +821,10 @@ export class InvoxAgent implements Agent {
   }
 
   async cancel(params: CancelNotification): Promise<void> {
-    // CHOICE: abort every active session for this connection. The ACP cancel
-    // notification doesn't carry a sessionId (it's a broadcast), so we stop
-    // all in-flight prompt() loops. Each loop checks signal.aborted at the
-    // top of runOneIteration and after the stream, so the abort propagates
-    // within one iteration boundary.
+    // 设计选择：abort 当前连接下所有活跃 session。ACP cancel 是广播通知，
+    // 不带 sessionId，所以我们停掉所有正在跑的 prompt() loop。每个 loop
+    // 在 runOneIteration 顶部和 stream 结束后都会检查 signal.aborted，
+    // 因此 abort 在一次 iteration 边界内就会扩散下去。
     for (const session of this.sessions.values()) {
       if (!session.abort.signal.aborted) {
         session.abort.abort();
@@ -889,19 +833,12 @@ export class InvoxAgent implements Agent {
     }
   }
 
-  // ── private ──────────────────────────────────────────────────────────
+  // ── 私有方法 ────────────────────────────────────────────────────
 
   /**
-   * Build user message content from ACP ContentBlocks.
-   *
-   * Returns OpenAI-compatible `UserContent` directly:
-   *   - text blocks        → { type: "text", text }
-   *   - resource_link       → { type: "text", text: "File: <path>" }  (we tell the LLM the path)
-   *   - image (with data)  → { type: "image_url", image_url: { url: "data:..." } }
-   *   - image (with uri)   → { type: "image_url", image_url: { url: uri } }
-   *   - resource (text)    → inlined as text
-   *
-   * If the result is a single text part, collapse to plain string.
+   * 跑一轮 LLM ↔ tool 往返。返回值：
+   *   - { kind: "stop", reason }   —— 终止（end_turn / cancelled / refusal）
+   *   - { kind: "continue" }       —— 还要继续（有 tool_calls 已被处理）
    */
   private async runOneIteration(
     session: Session,
@@ -915,30 +852,10 @@ export class InvoxAgent implements Agent {
     let finishReason: "stop" | "tool_calls" | "length" | "other" = "other";
 
     try {
-      // Merge invox built-in tools with MCP tools for this session.
+      // 合并 invox 内置工具与本会话 MCP 工具
       const mcpSpecs = session.mcpClient?.getToolSpecs() ?? [];
       const allTools =
         mcpSpecs.length > 0 ? [...TOOL_SPECS, ...mcpSpecs] : TOOL_SPECS;
-
-      // ── Log the full assembled context sent to the LLM ──────────
-      // System prompt lives at history[0]; tool specs are the complete
-      // merged list (built-in + MCP).  Gated behind log.isEnabled("debug")
-      // to avoid the cost of stringify when nobody is listening.
-      // if (log.isEnabled("debug")) {
-      //   const systemMsg = session.history[0];
-      //   log.debug("llm request context ▸ system prompt", {
-      //     role: systemMsg?.role,
-      //     content:
-      //       typeof systemMsg?.content === "string"
-      //         ? systemMsg.content
-      //         : JSON.stringify(systemMsg?.content),
-      //     historyLength: session.history.length,
-      //   });
-      //   log.debug("llm request context ▸ tool specs", {
-      //     count: allTools.length,
-      //     tools: allTools,
-      //   });
-      // }
 
       for await (const delta of this.provider.stream({
         messages: session.history,
@@ -975,9 +892,9 @@ export class InvoxAgent implements Agent {
         }
       }
     } catch (err) {
-      // A5 / K9：把 provider 抛出的错误映射到 ACP stopReason。AbortError 是
-      // 用户主动取消，走 cancelled；其他统一归类为 refusal 并把可读 message
-      // 通过 agent_message_chunk 告诉用户 —— 不再向 RPC 抛异常。
+      // 把 provider 抛出的错误映射到 ACP stopReason。
+      // AbortError 是用户主动取消，走 cancelled；其它统一 refusal，并通过
+      // agent_message_chunk 把可读 message 流给用户 —— 不再向 RPC 抛异常。
       const classified = classifyProviderError(err);
       if (classified.kind === "abort") {
         if (assistantText)
@@ -991,7 +908,7 @@ export class InvoxAgent implements Agent {
         ...(info.code !== undefined ? { code: info.code } : {}),
         message: info.message,
       });
-      // 如果已经流出来过部分文字，先把它存进 history 避免丢失上下文
+      // 已经流出来过部分文字时先存进 history，避免上下文丢失
       if (assistantText)
         session.history.push({ role: "assistant", content: assistantText });
       // 把错误说给用户听
@@ -1060,11 +977,9 @@ export class InvoxAgent implements Agent {
       });
       const toolStartedAt = Date.now();
 
-      // ── Tool 参数解析（A3 / K5）──────────────────────────────
-      // 旧实现：裸 JSON.parse(call.arguments) —— 一个畸形 JSON 直接挂掉
-      // 整个 prompt loop。改为容错版：解析失败 → emit failed update +
-      // 写一条 error tool message 给 LLM 自我纠错 + continue 下一个
-      // tool_call。
+      // 工具参数解析（容错版）：旧实现用裸 JSON.parse(call.arguments)，
+      // 一个畸形 JSON 就能挂掉整个 prompt loop。改为：解析失败 → emit failed
+      // update + 写一条 error tool message 给 LLM 自我纠错 + continue 下一个 tool_call。
       const argsResult = parseToolArguments(call.arguments);
       if (!argsResult.ok) {
         log.warn("tool args parse failed", {
@@ -1098,7 +1013,7 @@ export class InvoxAgent implements Agent {
       }
       const toolArgs: Record<string, unknown> = argsResult.value;
 
-      // ── PreToolUse hook ──────────────────────────────────────
+      // PreToolUse hook
       const preResult = await runPreToolUse(session.hooks, {
         hook_event_name: "PreToolUse",
         ...this.hookBase(session),
@@ -1107,7 +1022,7 @@ export class InvoxAgent implements Agent {
       });
 
       if (!preResult.allow) {
-        // Hook denied the tool — emit a tool_call_update with denied status.
+        // hook 拒绝了 —— emit denied 状态
         const reason =
           preResult.reason ?? `Tool "${call.name}" blocked by plugin hook.`;
         await this.conn.sessionUpdate({
@@ -1131,7 +1046,6 @@ export class InvoxAgent implements Agent {
         });
         continue;
       }
-      // ── End PreToolUse hook ──────────────────────────────────
 
       const r = mcpTool
         ? await createMcpTool(mcpTool, session.mcpClient!).execute(toolArgs, {
@@ -1168,7 +1082,7 @@ export class InvoxAgent implements Agent {
             : r.resultText,
       });
 
-      // ── PostToolUse / PostToolUseFailure hooks ────────────────
+      // PostToolUse / PostToolUseFailure hook
       if (r.ok) {
         const postResult = await runPostToolUse(session.hooks, {
           hook_event_name: "PostToolUse",
@@ -1212,7 +1126,6 @@ export class InvoxAgent implements Agent {
           ];
         }
       }
-      // ── End PostToolUse hooks ─────────────────────────────────
 
       await this.conn.sessionUpdate({
         sessionId: session.id,
@@ -1238,7 +1151,7 @@ export class InvoxAgent implements Agent {
     return { kind: "continue" };
   }
 
-  /** Build the common base fields shared by every hook context. */
+  /** 构造每次 hook 通用的 base 字段。 */
   private hookBase(session: Session): {
     session_id: string;
     cwd: string;
@@ -1247,9 +1160,9 @@ export class InvoxAgent implements Agent {
     client: string;
     version: string;
   } {
-    // transcript_path: path to the session JSON file on disk.
-    // Claude Code spec: "Path to conversation JSON". Only set if the
-    // session has been persisted at least once.
+    // transcript_path：磁盘上的 session JSON 文件路径。
+    // Claude Code 规范："Path to conversation JSON"。仅当 session 至少
+    // 持久化过一次时才设。
     let transcriptPath: string | undefined;
     if (session.store) {
       transcriptPath = join(session.store.rootDir(), `${session.id}.json`);
@@ -1266,9 +1179,8 @@ export class InvoxAgent implements Agent {
   }
 
   /**
-   * Run syncWithZedThreads exactly once per agent lifetime.
-   * Called from newSession / loadSession — the two entry points that
-   * carry a cwd.
+   * 在 agent 生命周期内只跑一次 syncWithZedThreads。从 newSession /
+   * loadSession（这两个接口才有 cwd）调用。
    */
   private async maybeSyncZedThreads(cwd: string): Promise<void> {
     if (this.syncedZed) return;
@@ -1285,14 +1197,12 @@ export class InvoxAgent implements Agent {
   }
 
   /**
-   * Connect to MCP servers defined in .claude/.mcp.json and attach the
-   * manager to the session. Graceful degradation: if the config file is
-   * missing or any server fails to start, the session continues without
-   * MCP tools.
+   * 连接 .claude/.mcp.json 中定义的 MCP servers，把 manager 挂到 session 上。
+   * 优雅降级：配置缺失或某 server 启动失败，会话仍可继续，只是没 MCP 工具。
    *
-   * B1 / K3：通过 src/mcp/pool.ts 共享池获取 manager。同 cwd 的多个 session
-   * 共用一组 MCP 子进程；每次 acquire 必须在 session 销毁路径上对应一次
-   * release（见 releaseSessionMcp）。
+   * 通过 mcp/pool.ts 的共享池获取 manager —— 同 cwd 的多个 session 共用一组
+   * MCP 子进程。每次 acquire 必须在 session 销毁路径上对应一次 release（见
+   * releaseSessionMcp），否则会泄漏子进程。
    */
   private async initMcpForSession(session: Session): Promise<void> {
     try {
@@ -1311,13 +1221,13 @@ export class InvoxAgent implements Agent {
         cwd: session.cwd,
         error: (e as Error).message,
       });
-      // Session continues without MCP tools.
+      // session 在没有 MCP 工具的情况下继续
     }
   }
 
   /**
-   * 释放 session 持有的 MCP 池引用。所有 session 销毁路径（deleteSession
-   * RPC、未来的连接断开路径）都必须经过这里，避免泄漏子进程。
+   * 释放 session 持有的 MCP 池引用。所有 session 销毁路径
+   * （deleteSession RPC、未来的连接断开路径）都必须经过这里。
    */
   private async releaseSessionMcp(session: Session): Promise<void> {
     if (!session.mcpClient) return;
@@ -1332,11 +1242,11 @@ export class InvoxAgent implements Agent {
   }
 
   /**
-   * Send the current skill catalog as an ACP `available_commands_update`
-   * sessionUpdate. Zed's UI renders these as `/` commands in the input menu.
+   * 把当前 skill 目录作为 ACP `available_commands_update` 通知发出去。
+   * Zed 把它们渲染为输入框的 `/` 命令菜单。
    *
-   * Called once after session creation/load — the first point where we know
-   * the session's `cwd` and can scan `.claude/skills/`.
+   * 在 newSession / loadSession 后调一次 —— 这是我们第一次知道 cwd
+   * 并能扫 .claude/skills/ 的时机。
    */
   private async sendAvailableCommands(session: Session): Promise<void> {
     const commands = listAvailableCommands(session.cwd);
@@ -1389,7 +1299,7 @@ export class InvoxAgent implements Agent {
     session.store.save(snapshot);
   }
 
-  /** Build the SessionModelState handed back on session/new + session/load. */
+  /** 构造 session/new、session/load 响应中的 SessionModelState。 */
   private modelStateFor(session: Session): SessionModelState {
     return {
       availableModels: this.models.available,
@@ -1398,24 +1308,20 @@ export class InvoxAgent implements Agent {
   }
 
   /**
-   * Build the SessionConfigOption[] surfaced on session/new and
-   * session/load — these are what the client's bottom toolbar renders as
-   * extra dropdowns (e.g. "System Prompt", "Thinking").
+   * 构造 session/new、session/load 响应中的 SessionConfigOption[] ——
+   * 客户端底部工具栏据此渲染额外下拉项（"System Prompt"、"Thinking" 等）。
    *
-   * Categories: `system_prompt` is given as `other` (the spec-reserved
-   * "system_prompt" category isn't on the wire enum yet); `thinking`
-   * uses the spec-defined `thought_level` category so clients can pick
-   * a matching icon.
+   * category 选取：system_prompt 落在 `other` 类别（spec 保留的
+   * "system_prompt" 类别尚未进入 wire 枚举）；thinking 用 spec 定义的
+   * `thought_level` 类别，让客户端能匹配到合适图标。
    */
   private configOptionsFor(session: Session): SessionConfigOption[] {
     const opts: SessionConfigOption[] = [];
 
-    // ── Model selector ────────────────────────────────────────────────────
-    // When configOptions is populated, Zed's bottom toolbar switches from
-    // the native model_selector to config_options_view (they're mutually
-    // exclusive in thread_view.rs). We therefore re-expose model selection
-    // as a first-class `SessionConfigOption` with category "model" so the
-    // user doesn't lose the ability to switch models.
+    // Model selector ——
+    // 当 configOptions 被填充时 Zed 工具栏会切换到 config_options_view
+    // （与原生 model_selector 互斥，见 thread_view.rs）。我们把 model 选择
+    // 也作为 SessionConfigOption(category:"model") 暴露，让用户不丢失换 model 的能力。
     if (this.models.available.length > 1) {
       opts.push({
         id: "model",
@@ -1423,8 +1329,8 @@ export class InvoxAgent implements Agent {
         description: "LLM model used for the next turn.",
         category: "model",
         type: "select",
-        // Derive from selectedModel so both paths (setSessionConfigOption
-        // and unstable_setSessionModel) stay in sync.
+        // 来源 selectedModel，让两条路径（setSessionConfigOption 和
+        // unstable_setSessionModel）保持同步
         currentValue: session.selectedModel ?? this.models.defaultModelId,
         options: this.models.available.map((m) => ({
           value: m.modelId,
@@ -1433,17 +1339,15 @@ export class InvoxAgent implements Agent {
       });
     }
 
-    // ── System Prompt selector ────────────────────────────────────────────
-    // Only advertise when there is actually a choice to make; a single-
-    // template install would just clutter the UI.
+    // System Prompt selector —— 仅当真正有得选时才公布；
+    // 单模板场景公布只会徒增 UI 杂乱
     if (this.configs.systemPrompts.length > 1) {
       opts.push({
         id: "system_prompt",
         name: "System Prompt",
         description: "Switch the system prompt template for the next turn.",
-        // ACP's stable categories are `mode` / `model` / `thought_level`;
-        // `system_prompt` falls through to free-form (the union admits
-        // `string` for forward-compat).
+        // ACP 的稳定 category 是 mode / model / thought_level；
+        // system_prompt 落到自由 string（union 接受 string 用于 forward-compat）
         category: "system_prompt",
         type: "select",
         currentValue:
@@ -1457,7 +1361,7 @@ export class InvoxAgent implements Agent {
       });
     }
 
-    // ── Thinking / reasoning level ────────────────────────────────────────
+    // Thinking / reasoning 强度
     opts.push({
       id: "thinking",
       name: "Thinking",
@@ -1478,37 +1382,28 @@ export class InvoxAgent implements Agent {
     return opts;
   }
 
-  /** Merge one provider-reported usage block into the session's per-turn
-   *  totals. Called from runOneIteration on `usage` deltas.
-   *
-   *  实际累加逻辑已抽到 `./usage-meter.ts`（Phase A1 / A2 prep），此处仅做委托
-   *  以保留旧调用点；新代码请直接调用 `accumulateTurnUsage`。 */
+  /**
+   * 把单次 provider 上报的 usage 块累加到 session 的 per-turn 总数。
+   * 实际累加逻辑放在 ./usage-meter.ts；本方法只是委托，旧调用点保留兼容。
+   * 新代码直接调 `accumulateTurnUsage`。
+   */
   private accumulateUsage(session: Session, usage: UsageInfo): void {
     accumulateTurnUsage(session.turnUsage, usage);
   }
 
   /**
-   * Send the per-turn token usage report.
+   * 上报本 turn 的 token usage。
    *
-   * **Two channels at once** for maximum compatibility:
+   * 兼容性双通道：
    *
-   * 1. `usage_update` — the official ACP variant from
-   *    `agent-client-protocol-schema@0.13`'s `unstable_session_usage`
-   *    feature. Zed renders this as a small chip next to the model dropdown
-   *    (the UI shown in the user's screenshot) when the `acp-beta`
-   *    feature flag is on. Schema:
-   *    `{ sessionUpdate: "usage_update", used, size, cost? }`.
-   *    The npm package `@zed-industries/agent-client-protocol@0.4.5`
-   *    doesn't have this variant in its TS union yet, so we cast through
-   *    `unknown` — the wire format is stable JSON and Zed's
-   *    `acp_thread.rs` SessionUpdate::UsageUpdate handler picks it up.
+   * 1. `usage_update` —— ACP 0.13+ `unstable_session_usage` 特性的官方变种。
+   *    Zed 在 `acp-beta` 开关开启时把它渲染成 model 下拉旁边的小芯片。
+   *    schema：`{ sessionUpdate: "usage_update", used, size, cost? }`。
    *
-   * 2. `agent_thought_chunk` (with `_meta.invox/usage`) — the legacy
-   *    fallback. Zed renders this in the collapsed "Thinking" block, so
-   *    the user sees the count even with `acp-beta` off.
+   * 2. `agent_thought_chunk`（带 `_meta.invox/usage`）—— 兜底渲染。
+   *    Zed 把它折叠到 "Thinking" 块里，即便 acp-beta 关着用户也能看到计数。
    *
-   * Both are silenced when the provider didn't yield usage at all
-   * (e.g. EchoProvider).
+   * provider 没有 yield usage（如 EchoProvider）时两条都跳过。
    */
   private async reportTurnUsage(
     session: Session,
@@ -1519,11 +1414,10 @@ export class InvoxAgent implements Agent {
     const model = session.selectedModel ?? this.models.defaultModelId;
     const partial = stopReason !== "end_turn";
 
-    // ── 1. Official usage_update (gated by Zed's acp-beta feature flag) ──
+    // 1. 官方 usage_update（受 Zed acp-beta 控制）
     const contextWindow = contextWindowFor(model);
-    // Use maxPrompt as the context footprint — each LLM call re-sends the
-    // full history, so the SUM of prompt_tokens across calls (u.input) is a
-    // billing metric, not the actual context window occupancy.
+    // 用 maxPrompt 作为 context 占用 —— 每次 LLM 调用都 resend 完整 history，
+    // SUM(prompt_tokens) 是 billing 维度，不是 context 占用维度。
     const used = u.maxPrompt + u.output;
     await this.conn.sessionUpdate({
       sessionId: session.id,
@@ -1534,18 +1428,17 @@ export class InvoxAgent implements Agent {
       },
     });
 
-    // ── 2. Compute elapsed time for this turn ──
+    // 2. 算本 turn 耗时
     const elapsedMs =
       session.turnStartedAt > 0 ? Date.now() - session.turnStartedAt : 0;
     const elapsedSec = (elapsedMs / 1000).toFixed(1);
 
-    // ── 3. Visible-today fallback: agent_thought_chunk + _meta extension ──
+    // 3. 兜底通道：agent_thought_chunk + _meta 扩展
     const ctxFmt = humanizeTokens(used);
     const sizeFmt = humanizeTokens(contextWindow);
-    // Show cache hit ratio for the largest-context call. maxCached and
-    // maxPrompt come from the same call (aligned in accumulateUsage), so
-    // the ratio is meaningful. Clamp to 100% to guard against provider
-    // bugs that report cached > prompt.
+    // 显示最大 context 那一次的 cache 命中率。maxCached 与 maxPrompt 保证
+    // 来自同一调用（accumulateUsage 中对齐），比例有意义。
+    // 上限 100% 防 provider bug 上报 cached > prompt。
     const cacheHint =
       u.maxCached > 0 && u.maxPrompt > 0
         ? ` · cache ${Math.round((u.maxCached / u.maxPrompt) * 100)}%`
@@ -1580,7 +1473,7 @@ export class InvoxAgent implements Agent {
       },
     });
 
-    // ── 4. Persist lastTurnUsage so it survives restarts ──
+    // 4. 持久化 lastTurnUsage 供重启后展示
     session.lastTurnUsage = {
       input: u.input,
       output: u.output,
@@ -1594,6 +1487,10 @@ export class InvoxAgent implements Agent {
     };
   }
 
+  /**
+   * loadSession 时把磁盘上的 history "重放"给客户端，让 UI 能恢复历史消息和
+   * 工具调用卡片。仅做 UI 重建，不重新跑工具。
+   */
   private async replayHistory(session: Session): Promise<void> {
     const toolResultById = new Map<string, LLMMessage>();
     for (const m of session.history) {
@@ -1670,6 +1567,3 @@ export class InvoxAgent implements Agent {
     }
   }
 }
-
-
-

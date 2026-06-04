@@ -1,13 +1,12 @@
-// Plugin loader — scans plugin directories for skills (SKILL.md files).
+// Plugin 加载器 —— 在每个已解析的 plugin 目录下扫描 SKILL.md。
 //
-// Plugin list comes from the discovery module (which reads plugins.json
-// from user or project level). This file only handles the skill-specific
-// scanning within each resolved plugin directory.
+// plugin 列表来自 discovery（读 plugins.json），本文件只负责单个 plugin
+// 内部的 skill 扫描。
 //
-// Plugin directory layout:
-//   <path>/
-//     .claude-plugin/plugin.json    — manifest (name, version, ...)
-//     skills/<name>/SKILL.md        — skill definitions
+// plugin 目录布局：
+//   <root>/
+//     .claude-plugin/plugin.json   — 清单（name / version / ...）
+//     skills/<name>/SKILL.md       — skill 定义
 
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -19,12 +18,7 @@ const MANIFEST_DIR = ".claude-plugin";
 const MANIFEST_FILE = "plugin.json";
 const SKILL_FILE = "SKILL.md";
 
-// ── Plugin skill type ───────────────────────────────────────────────
-
-/**
- * A resolved skill loaded from a plugin — ready to merge into the
- * skill registry.
- */
+/** 已解析的 plugin skill —— 可直接合并进 skill registry。 */
 export interface PluginSkill {
   id: string;
   source: string;
@@ -33,16 +27,12 @@ export interface PluginSkill {
   pluginRoot: string;
 }
 
-// ── Public API ──────────────────────────────────────────────────────
-
 const pluginSkillCache = new Map<string, Map<string, PluginSkill>>();
 
 /**
- * Load all plugin-provided skills for the given cwd.
- *
- * Plugin list comes from discoverDirs() (reads plugins.json).
- * Within a plugin, skills can be individually toggled via the
- * skills field in plugins.json.
+ * 加载 cwd 对应的全部 plugin skills。
+ * plugin 列表来自 discoverDirs()；单 plugin 内可通过 plugins.json 的 skills
+ * 字段做按 skill 的精细开关。
  */
 export function loadPluginSkills(cwd: string): Map<string, PluginSkill> {
   const cached = pluginSkillCache.get(cwd);
@@ -68,7 +58,7 @@ export function clearPluginCache(cwd?: string): void {
   else pluginSkillCache.clear();
 }
 
-// ── Plugin scanning ─────────────────────────────────────────────────
+// ── plugin 扫描 ─────────────────────────────────────────────────────
 
 function loadPluginSkillsFromEntry(
   plugin: PluginEntry,
@@ -103,7 +93,7 @@ function loadPluginSkillsFromEntry(
       const id = entry.name;
       if (!id) continue;
 
-      // Check per-skill toggle
+      // 单 skill 开关
       if (plugin.skills) {
         const enabled = plugin.skills[id];
         if (enabled === false) {
@@ -125,11 +115,11 @@ function loadPluginSkillsFromEntry(
         });
         loaded++;
       } catch {
-        // SKILL.md missing or unreadable — skip silently
+        // SKILL.md 不存在或不可读 —— 静默跳过
       }
     }
   } catch {
-    // skillsDir read failed — skip silently
+    // skillsDir 读失败 —— 静默跳过
   }
 
   log.info("plugins: loaded", {
@@ -140,7 +130,7 @@ function loadPluginSkillsFromEntry(
   });
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────
+// ── helpers ─────────────────────────────────────────────────────────
 
 function readManifest(pluginRoot: string): { name: string } | null {
   const manifestPath = join(pluginRoot, MANIFEST_DIR, MANIFEST_FILE);
@@ -151,7 +141,7 @@ function readManifest(pluginRoot: string): { name: string } | null {
       return parsed as { name: string };
     }
   } catch {
-    // Manifest missing or malformed — not fatal
+    // 清单缺失或格式错误 —— 不致命
   }
   return null;
 }
