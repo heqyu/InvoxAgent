@@ -24,6 +24,7 @@ import { BadJsonProvider, MockToolProvider } from "./llm/mock-tools.js";
 import { OpenAIProvider } from "./llm/openai.js";
 import type { LLMProvider } from "./llm/types.js";
 import { log } from "./log.js";
+import { disposeAllMcp } from "./mcp/pool.js";
 import { StdioTransport } from "./transports/stdio.js";
 import type { Transport } from "./transports/types.js";
 import { WebSocketTransport } from "./transports/websocket.js";
@@ -173,9 +174,35 @@ async function main(): Promise<void> {
   if (args.transports.has("stdio")) {
     process.stdin.on("end", () => {
       log.info("stdin closed, shutting down");
-      process.exit(0);
+      void shutdownAndExit(0);
     });
   }
+
+  // B2 / K3：进程级信号处理 —— 确保任何退出路径都不留 MCP 僵尸子进程。
+  // SIGINT  : Ctrl+C
+  // SIGTERM : kill / supervisord 触发
+  // 'exit'  : Node 自然退出（无 await 余地，仅同步清理）
+  let shuttingDown = false;
+  const shutdownAndExit = async (code: number): Promise<void> => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    try {
+      await disposeAllMcp();
+    } catch (e) {
+      log.warn("disposeAllMcp failed", {
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+    process.exit(code);
+  };
+  process.on("SIGINT", () => {
+    log.info("SIGINT received");
+    void shutdownAndExit(130);
+  });
+  process.on("SIGTERM", () => {
+    log.info("SIGTERM received");
+    void shutdownAndExit(143);
+  });
 
   // Keep main() alive while transports are bound. stdin reader (stdio) and
   // WebSocketServer (ws) each hold an active handle, so the process won't

@@ -64,8 +64,8 @@ import {
 import { FileCache } from "../tools/cache.js";
 import { kindFromTier } from "../tools/permissions.js";
 import { listAvailableCommands } from "../tools/skill.js";
-import { McpClientManager } from "../mcp/client.js";
-import { loadMcpConfig } from "../mcp/config.js";
+import type { McpClientManager } from "../mcp/client.js";
+import { acquireMcp, releaseMcp } from "../mcp/pool.js";
 import { createMcpTool } from "../mcp/tool.js";
 import { getTool, TOOL_SPECS } from "../tools/registry.js";
 import { executeTool } from "../tools/router.js";
@@ -543,15 +543,14 @@ export class InvoxAgent implements Agent {
     // Try all known sessions first (in-memory).
     const session = this.sessions.get(params.sessionId);
     if (session) {
-      // Disconnect MCP servers before cleanup.
-      if (session.mcpClient) {
-        session.mcpClient.disconnect().catch((e) => {
-          log.warn("mcp disconnect error on session delete", {
-            sessionId: params.sessionId,
-            error: (e as Error).message,
-          });
-        });
+      // B1 / B2 / K3：abort 进行中的 prompt + 释放 MCP 池引用。
+      // abort 不抛错（AbortController 多次 abort 是 no-op）。
+      try {
+        session.abort.abort();
+      } catch {
+        // already aborted；忽略
       }
+      await this.releaseSessionMcp(session);
       const s = new SessionStore(session.cwd);
       s.delete(params.sessionId);
       this.sessions.delete(params.sessionId);
@@ -1271,14 +1270,15 @@ export class InvoxAgent implements Agent {
    * manager to the session. Graceful degradation: if the config file is
    * missing or any server fails to start, the session continues without
    * MCP tools.
+   *
+   * B1 / K3：通过 src/mcp/pool.ts 共享池获取 manager。同 cwd 的多个 session
+   * 共用一组 MCP 子进程；每次 acquire 必须在 session 销毁路径上对应一次
+   * release（见 releaseSessionMcp）。
    */
   private async initMcpForSession(session: Session): Promise<void> {
     try {
-      const config = loadMcpConfig(session.cwd);
-      if (!config) return;
-      const mcp = new McpClientManager();
-      await mcp.connect(config.mcpServers);
-      if (mcp.getToolSpecs().length > 0) {
+      const mcp = await acquireMcp(session.cwd);
+      if (mcp) {
         session.mcpClient = mcp;
         log.info("mcp connected for session", {
           sessionId: session.id,
@@ -1294,6 +1294,22 @@ export class InvoxAgent implements Agent {
       });
       // Session continues without MCP tools.
     }
+  }
+
+  /**
+   * 释放 session 持有的 MCP 池引用。所有 session 销毁路径（deleteSession
+   * RPC、未来的连接断开路径）都必须经过这里，避免泄漏子进程。
+   */
+  private async releaseSessionMcp(session: Session): Promise<void> {
+    if (!session.mcpClient) return;
+    session.mcpClient = undefined;
+    await releaseMcp(session.cwd).catch((e) => {
+      log.warn("mcp pool release error", {
+        sessionId: session.id,
+        cwd: session.cwd,
+        error: (e as Error).message,
+      });
+    });
   }
 
   /**
