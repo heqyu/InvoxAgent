@@ -1,20 +1,18 @@
-// CLAUDE.md 加载器 —— 读取静态记忆文件并解析 @reference。
+// CLAUDE.md 加载器 —— **兼容性薄 shim**。
 //
-// Claude Code "memory" 体系有两级 CLAUDE.md：
-//   1. User    : ~/.claude/CLAUDE.md       （个人偏好，全局生效）
-//   2. Project : <cwd>/.claude/CLAUDE.md   （项目特定上下文）
-// Plugin 目录不支持 CLAUDE.md。
+// 历史：原本这里实现了「读 user/project 两级 CLAUDE.md + 解析 @reference + 自有 cache」
+// 现状：实现已搬到 discovery/memory-providers.ts 的 claudeMdMemoryProvider；
+//       本文件保留导出，作为旧代码（agent/system-prompt.ts、examples/smoke-claude-md.ts、
+//       第三方脚本）继续工作的薄 shim，**新代码请直接读 discoverDirs(cwd).memories**。
 //
-// CLAUDE.md 中的 `@filename` 引用按文件所在目录解析。例如
-// ~/.claude/CLAUDE.md 中的 `@RTK.md` 会读取 ~/.claude/RTK.md。
-//
-// 设计选择：只解析一层 @ 引用（被包含文件里的 @ 不再展开），
-// 行为可预测，避免循环引用。
+// 行为契约（与旧版一致）：
+//   - loadClaudeMd(cwd)        → ClaudeMdSection[]，user 在前 project 在后
+//   - 同一 cwd 两次调用返回同一引用（`r1 === r2`）—— 通过 WeakMap 投影缓存实现
+//   - clearClaudeMdCache(cwd?) → 转发到 clearDiscoveryCache，清掉 DiscoveryResult
+//     的同时 WeakMap 自然失效
 
-import { readFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
-import { log } from "../log.js";
-import { discoverDirs } from "./index.js";
+import { discoverDirs, clearDiscoveryCache } from "./index.js";
+import type { DiscoveryResult } from "./types.js";
 
 export interface ClaudeMdSection {
   /** 该段落来源 —— "user" 或 "project"。 */
@@ -23,105 +21,41 @@ export interface ClaudeMdSection {
   content: string;
 }
 
-const claudeMdCache = new Map<string, ClaudeMdSection[]>();
-
-export function clearClaudeMdCache(cwd?: string): void {
-  if (cwd) claudeMdCache.delete(cwd);
-  else claudeMdCache.clear();
-}
+/**
+ * 把 DiscoveryResult.memories（混合 provider）投影成「只看 claude-md 的」
+ * 旧形状数组。投影结果按 DiscoveryResult 实例缓存（WeakMap），保证只要
+ * discoverDirs 没被清缓存，loadClaudeMd 多次调用返回同一引用。
+ */
+const projectionCache = new WeakMap<DiscoveryResult, ClaudeMdSection[]>();
 
 /**
  * 加载并解析 user / project 两级 CLAUDE.md。
  * 返回数组（user 在前，project 在后），都不存在则返回空数组。
- * 按 cwd 缓存，本会话内重复调用零开销。
+ *
+ * **新代码不要再调本函数**：请用 `discoverDirs(cwd).memories`，可以拿到
+ * 来自其他 MemoryProvider（未来的 session-notes / RAG 等）的全部记忆。
  */
 export function loadClaudeMd(cwd: string): ClaudeMdSection[] {
-  const cached = claudeMdCache.get(cwd);
+  const result = discoverDirs(cwd);
+
+  const cached = projectionCache.get(result);
   if (cached) return cached;
 
-  const discovery = discoverDirs(cwd);
   const sections: ClaudeMdSection[] = [];
-
-  // 1. 用户级 CLAUDE.md
-  const userContent = readAndResolve(
-    join(discovery.userDir, "CLAUDE.md"),
-    discovery.userDir,
-  );
-  if (userContent) {
-    sections.push({ source: "user", content: userContent });
+  for (const m of result.memories) {
+    if (m.provider !== "claude-md") continue;
+    if (m.source !== "user" && m.source !== "project") continue;
+    sections.push({ source: m.source, content: m.content });
   }
 
-  // 2. 项目级 CLAUDE.md（优先级更高，但顺序追加在后面，由消费方决定语义）
-  const projectContent = readAndResolve(
-    join(discovery.projectDir, "CLAUDE.md"),
-    discovery.projectDir,
-  );
-  if (projectContent) {
-    sections.push({ source: "project", content: projectContent });
-  }
-
-  claudeMdCache.set(cwd, sections);
-  log.info("claude-md: loaded", {
-    cwd,
-    userFound: !!userContent,
-    projectFound: !!projectContent,
-    sectionCount: sections.length,
-  });
-
+  projectionCache.set(result, sections);
   return sections;
 }
 
 /**
- * 读 CLAUDE.md 并解析 `@filename` 引用。
- *
- * 引用相对 baseDir（CLAUDE.md 所在目录）解析；只匹配「行首（允许前导空白）
- * 的 @」，行内 `@mention` 一律保留原样。例：
- *   @RTK.md          → 读 <baseDir>/RTK.md
- *   @scripts/foo.sh  → 读 <baseDir>/scripts/foo.sh
+ * 兼容性 API —— 转发到 clearDiscoveryCache。
+ * 清掉底层 DiscoveryResult 的同时，WeakMap 投影自然随之失效。
  */
-function readAndResolve(filePath: string, baseDir: string): string | null {
-  if (!existsSync(filePath)) return null;
-
-  let raw: string;
-  try {
-    raw = readFileSync(filePath, "utf8").trim();
-  } catch (e) {
-    log.warn("claude-md: failed to read", {
-      path: filePath,
-      error: e instanceof Error ? e.message : String(e),
-    });
-    return null;
-  }
-
-  if (!raw) return null;
-
-  const resolved = raw.replace(
-    /^(\s*)@(\S[^\n]*)$/gm,
-    (_match, indent: string, refPath: string) => {
-      const refFullPath = join(baseDir, refPath);
-      try {
-        if (!existsSync(refFullPath)) {
-          log.warn("claude-md: @reference not found", {
-            ref: refPath,
-            resolved: refFullPath,
-          });
-          return `${indent}@${refPath} [file not found]`;
-        }
-        const refContent = readFileSync(refFullPath, "utf8").trim();
-        log.debug("claude-md: resolved @reference", {
-          ref: refPath,
-          bytes: refContent.length,
-        });
-        return refContent;
-      } catch (e) {
-        log.warn("claude-md: failed to read @reference", {
-          ref: refPath,
-          error: e instanceof Error ? e.message : String(e),
-        });
-        return `${indent}@${refPath} [read error]`;
-      }
-    },
-  );
-
-  return resolved;
+export function clearClaudeMdCache(cwd?: string): void {
+  clearDiscoveryCache(cwd);
 }

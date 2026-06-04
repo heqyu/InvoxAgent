@@ -13,17 +13,17 @@
 
 ---
 
-## 0. 当前快照（2026-06-05 00:40）
+## 0. 当前快照（2026-06-05 02:00）
 
 | 维度 | 状态 |
 |---|---|
 | 版本 | `0.0.1` |
-| 代码量 | ~8800 行 TS / 47 文件（B1-B4 抽 2 个新模块 + smoke 增强） |
+| 代码量 | ~8780 行 TS / 49 文件（discovery 抽出 memory-types + memory-providers） |
 | 已完成 stage | 0–8（全部 `[VERIFIED]`） |
 | 传输 | stdio + WebSocket |
 | 工具 | Read / Write / Edit / Bash / Glob / Grep / Skill + MCP 桥接 |
-| 协议外特性 | 会话持久化 / Zed thread 同步 / 模型菜单 / token 计费 / system prompt 模板 / thinking 模式 / 三层 discovery / CLAUDE.md 记忆 / 插件 + Hook / **MCP 共享池 / 连接重试 / 结构化错误** |
-| 测试 | **vitest 4.1.8**：203 个 case（170 单元 + 25 集成 + 8 其他）— 200 ✓ / 3 skip / 0 fail，22.65s |
+| 协议外特性 | 会话持久化 / Zed thread 同步 / 模型菜单 / token 计费 / system prompt 模板 / thinking 模式 / 三层 discovery / **统一记忆系统（MemoryProvider）** / 插件 + Hook / MCP 共享池 / 连接重试 / 结构化错误 |
+| 测试 | **vitest 4.1.8**：207 个 case（174 单元 + 25 集成 + 8 其他）— 204 ✓ / 3 skip / 0 fail，22.87s |
 | 已知风险 | `agent.ts` 1660+ 行 / 2 个 stale smoke / agentVersion path bug |
 
 ---
@@ -50,6 +50,7 @@
 - [x] **Discovery 模块**：三层（user / project / plugin）配置统一解析（`a5c79a5`）
 - [x] **CLAUDE.md 静态记忆 + `@reference` 解析**（`7aef1eb`）
 - [x] **System prompt 注入日期 + 平台**（`2a36f26`）
+- [x] **统一记忆系统（MemoryProvider）**：抽象 `MemorySection` + `MemoryProvider`，CLAUDE.md 改造为内置 provider；`DiscoveryResult.memories` 与 plugins/skills/hooks 对称；旧 `loadClaudeMd` 退化为薄 shim 保留兼容（2026-06-05 02:00）
 
 ---
 
@@ -131,6 +132,7 @@
 |---|---|---|
 | 风险盘点 | 拆分前禁止在 `agent.ts` 加业务代码 | 已写入 DIARY Sprint 0 复盘 |
 | 风险盘点 | `CONTEXT_WINDOW_TABLE` 硬编码，应外置为 JSON 或托管到 discovery 配置 | 影响 Phase E |
+| 架构延伸 | **MemoryProvider 注册 API（第二步）**：暴露 `registerMemoryProvider` + `retrieve(query)` 动态记忆钩子（v1 已铺好 collect() 基座，等真有第二个 provider 时再做） | 由本次 discovery/memory 重构衍生 |
 | 用户反馈 | （留空，等真实使用反馈进来） | |
 | 协议同步 | 跟踪 `@agentclientprotocol/sdk` 升级 | 当前 0.23 |
 
@@ -198,14 +200,14 @@ Backlog → 进入 Phase 表 → 挪到 Doing（≤ 3 项）→ commit（带 has
 | 指标 | 当前 | 一个月目标 |
 |---|---|---|
 | `agent.ts` 行数 | **1660+**（B4 +20：refusalInfo + _meta；A2 累计 -373） | ≤ 400（拆完类成员）—— 部分达成 |
-| 子模块数（src/agent/ + src/llm/ + src/mcp/） | **10**（agent + 7 helpers + backoff + mcp/pool） | ≥ 7 ✅ |
-| 单元测试 case 数 | **170** | ≥ 80 ✅ |
+| 子模块数（src/agent/ + src/llm/ + src/mcp/ + src/discovery/） | **13**（agent + 7 helpers + backoff + mcp/pool + discovery/{index,claude-md,memory-types,memory-providers}） | ≥ 7 ✅ |
+| 单元测试 case 数 | **174** | ≥ 80 ✅ |
 | 集成 smoke case 数 | **20**（17 ✓ / 3 skip） | 全 ≥ 90% pass ✅ |
-| `npm test` 总耗时 | 22.65s | ≤ 30s ✅ |
+| `npm test` 总耗时 | 22.87s | ≤ 30s ✅ |
 | MCP 子进程峰值 / session 数 | **1（共享池）** | 1（共享池） ✅ |
 | 长对话 OOM/turn | 偶发 | 0（C1 待设计） |
 | WS 默认鉴权 | 无 | 有（D1 落地后） |
 
 ---
 
-_最后更新：2026-06-05 00:40 ｜ Phase B 落地（B1/B2/B3/B4 全部完成；C1 待独立设计）_
+_最后更新：2026-06-05 02:00 ｜ discovery 记忆系统重构（CLAUDE.md → MemoryProvider 抽象，与 skills/hooks 对称）_

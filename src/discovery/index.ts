@@ -1,18 +1,23 @@
 // Discovery 模块 —— 三级配置目录的统一解析入口。
 //
 // 来源（低 → 高优先级）：
-//   1. User    : ~/.claude/                  (settings.json, plugins.json)
-//   2. Project : <cwd>/.claude/              (settings.json, plugins.json)
+//   1. User    : ~/.claude/                  (settings.json, plugins.json, CLAUDE.md)
+//   2. Project : <cwd>/.claude/              (settings.json, plugins.json, CLAUDE.md)
 //   3. Plugins : plugins.json 列出的目录     (hooks/hooks.json, skills/)
 //
-// 所有下游消费者（hooks / skills / MCP …）一律调 discoverDirs(cwd) 拿
-// 同一份 DiscoveryResult，不要各自再扫一遍文件系统。
+// 所有下游消费者（hooks / skills / MCP / memories …）一律调 discoverDirs(cwd)
+// 拿同一份 DiscoveryResult，不要各自再扫一遍文件系统。
+//
+// memories 字段：通过 BUILTIN_MEMORY_PROVIDERS 收集（CLAUDE.md 是第一个内置
+// provider；未来可加 session-notes / longterm / RAG 等）。详见 memory-types.ts。
 
 import { existsSync, readFileSync } from "node:fs";
 import { join, isAbsolute, resolve } from "node:path";
 import { homedir } from "node:os";
 import { log } from "../log.js";
 import type { DiscoveryResult, PluginEntry, SettingsJson } from "./types.js";
+import type { MemorySection } from "./memory-types.js";
+import { BUILTIN_MEMORY_PROVIDERS } from "./memory-providers.js";
 
 const SETTINGS_JSON = "settings.json";
 const PLUGINS_JSON = "plugins.json";
@@ -48,12 +53,16 @@ export function discoverDirs(cwd: string): DiscoveryResult {
     homedir(),
   ) ?? [];
 
+  // 3. memories —— 跑一遍所有内置 MemoryProvider，合并 + 按 priority 排序
+  const memories = collectMemories(cwd, userDir, projectDir);
+
   const result: DiscoveryResult = {
     userDir,
     projectDir,
     userSettings,
     projectSettings,
     plugins,
+    memories,
   };
 
   discoveryCache.set(cwd, result);
@@ -64,9 +73,37 @@ export function discoverDirs(cwd: string): DiscoveryResult {
     hasUserSettings: !!userSettings,
     hasProjectSettings: !!projectSettings,
     pluginCount: plugins.length,
+    memoryCount: memories.length,
   });
 
   return result;
+}
+
+// ── memory collection ───────────────────────────────────────────────
+
+/**
+ * 调用所有内置 MemoryProvider 收集 MemorySection，并按 priority 升序排序。
+ * 单个 provider 抛错只记 warn 后继续 —— 不让一个坏 provider 拖崩整个 discovery。
+ */
+function collectMemories(
+  cwd: string,
+  userDir: string,
+  projectDir: string,
+): MemorySection[] {
+  const out: MemorySection[] = [];
+  for (const provider of BUILTIN_MEMORY_PROVIDERS) {
+    try {
+      const sections = provider.collect({ cwd, userDir, projectDir });
+      for (const s of sections) out.push(s);
+    } catch (e) {
+      log.warn("discovery: memory provider failed", {
+        provider: provider.name,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+  out.sort((a, b) => a.priority - b.priority);
+  return out;
 }
 
 // ── settings.json reader ────────────────────────────────────────────

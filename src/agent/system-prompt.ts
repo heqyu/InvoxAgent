@@ -14,7 +14,7 @@ import os from "node:os";
 import type OpenAI from "openai";
 import type { ContentBlock } from "@agentclientprotocol/sdk";
 import type { LLMMessage, UserContent } from "../llm/types.js";
-import { loadClaudeMd } from "../discovery/claude-md.js";
+import { discoverDirs } from "../discovery/index.js";
 import { listAvailableCommands } from "../tools/skill.js";
 
 // ── 默认系统提示词 ────────────────────────────────────────────────────
@@ -72,13 +72,21 @@ export function systemMessageWithMemoryAndSkills(
     `Platform: ${platform} (${arch}), release ${release}\n` +
     `Working directory: ${cwd}`;
 
-  // 1. CLAUDE.md memory（user 在前，project 在后）
-  const memory = loadClaudeMd(cwd);
-  if (memory.length > 0) {
-    const sections = memory
-      .map((s) => `# CLAUDE.md [${s.source}]\n\n${s.content}`)
+  // 1. Memory（来自 discovery 的所有 MemoryProvider —— 当前内置 CLAUDE.md，
+  //    未来可加 session-notes / longterm / RAG 等。已按 priority 升序排好。）
+  const memories = discoverDirs(cwd).memories;
+  if (memories.length > 0) {
+    const sections = memories
+      .map((m) => {
+        // 给一个稳定的小标题，便于 LLM 识别这一段的来源
+        const label =
+          m.provider === "claude-md"
+            ? `CLAUDE.md [${m.source}]`
+            : `${m.provider} [${m.source}]`;
+        return `# ${label}\n\n${m.content}`;
+      })
       .join("\n\n---\n\n");
-    content += `\n\n# Memory\n\nThe following are from the user's CLAUDE.md files. Follow these instructions/preferences:\n\n${sections}`;
+    content += `\n\n# Memory\n\nThe following are project / user memories. Follow these instructions/preferences:\n\n${sections}`;
   }
 
   // 2. 可用 skill

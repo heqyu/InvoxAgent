@@ -80,6 +80,7 @@ describe("discoverDirs", () => {
       expect(r.userSettings).toBeNull();
       expect(r.projectSettings).toBeNull();
       expect(r.plugins).toEqual([]);
+      expect(r.memories).toEqual([]);
     });
   });
 
@@ -235,6 +236,71 @@ describe("discoverDirs", () => {
       clearDiscoveryCache();
       const r2 = discoverDirs(env.cwd);
       expect(r1).not.toBe(r2);
+    });
+  });
+
+  // memories 字段：CLAUDE.md provider 是当前唯一内置的 MemoryProvider，
+  // 详细 @reference 解析、broken reference 等行为由 claude-md.test.ts 通过
+  // shim API 覆盖；这里只验证 discovery 层面的契约 —— memories 字段确实被
+  // 填充、按 priority 排序、和缓存语义一致。
+  describe("memories 字段（CLAUDE.md provider）", () => {
+    it("两级目录都没有 CLAUDE.md 时为空数组", () => {
+      const r = discoverDirs(env.cwd);
+      expect(r.memories).toEqual([]);
+    });
+
+    it("user + project 都有 CLAUDE.md → 两条，按 priority 升序（user=10 在 project=20 前）", () => {
+      mkdirSync(join(env.home, ".claude"), { recursive: true });
+      mkdirSync(join(env.cwd, ".claude"), { recursive: true });
+      writeFileSync(
+        join(env.home, ".claude", "CLAUDE.md"),
+        "user level memory",
+        "utf8",
+      );
+      writeFileSync(
+        join(env.cwd, ".claude", "CLAUDE.md"),
+        "project level memory",
+        "utf8",
+      );
+      const r = discoverDirs(env.cwd);
+      expect(r.memories).toHaveLength(2);
+      expect(r.memories[0]?.provider).toBe("claude-md");
+      expect(r.memories[0]?.source).toBe("user");
+      expect(r.memories[0]?.priority).toBe(10);
+      expect(r.memories[0]?.origin).toBe(
+        join(env.home, ".claude", "CLAUDE.md"),
+      );
+      expect(r.memories[1]?.source).toBe("project");
+      expect(r.memories[1]?.priority).toBe(20);
+    });
+
+    it("memories 与 plugins / settings 共存于同一份缓存（同 cwd 同引用）", () => {
+      mkdirSync(join(env.cwd, ".claude"), { recursive: true });
+      writeFileSync(
+        join(env.cwd, ".claude", "CLAUDE.md"),
+        "project memory",
+        "utf8",
+      );
+      writeJson(join(env.cwd, ".claude", "plugins.json"), [
+        { path: "/abs/p" },
+      ]);
+      const r1 = discoverDirs(env.cwd);
+      const r2 = discoverDirs(env.cwd);
+      expect(r1.memories).toBe(r2.memories);
+      expect(r1.plugins).toBe(r2.plugins);
+    });
+
+    it("仅 project 有 CLAUDE.md → 一条 project section", () => {
+      mkdirSync(join(env.cwd, ".claude"), { recursive: true });
+      writeFileSync(
+        join(env.cwd, ".claude", "CLAUDE.md"),
+        "project only",
+        "utf8",
+      );
+      const r = discoverDirs(env.cwd);
+      expect(r.memories).toHaveLength(1);
+      expect(r.memories[0]?.source).toBe("project");
+      expect(r.memories[0]?.content).toContain("project only");
     });
   });
 });

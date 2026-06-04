@@ -4,6 +4,12 @@
 // import）是为了打破设计循环：discovery/types → plugins/hooks → discovery/index。
 // 这些类型与 hooks.ts 里的形状完全一致，对应 settings.json / hooks.json
 // 文件中实际出现的 JSON 结构。
+//
+// MemorySection 走单独文件（memory-types.ts），原因同样是切断循环：
+// memory-providers.ts 依赖 memory-types，index.ts 同时依赖两者，
+// 而 claude-md.ts（旧 API shim）反过来依赖 index.ts。
+
+import type { MemorySection } from "./memory-types.js";
 
 // ── Hook wire-format ────────────────────────────────────────────────
 
@@ -79,4 +85,14 @@ export interface DiscoveryResult {
    * 与 loader.ts 既有行为一致。
    */
   plugins: PluginEntry[];
+
+  /**
+   * 已收集 + 排序好的记忆条目（user CLAUDE.md / project CLAUDE.md / 未来更多）。
+   *
+   * 由 BUILTIN_MEMORY_PROVIDERS 中所有 provider 的 collect() 输出合并、
+   * 按 priority 升序排序得到。消费方（agent/system-prompt.ts）直接按顺序
+   * 拼到 system message 即可，**不要再各自调 loadClaudeMd** —— 后者已退化
+   * 为兼容 shim，仅供 examples/smoke 与外部脚本继续工作。
+   */
+  memories: MemorySection[];
 }
