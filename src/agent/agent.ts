@@ -84,6 +84,12 @@ import {
 import { accumulateTurnUsage } from "./usage-meter.js";
 import { safeParseJSON, parseToolArguments } from "./json.js";
 import {
+  // A2.2：抽出到 ./tool-presentation.js
+  previewArgs,
+  startTitleFor,
+  startLocationsFor,
+} from "./tool-presentation.js";
+import {
   // A2.1：抽出到 ./system-prompt.js；agent.ts re-export 这些符号以保持
   // 外部 API（cli.ts 等）的稳定，避免破坏 import 路径。
   DEFAULT_SYSTEM_PROMPT,
@@ -1643,90 +1649,6 @@ export class InvoxAgent implements Agent {
 }
 
 
-// ── Helpers ─────────────────────────────────────────────────────────
-// safeParseJSON 已抽到 ./json.ts（A3 / K5）；这里仅保留 LLM 输出格式化所需的
-// 本地 helper（previewArgs 等）。
-
-function previewArgs(rawArgs: string): unknown {
-  const parsed = safeParseJSON(rawArgs);
-  if (!parsed) {
-    return rawArgs.length > 100 ? rawArgs.slice(0, 100) + "…" : rawArgs;
-  }
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(parsed)) {
-    if (typeof v === "string" && v.length > 100) {
-      out[k] = v.slice(0, 100) + `…(+${v.length - 100})`;
-    } else {
-      out[k] = v;
-    }
-  }
-  return out;
-}
-
-function startTitleFor(call: ParsedToolCall): string {
-  const parsed = safeParseJSON(call.arguments);
-  // For file-touching tools we deliberately ignore the LLM-supplied
-  // `description` and put the path in the title — Zed renders the title
-  // next to a "Go to File" affordance, so a translated/paraphrased
-  // description would hide the click-target. The description still
-  // reaches the user via the tool result body.
-  if (parsed) {
-    switch (call.name) {
-      case "Read": {
-        const p = String(parsed["path"] ?? "");
-        const offset = parsed["offset"];
-        return p
-          ? offset
-            ? `Read ${p} (lines ${String(offset)}+)`
-            : `Read ${p}`
-          : "Read file";
-      }
-      case "Write": {
-        const p = String(parsed["path"] ?? "");
-        return p ? `Write ${p}` : "Write file";
-      }
-      case "Edit": {
-        const p = String(parsed["path"] ?? "");
-        return p ? `Edit ${p}` : "Edit file";
-      }
-      case "Bash": {
-        const c = String(parsed["command"] ?? "");
-        return c
-          ? `\`${c.slice(0, 80)}${c.length > 80 ? "…" : ""}\``
-          : "Run command";
-      }
-      case "Skill": {
-        const n = String(parsed["name"] ?? "");
-        return n ? `Skill: ${n}` : "Run skill";
-      }
-    }
-  }
-  // Non-file tools fall back to the LLM's free-form description.
-  const desc =
-    typeof parsed?.["description"] === "string"
-      ? parsed["description"].trim()
-      : "";
-  if (desc) return desc;
-  return call.name;
-}
-
-/**
- * Build ACP `locations` for the initial tool_call notification, so Zed's
- * "Go to File" / follow-along UI lights up while the tool is still
- * running (not just after completion). Only the file-touching tools
- * have a meaningful path at call-time.
- */
-function startLocationsFor(
-  call: ParsedToolCall,
-): { path: string }[] | undefined {
-  const parsed = safeParseJSON(call.arguments);
-  if (!parsed) return undefined;
-  if (call.name === "Read" || call.name === "Write" || call.name === "Edit") {
-    const p = typeof parsed["path"] === "string" ? parsed["path"].trim() : "";
-    if (p) return [{ path: p }];
-  }
-  return undefined;
-}
 
 function isAbort(err: unknown): boolean {
   if (
