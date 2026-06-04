@@ -17,7 +17,6 @@
 //
 // MAX_ITERATIONS defaults to 50; override via INVOX_MAX_ITERATIONS env.
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   PROTOCOL_VERSION,
@@ -95,6 +94,11 @@ import {
   contextWindowFor,
 } from "./token-meter.js";
 import {
+  // A2.4：抽出到 ./agent-helpers.js
+  agentVersion,
+  maxIterations,
+} from "./agent-helpers.js";
+import {
   // A2.1：抽出到 ./system-prompt.js；agent.ts re-export 这些符号以保持
   // 外部 API（cli.ts 等）的稳定，避免破坏 import 路径。
   DEFAULT_SYSTEM_PROMPT,
@@ -110,29 +114,8 @@ import {
   type ProviderErrorInfo,
 } from "./error-mapping.js";
 
-/** Read the agent package version once, cache for the process lifetime. */
-let _agentVersion: string | undefined;
-function agentVersion(): string {
-  if (!_agentVersion) {
-    try {
-      const p = join(__dirname, "..", "package.json");
-      _agentVersion = (
-        JSON.parse(readFileSync(p, "utf8")) as { version: string }
-      ).version;
-    } catch {
-      _agentVersion = "unknown";
-    }
-  }
-  return _agentVersion;
-}
-
-function maxIterations(): number {
-  const raw = process.env["INVOX_MAX_ITERATIONS"];
-  if (!raw) return 50;
-  const n = Number.parseInt(raw, 10);
-  if (!Number.isFinite(n) || n <= 0) return 50;
-  return n;
-}
+/** Read the agent package version once, cache for the process lifetime.
+ *  agentVersion / maxIterations 已抽到 ./agent-helpers.ts（A2.4）。 */
 
 interface Session {
   id: string;
