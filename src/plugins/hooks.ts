@@ -399,7 +399,19 @@ function loadPluginName(pluginRoot: string): string {
 
 // ── Matcher helper ──────────────────────────────────────────────────
 
-function matchesTool(matcher: string | undefined, toolName: string): boolean {
+/**
+ * 判定一个 tool name 是否匹配 hook group 的 matcher 正则。
+ *
+ * 设计要点（PROGRESS A1 单测覆盖）：
+ *   - matcher 为空 / undefined → 全匹配（设计：default-allow）
+ *   - 非法正则不抛错 —— 退化为字面量精确匹配，避免一个错误的 plugin 配置把
+ *     整个 hook 系统弄挂
+ *   - 正则未锚定（不带 ^...$）—— 与 Claude Code 行为对齐：含子串即匹配
+ */
+export function matchesTool(
+  matcher: string | undefined,
+  toolName: string,
+): boolean {
   if (!matcher) return true; // No matcher = match all
   try {
     return new RegExp(matcher).test(toolName);

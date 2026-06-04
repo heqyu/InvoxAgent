@@ -84,6 +84,7 @@ import {
   runPostToolUseFailure,
   runStop,
 } from "../plugins/hooks.js";
+import { accumulateTurnUsage } from "./usage-meter.js";
 
 /** Read the agent package version once, cache for the process lifetime. */
 let _agentVersion: string | undefined;
@@ -1350,26 +1351,12 @@ export class InvoxAgent implements Agent {
   }
 
   /** Merge one provider-reported usage block into the session's per-turn
-   *  totals. Called from runOneIteration on `usage` deltas. */
+   *  totals. Called from runOneIteration on `usage` deltas.
+   *
+   *  实际累加逻辑已抽到 `./usage-meter.ts`（Phase A1 / A2 prep），此处仅做委托
+   *  以保留旧调用点；新代码请直接调用 `accumulateTurnUsage`。 */
   private accumulateUsage(session: Session, usage: UsageInfo): void {
-    session.turnUsage.input += usage.input;
-    session.turnUsage.output += usage.output;
-    session.turnUsage.total += usage.total;
-    session.turnUsage.calls += 1;
-    session.turnUsage.cached += usage.cached;
-    // maxPrompt and maxCached must come from the SAME call so the cache
-    // percentage is meaningful relative to the context footprint shown in
-    // the bar. When a new max is found, reset maxCached to this call's
-    // value; on a tie, take the better of the two.
-    if (usage.input > session.turnUsage.maxPrompt) {
-      session.turnUsage.maxPrompt = usage.input;
-      session.turnUsage.maxCached = usage.cached;
-    } else if (usage.input === session.turnUsage.maxPrompt) {
-      session.turnUsage.maxCached = Math.max(
-        session.turnUsage.maxCached,
-        usage.cached,
-      );
-    }
+    accumulateTurnUsage(session.turnUsage, usage);
   }
 
   /**

@@ -12,7 +12,11 @@
     "build": "tsc",
     "start": "node dist/cli.js",
     "typecheck": "tsc --noEmit",
-    "restart": "bash scripts/dev-restart.sh"
+    "restart": "bash scripts/dev-restart.sh",
+    "test": "vitest run",
+    "test:unit": "vitest run tests/unit",
+    "test:smoke": "vitest run tests/integration",
+    "test:watch": "vitest"
   },
   "engines": {
     "node": ">=20"
@@ -29,8 +33,10 @@
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.10.0",
+    "@vitest/ui": "^4.1.8",
     "tsx": "^4.19.2",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.8"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.23.0",

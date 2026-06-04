@@ -6,7 +6,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 An ACP-compatible agent server (Zed's [Agent Client Protocol](https://agentclientprotocol.com/), JSON-RPC 2.0) that bridges any OpenAI-compatible LLM endpoint to a code editor. Speaks stdio (default, used by Zed) and WebSocket (browsers / custom clients) on the same process.
 
-`PLAN.md` is the **source of truth** for data-structure shapes, stage gating, and design rationale. If code contradicts PLAN.md, amend PLAN.md before changing code (per its self-imposed Rule 2).
+### Source-of-truth trio
+
+| 文件 | 角色 | 何时读 / 何时改 |
+|---|---|---|
+| `PLAN.md` | **宪法**：数据结构、stage 验收、不可逾越的红线（Rule 2 + 5） | 改协议表面 / 数据结构 / 新 stage 时先改这里 |
+| `PROGRESS.md` | **滚动施工图**：当前 sprint 的 Doing/Done/Backlog、Phase A–F 路线、Known Issues | 任务流转、新增 backlog、勾掉 Done 时改这里 |
+| `DIARY.md` | **工作日志**：决策原因、教训、复盘（追加写） | 完成一个 Phase / 踩坑 / sprint 收尾时追加 |
+
+冲突顺序：**PLAN > PROGRESS > 代码**。代码与 PLAN 冲突 → 先改 PLAN；与 PROGRESS 冲突 → 改 PROGRESS。新功能开工前先看 `PROGRESS.md` 的 Doing/Phase 优先级。
 
 ## Commands
 
