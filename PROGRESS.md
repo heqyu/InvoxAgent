@@ -13,18 +13,18 @@
 
 ---
 
-## 0. 当前快照（2026-06-04 20:40）
+## 0. 当前快照（2026-06-04 22:35）
 
 | 维度 | 状态 |
 |---|---|
 | 版本 | `0.0.1` |
-| 代码量 | ~8100 行 TS / 40 文件 |
+| 代码量 | ~8200 行 TS / 44 文件（A2 抽出 4 个新模块） |
 | 已完成 stage | 0–8（全部 `[VERIFIED]`） |
 | 传输 | stdio + WebSocket |
 | 工具 | Read / Write / Edit / Bash / Glob / Grep / Skill + MCP 桥接 |
 | 协议外特性 | 会话持久化 / Zed thread 同步 / 模型菜单 / token 计费 / system prompt 模板 / thinking 模式 / 三层 discovery / CLAUDE.md 记忆 / 插件 + Hook |
-| 测试 | **vitest 4.1.8**：161 个 case（133 单元 + 20 集成 + 8 其他）— 158 ✓ / 3 skip / 0 fail，22.85s |
-| 已知风险 | `agent.ts` 2030+ 行黑洞 / MCP 资源泄漏 / 2 个 stale smoke |
+| 测试 | **vitest 4.1.8**：161 个 case（133 单元 + 20 集成 + 8 其他）— 158 ✓ / 3 skip / 0 fail，22.99s |
+| 已知风险 | `agent.ts` 1640 行（仍超 400 目标，剩余 = InvoxAgent 类）/ MCP 资源泄漏 / 2 个 stale smoke / agentVersion path bug |
 
 ---
 
@@ -142,7 +142,7 @@
 
 | # | 问题 | 严重度 | 处置 |
 |---|---|---|---|
-| K1 | `agent.ts` 1959 行，单文件多职责 | P0 | Phase A2（usage-meter 已抽出） |
+| K1 | `agent.ts` 1640 行，剩余主体是 InvoxAgent 类 | P1 | 部分缓解（A2 抽出 4 个模块）；进一步拆分需 collaborator pattern，列入 Backlog |
 | K2 | 零单元测试 | P0 | **✅ A1 落地** —— 54 单元 + 18 集成已就位 |
 | K3 | MCP 子进程按 session 起，无释放 | P0 | Phase B1 + B2 |
 | K4 | 长对话无上下文压缩，会撑爆 | P1 | Phase C1 |
@@ -153,6 +153,7 @@
 | K9 | `stopReason` 不全（无 `refusal` 映射） | P1 | **✅ A5 落地**（20:40）—— 5 种 provider 错误全映射到 `refusal`，prompt 不再抛 RPC 异常 |
 | K10 | Hook 协议追着 Claude Code 跑 | P2 | Phase F3 |
 | K11 | `smoke-stage6-globgrep`（PascalCase 重命名后失效）& `smoke-stage7`（CLAUDE.md/skill 注入后断言失效）—— 两个 stale/fragile smoke，已 skip | P2 | 择期重写或淘汰；新覆盖由单测承担 |
+| K12 | `agentVersion()` path 解析有 pre-existing 缺陷，dev / dist 两种模式都指向不存在的 package.json，函数实际一直返回 `"unknown"` | P3 | 影响极小（仅 hook 诊断字段），单行修复，择期 |
 
 ---
 
@@ -196,14 +197,15 @@ Backlog → 进入 Phase 表 → 挪到 Doing（≤ 3 项）→ commit（带 has
 
 | 指标 | 当前 | 一个月目标 |
 |---|---|---|
-| `agent.ts` 行数 | 2030+（A5 净 +50：error-mapping 路径 + 顶层兜底 catch） | ≤ 400（拆完 A2） |
+| `agent.ts` 行数 | **1640**（A2 累计 -393） | ≤ 400（拆完类成员）—— 部分达成 |
+| 子模块数（src/agent/） | **8**（agent + 7 helpers） | ≥ 7 ✅ |
 | 单元测试 case 数 | **133** | ≥ 80 ✅ |
 | 集成 smoke case 数 | **20**（17 ✓ / 3 skip） | 全 ≥ 90% pass ✅ |
-| `npm test` 总耗时 | 22.85s | ≤ 30s ✅ |
+| `npm test` 总耗时 | 22.99s | ≤ 30s ✅ |
 | MCP 子进程峰值 / session 数 | N | 1（共享池） |
 | 长对话 OOM/turn | 偶发 | 0（C1 落地后） |
 | WS 默认鉴权 | 无 | 有（D1 落地后） |
 
 ---
 
-_最后更新：2026-06-04 20:40 ｜ Phase A5 落地（Phase A 仅剩 A2 拆分）_
+_最后更新：2026-06-04 22:35 ｜ Phase A 收官（A1/A2/A3/A4/A5 全部落地）_
