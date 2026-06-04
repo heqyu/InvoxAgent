@@ -16,11 +16,9 @@
 //   exceeded → max_turn_requests
 //
 // MAX_ITERATIONS defaults to 50; override via INVOX_MAX_ITERATIONS env.
-import OpenAI from "openai";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import os from "node:os";
 import {
   PROTOCOL_VERSION,
   type Agent,
@@ -55,7 +53,6 @@ import type {
   LLMProvider,
   ParsedToolCall,
   UsageInfo,
-  UserContent,
 } from "../llm/types.js";
 import { contentToString } from "../llm/utils.js";
 import {
@@ -68,7 +65,6 @@ import {
 import { FileCache } from "../tools/cache.js";
 import { kindFromTier } from "../tools/permissions.js";
 import { listAvailableCommands } from "../tools/skill.js";
-import { loadClaudeMd } from "../discovery/claude-md.js";
 import { McpClientManager } from "../mcp/client.js";
 import { loadMcpConfig } from "../mcp/config.js";
 import { createMcpTool } from "../mcp/tool.js";
@@ -87,6 +83,16 @@ import {
 } from "../plugins/hooks.js";
 import { accumulateTurnUsage } from "./usage-meter.js";
 import { safeParseJSON, parseToolArguments } from "./json.js";
+import {
+  // A2.1：抽出到 ./system-prompt.js；agent.ts re-export 这些符号以保持
+  // 外部 API（cli.ts 等）的稳定，避免破坏 import 路径。
+  DEFAULT_SYSTEM_PROMPT,
+  systemMessageWithMemoryAndSkills,
+  THINKING_VALUES,
+  thinkingToReasoningEffort,
+  buildUserContent,
+} from "./system-prompt.js";
+export { DEFAULT_SYSTEM_PROMPT } from "./system-prompt.js";
 import {
   classifyProviderError,
   formatProviderErrorForUser,
@@ -1636,182 +1642,6 @@ export class InvoxAgent implements Agent {
   }
 }
 
-// ── System message ───────────────────────────────────────────────────
-
-/**
- * The built-in default system prompt — used when no `INVOX_PROMPT_TEMPLATES_FILE`
- * is configured, or as the `default` entry of any custom template list. Kept
- * exported so cli.ts can stitch it into DEFAULT_SYSTEM_PROMPTS.
- */
-export const DEFAULT_SYSTEM_PROMPT =
-  `You are a helpful coding assistant embedded in Zed (a code editor).\n` +
-  `\n` +
-  `When the user sends a message you may receive multiple content blocks:\n` +
-  `- text: plain user text\n` +
-  `- resource_link (file): the user attached a file — use the Read tool to read it before answering\n` +
-  `- image: the user attached an image — refer to it in your answer\n` +
-  `\n` +
-  `Always prefer using tools to answer questions about the codebase. ` +
-  `If a file is referenced but not yet read, read it first.\n` +
-  `\n` +
-  `# Skills\n` +
-  `\n` +
-  `You have access to a Skill tool that loads reusable workflow templates from .claude/skills/. ` +
-  `When the user asks you to use, run, load, or activate a skill — or when their message ` +
-  `matches a known skill name — call the Skill tool to load and follow that skill's instructions.\n` +
-  `Examples: "use skill /self-constrained-build", "run the review skill", "activate langgpt"\n` +
-  `If unsure which skill to use, call Skill({ name: "list" }) to see all available skills.`;
-
-/** Build the OpenAI-shape system message for a given prompt body. */
-function systemMessageForPrompt(prompt: string): LLMMessage {
-  return { role: "system", content: prompt };
-}
-
-/**
- * Build a system message that includes CLAUDE.md memory and available skills.
- *
- * Assembly order:
- *   1. Base system prompt (from template)
- *   2. CLAUDE.md memory sections (user-level, then project-level)
- *   3. Available skill catalog
- *
- * This mirrors Claude Code's behavior where CLAUDE.md is injected into the
- * system prompt as persistent "memory" that guides the LLM's behavior.
- */
-function systemMessageWithMemoryAndSkills(
-  prompt: string,
-  cwd: string,
-): LLMMessage {
-  let content = prompt;
-
-  // 0. Context: date + platform (helps LLM generate correct shell commands)
-  const now = new Date();
-  const dateStr = now.toISOString().slice(0, 10); // YYYY-MM-DD
-  const platform = process.platform; // "win32" | "darwin" | "linux"
-  const arch = process.arch; // "x64" | "arm64" | ...
-  const release = os.release(); // e.g. "10.0.26100"
-  content +=
-    `\n\n# Context\n\n` +
-    `Current date: ${dateStr}\n` +
-    `Platform: ${platform} (${arch}), release ${release}\n` +
-    `Working directory: ${cwd}`;
-
-  // 1. CLAUDE.md memory (user first, then project)
-  const memory = loadClaudeMd(cwd);
-  if (memory.length > 0) {
-    const sections = memory
-      .map((s) => `# CLAUDE.md [${s.source}]\n\n${s.content}`)
-      .join("\n\n---\n\n");
-    content += `\n\n# Memory\n\nThe following are from the user's CLAUDE.md files. Follow these instructions/preferences:\n\n${sections}`;
-  }
-
-  // 2. Available skills
-  const commands = listAvailableCommands(cwd);
-  if (commands.length > 0) {
-    const lines = commands.map((c) => `- ${c.name}: ${c.description}`);
-    content +=
-      `\n\n# Skills\n\nThe following skills are available for use with the Skill tool:\n\n` +
-      lines.join("\n") +
-      `\n\nWhen the user types "/<skill-name>", invoke it via Skill. Only use skills listed above, don't guess.`;
-  }
-
-  return { role: "system", content };
-}
-
-/** Allowed values for the `thinking` config option. Must match the
- *  options advertised in `configOptionsFor`. */
-const THINKING_VALUES = new Set(["off", "low", "medium", "high"]);
-
-/**
- * Map the user-facing `thinking` value to the OpenAI SDK's
- * `reasoning_effort` enum. "off" means no reasoning at all (yields
- * undefined so the field is omitted from the request); the rest pass
- * through verbatim.
- */
-function thinkingToReasoningEffort(
-  value: string | undefined,
-): "minimal" | "low" | "medium" | "high" | "none" | undefined {
-  if (!value || value === "off") return undefined;
-  if (value === "low" || value === "medium" || value === "high") return value;
-  return undefined;
-}
-
-// ── Prompt content builder ──────────────────────────────────────────
-
-/**
- * Convert ACP ContentBlocks into OpenAI-compatible `UserContent`.
- *
- * Strategy:
- *   - Collect all parts into an array of ChatCompletionContentPart.
- *   - If the result is a single plain-text part, collapse to a string
- *     (simpler for logs and for providers that don't support arrays).
- */
-function buildUserContent(blocks: ContentBlock[]): UserContent {
-  const parts: OpenAI.Chat.Completions.ChatCompletionContentPart[] = [];
-
-  for (const block of blocks) {
-    switch (block.type) {
-      case "text":
-        parts.push({ type: "text", text: block.text });
-        break;
-
-      case "resource_link": {
-        // Tell the LLM which file was attached by name/path.
-        // The actual file content is NOT inlined — the LLM should call Read tool.
-        const label = block.name ?? block.uri ?? "attached file";
-        const path = uriToPath(block.uri);
-        parts.push({
-          type: "text",
-          text: `[File: ${label}]${path ? ` (${path})` : ""}`,
-        });
-        break;
-      }
-
-      case "image": {
-        // Inline data URI or pass through the URI.
-        const url =
-          block.data && block.mimeType
-            ? `data:${block.mimeType};base64,${block.data}`
-            : (block.uri ?? "");
-        if (url) {
-          parts.push({ type: "image_url", image_url: { url } });
-        }
-        break;
-      }
-
-      case "resource": {
-        // Inline text resource directly.
-        const txt = "text" in block.resource ? block.resource.text : undefined;
-        if (txt) parts.push({ type: "text", text: txt });
-        break;
-      }
-
-      default:
-        // Ignore unknown block types.
-        break;
-    }
-  }
-
-  // Collapse: single text part → plain string
-  if (parts.length === 1 && parts[0]!.type === "text") {
-    return parts[0]!.text;
-  }
-
-  return parts as OpenAI.Chat.Completions.ChatCompletionContentPart[];
-}
-
-function uriToPath(uri: string): string {
-  if (!uri.startsWith("file://")) return uri;
-  let p = uri.slice("file://".length);
-  // Windows drive letter: /C:/... → C:/...
-  if (p.length > 2 && p[0] === "/" && p[2] === ":") p = p.slice(1);
-  // Strip fragment (#L10) and query (?symbol=...)
-  const hash = p.indexOf("#");
-  if (hash !== -1) p = p.slice(0, hash);
-  const q = p.indexOf("?");
-  if (q !== -1) p = p.slice(0, q);
-  return p;
-}
 
 // ── Helpers ─────────────────────────────────────────────────────────
 // safeParseJSON 已抽到 ./json.ts（A3 / K5）；这里仅保留 LLM 输出格式化所需的
