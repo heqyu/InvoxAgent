@@ -16,6 +16,7 @@ import { describe, it, expect } from "vitest";
 import {
   classifyProviderError,
   formatProviderErrorForUser,
+  serializeRefusalForMeta,
   type ProviderErrorInfo,
 } from "../../src/agent/error-mapping.js";
 
@@ -196,5 +197,84 @@ describe("formatProviderErrorForUser", () => {
       status: 429,
     };
     expect(formatProviderErrorForUser(info)).toBe("⚠️ Rate limited.");
+  });
+});
+
+describe("serializeRefusalForMeta (B4 / Phase B)", () => {
+  it("保留 category + message（必选字段）", () => {
+    const info: ProviderErrorInfo = {
+      category: "rate_limit",
+      message: "Rate limited.",
+    };
+    expect(serializeRefusalForMeta(info)).toEqual({
+      category: "rate_limit",
+      message: "Rate limited.",
+    });
+  });
+
+  it("有 status 时输出 status", () => {
+    const info: ProviderErrorInfo = {
+      category: "server",
+      message: "Server is unavailable.",
+      status: 503,
+    };
+    expect(serializeRefusalForMeta(info)).toEqual({
+      category: "server",
+      message: "Server is unavailable.",
+      status: 503,
+    });
+  });
+
+  it("有 code 时输出 code", () => {
+    const info: ProviderErrorInfo = {
+      category: "network",
+      message: "Connection lost.",
+      code: "ECONNRESET",
+    };
+    expect(serializeRefusalForMeta(info)).toEqual({
+      category: "network",
+      message: "Connection lost.",
+      code: "ECONNRESET",
+    });
+  });
+
+  it("status / code 都有时同时输出", () => {
+    const info: ProviderErrorInfo = {
+      category: "server",
+      message: "Internal error",
+      status: 502,
+      code: "UPSTREAM",
+    };
+    const meta = serializeRefusalForMeta(info);
+    expect(meta).toEqual({
+      category: "server",
+      message: "Internal error",
+      status: 502,
+      code: "UPSTREAM",
+    });
+  });
+
+  it("status / code 不存在时不输出 undefined 字段", () => {
+    const info: ProviderErrorInfo = {
+      category: "unknown",
+      message: "no idea",
+    };
+    const meta = serializeRefusalForMeta(info);
+    expect(meta).not.toHaveProperty("status");
+    expect(meta).not.toHaveProperty("code");
+  });
+
+  it("输出可被 JSON.stringify 安全序列化（适合通过 ACP wire）", () => {
+    const info: ProviderErrorInfo = {
+      category: "auth",
+      message: "Unauthorized.",
+      status: 401,
+    };
+    const json = JSON.stringify(serializeRefusalForMeta(info));
+    expect(JSON.parse(json)).toEqual({
+      category: "auth",
+      message: "Unauthorized.",
+      status: 401,
+    });
   });
 });

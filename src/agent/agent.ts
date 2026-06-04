@@ -111,6 +111,7 @@ export { DEFAULT_SYSTEM_PROMPT } from "./system-prompt.js";
 import {
   classifyProviderError,
   formatProviderErrorForUser,
+  serializeRefusalForMeta,
   type ProviderErrorInfo,
 } from "./error-mapping.js";
 
@@ -746,6 +747,12 @@ export class InvoxAgent implements Agent {
       | "cancelled"
       | "max_turn_requests"
       | "refusal" = "max_turn_requests";
+    /**
+     * B4 / Phase B：refusal 时携带 ProviderErrorInfo，最终落到 PromptResponse
+     * 的 _meta["invox/error"]。给 ACP 客户端一个可机读的错误根因，
+     * 同时不破坏向后兼容（_meta 是协议官方扩展点）。
+     */
+    let refusalInfo: ProviderErrorInfo | undefined;
     const hookBase = this.hookBase(session);
     // Mirrors Claude Code: true only after a Stop hook actually blocked and the
     // loop continued. Reset to false when the hook放行 or on first call.
@@ -759,6 +766,7 @@ export class InvoxAgent implements Agent {
           if (result.reason === "refusal") {
             stopHookActive = false;
             stopReason = "refusal";
+            refusalInfo = result.error;
             break;
           }
           // Only fire Stop hook on natural end_turn — cancelled and max_iterations
@@ -812,6 +820,9 @@ export class InvoxAgent implements Agent {
       // 其它编程错误）都映射成 refusal，避免裸 RPC 错误漏出去。
       const classified = classifyProviderError(err);
       stopReason = classified.kind === "abort" ? "cancelled" : "refusal";
+      if (classified.kind === "refusal") {
+        refusalInfo = classified.info;
+      }
       log.error("prompt: unexpected error caught at top level", {
         sessionId: session.id,
         stopReason,
@@ -841,7 +852,14 @@ export class InvoxAgent implements Agent {
     // tokens into thread.token_usage when AcpBetaFeatureFlag is on,
     // redundantly with the SessionUpdate::UsageUpdate path. Carrying
     // both maximizes the chance the bottom-bar token chip lights up.
+    //
+    // B4：refusal 时往 _meta["invox/error"] 塞 ProviderErrorInfo —— ACP
+    // 协议明确把 _meta 列为扩展点（types.gen.d.ts:3856-3866），客户端要
+    // 看就能机读，不看也不破坏 stopReason 的标准语义。
     const u = session.turnUsage;
+    const meta = refusalInfo
+      ? { "invox/error": serializeRefusalForMeta(refusalInfo) }
+      : undefined;
     const response: PromptResponse =
       u.calls > 0
         ? {
@@ -851,8 +869,9 @@ export class InvoxAgent implements Agent {
               inputTokens: u.input,
               outputTokens: u.output,
             },
+            ...(meta ? { _meta: meta } : {}),
           }
-        : { stopReason };
+        : { stopReason, ...(meta ? { _meta: meta } : {}) };
     return response;
   }
 

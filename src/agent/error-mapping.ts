@@ -142,6 +142,29 @@ export function formatProviderErrorForUser(info: ProviderErrorInfo): string {
   return `⚠️ ${info.message}`;
 }
 
+/**
+ * 把 ProviderErrorInfo 序列化成可放入 ACP `_meta["invox/error"]` 的 plain
+ * object —— B4 / Phase B。
+ *
+ * 设计点：
+ *   - 只输出 ACP 协议官方 `_meta` 文档说的 "additional metadata"；客户端
+ *     若不识别该 key 应当原样忽略
+ *   - 不要把 stack trace / 内部 SDK 字段塞进去 —— 那是 log 的事
+ *   - 字段顺序固定（category / message / status / code），方便客户端做断言
+ *   - JSON.stringify 友好：所有字段都是 string | number | undefined
+ */
+export function serializeRefusalForMeta(
+  info: ProviderErrorInfo,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {
+    category: info.category,
+    message: info.message,
+  };
+  if (typeof info.status === "number") out.status = info.status;
+  if (typeof info.code === "string") out.code = info.code;
+  return out;
+}
+
 // ── 内部 ─────────────────────────────────────────────────────────────
 
 /** Node 已知的网络层错误码 */

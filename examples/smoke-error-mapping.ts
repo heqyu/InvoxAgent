@@ -119,6 +119,28 @@ async function runScenario(s: Scenario): Promise<void> {
     `[${s.kind}] expected stopReason="${s.expectStopReason}", got "${promptRes.stopReason}"`,
   );
 
+  // 关键不变式 #2.5（B4）：refusal 时 _meta["invox/error"] 携带结构化错误信息
+  // ACP 协议 PromptResponse._meta 是官方扩展点，客户端可机读但不强制。
+  // 我们在 invox 这边的契约：refusal 必给 _meta["invox/error"]，含 category +
+  // message，可选 status / code。
+  const meta = promptRes._meta as
+    | { "invox/error"?: Record<string, unknown> }
+    | null
+    | undefined;
+  const errMeta = meta?.["invox/error"];
+  assert(
+    !!errMeta && typeof errMeta === "object",
+    `[${s.kind}] expected _meta["invox/error"] object, got: ${JSON.stringify(promptRes._meta)}`,
+  );
+  assert(
+    typeof errMeta.category === "string" && errMeta.category.length > 0,
+    `[${s.kind}] _meta.invox/error.category should be string, got: ${JSON.stringify(errMeta)}`,
+  );
+  assert(
+    typeof errMeta.message === "string" && errMeta.message.length > 0,
+    `[${s.kind}] _meta.invox/error.message should be string, got: ${JSON.stringify(errMeta)}`,
+  );
+
   // 关键不变式 #3：emit 了 agent_message_chunk 描述错误
   const messageChunks = updates
     .filter((u) => u.update.sessionUpdate === "agent_message_chunk")
@@ -152,7 +174,7 @@ async function runScenario(s: Scenario): Promise<void> {
 
   child.kill();
   console.error(
-    `[smoke-err] ✓ kind=${s.kind} → stopReason=${promptRes.stopReason}`,
+    `[smoke-err] ✓ kind=${s.kind} → stopReason=${promptRes.stopReason}, _meta.invox/error.category=${String(errMeta.category)}`,
   );
 }
 
