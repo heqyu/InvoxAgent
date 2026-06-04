@@ -1130,13 +1130,23 @@ export class InvoxAgent implements Agent {
   private hookBase(session: Session): {
     session_id: string;
     cwd: string;
+    transcript_path?: string;
     model: string;
     client: string;
     version: string;
   } {
+    // transcript_path: path to the session JSON file on disk.
+    // Claude Code spec: "Path to conversation JSON". Only set if the
+    // session has been persisted at least once.
+    let transcriptPath: string | undefined;
+    if (session.store) {
+      transcriptPath = join(session.store.rootDir(), `${session.id}.json`);
+    }
+
     return {
       session_id: session.id,
       cwd: session.cwd,
+      ...(transcriptPath ? { transcript_path: transcriptPath } : {}),
       model: session.selectedModel ?? this.models.defaultModelId,
       client: this.clientInfo?.name ?? "",
       version: agentVersion(),

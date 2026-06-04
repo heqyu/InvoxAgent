@@ -485,9 +485,23 @@ function runHookCommand(
       resolved = true;
       if (timer) clearTimeout(timer);
 
-      // Parse stdout JSON response
+      // Claude Code spec: "Exit 2 means a blocking error. Claude Code
+      // ignores stdout and any JSON in it. Instead, stderr text is fed
+      // back as an error message."  We must check exit code BEFORE
+      // parsing stdout to honor this.
       let response: HookResponse | null = null;
-      if (stdout.trim()) {
+
+      if (code === 2) {
+        // Exit code 2 = blocking signal. Stdout is ignored per spec.
+        // stderr carries the human-readable reason.
+        const errText = stderr.trim();
+        response = {
+          continue: false,
+          reason: errText || `blocked by ${hookEvent} hook`,
+          systemMessage: errText || `blocked by ${hookEvent} hook`,
+        };
+      } else if (stdout.trim()) {
+        // Exit 0 (or other): parse stdout JSON for structured control.
         try {
           response = JSON.parse(stdout.trim()) as HookResponse;
           // Normalize Claude Code convention: decision → continue
@@ -499,12 +513,8 @@ function runHookCommand(
               .decision as string;
             if (decision === "block" && response.continue === undefined) {
               response.continue = false;
-              // Claude Code convention: `reason` is the full instruction text
-              // to inject as a user message (e.g. review-gate's detailed
-              // step-by-step guide).  Merge it into systemMessage so the
-              // existing Stop handler in agent.ts picks it up transparently.
-              // Prefer reason over any existing short systemMessage because
-              // the hook author placed the actionable content in reason.
+              // Claude Code convention: `reason` is the instruction text
+              // injected as context so the agent knows what to do next.
               if (response.reason && response.reason.length > 0) {
                 response.systemMessage = response.reason;
               }
@@ -518,14 +528,6 @@ function runHookCommand(
         } catch {
           // Non-JSON stdout is ignored (e.g. debug output)
         }
-      }
-
-      // Exit code 2 = block signal (deny tool, prevent stop, etc.)
-      if (code === 2 && stderr.trim()) {
-        response = {
-          continue: false,
-          systemMessage: `[blocked by ${hookEvent} hook] ${stderr.trim()}`,
-        };
       }
 
       log.debug("hook stdout", {
@@ -646,7 +648,15 @@ async function runHooks(
         );
 
         if (response) {
-          if (response.continue === false) agg.continue = false;
+          if (response.continue === false) {
+            agg.continue = false;
+            // Per Claude Code spec: when a hook blocks, stop processing
+            // subsequent hooks immediately. The first block wins.
+            if (response.reason) agg.reason = response.reason;
+            if (response.systemMessage)
+              agg.systemMessage = response.systemMessage;
+            return agg;
+          }
           if (response.systemMessage)
             systemMessages.push(response.systemMessage);
         }
