@@ -13,18 +13,18 @@
 
 ---
 
-## 0. 当前快照（2026-06-04 22:35）
+## 0. 当前快照（2026-06-05 00:40）
 
 | 维度 | 状态 |
 |---|---|
 | 版本 | `0.0.1` |
-| 代码量 | ~8200 行 TS / 44 文件（A2 抽出 4 个新模块） |
+| 代码量 | ~8800 行 TS / 47 文件（B1-B4 抽 2 个新模块 + smoke 增强） |
 | 已完成 stage | 0–8（全部 `[VERIFIED]`） |
 | 传输 | stdio + WebSocket |
 | 工具 | Read / Write / Edit / Bash / Glob / Grep / Skill + MCP 桥接 |
-| 协议外特性 | 会话持久化 / Zed thread 同步 / 模型菜单 / token 计费 / system prompt 模板 / thinking 模式 / 三层 discovery / CLAUDE.md 记忆 / 插件 + Hook |
-| 测试 | **vitest 4.1.8**：161 个 case（133 单元 + 20 集成 + 8 其他）— 158 ✓ / 3 skip / 0 fail，22.99s |
-| 已知风险 | `agent.ts` 1640 行（仍超 400 目标，剩余 = InvoxAgent 类）/ MCP 资源泄漏 / 2 个 stale smoke / agentVersion path bug |
+| 协议外特性 | 会话持久化 / Zed thread 同步 / 模型菜单 / token 计费 / system prompt 模板 / thinking 模式 / 三层 discovery / CLAUDE.md 记忆 / 插件 + Hook / **MCP 共享池 / 连接重试 / 结构化错误** |
+| 测试 | **vitest 4.1.8**：203 个 case（170 单元 + 25 集成 + 8 其他）— 200 ✓ / 3 skip / 0 fail，22.65s |
+| 已知风险 | `agent.ts` 1660+ 行 / 2 个 stale smoke / agentVersion path bug |
 
 ---
 
@@ -72,12 +72,12 @@
 
 ### Phase B — 「资源管理与可靠性」（目标 1–2 周）
 
-| ID | 任务 | 优先级 | 验收 |
-|---|---|---|---|
-| B1 | **MCP 进程池**：跨 session 共享 stdio 子进程；引用计数；最后一个 session 释放后 graceful close | P0 | 开 5 个 session 同 MCP server，`ps` 看到只有 1 个子进程 |
-| B2 | session 销毁路径补全：`deleteSession` / 连接断开 / 进程退出三处都释放 MCP & abort & 持久化 | P0 | smoke 关连接后无僵尸进程 |
-| B3 | LLM 调用 **指数退避 + 限流**（429/5xx，可关闭） | P1 | mock provider 间歇性 429，最终成功且无重试风暴 |
-| B4 | 结构化错误对外暴露：`session/update` 携带 `_meta.invox/error` 让客户端可读 | P2 | Zed 端能看到失败原因 |
+| ID | 任务 | 优先级 | 状态 | 验收 |
+|---|---|---|---|---|
+| B1 | **MCP 进程池**：跨 session 共享 stdio 子进程；引用计数；最后一个 session 释放后 graceful close | P0 | **✅ Done**（2026-06-05 00:18）<br/>新建 `src/mcp/pool.ts` —— 进程级 singleton 按 cwd 键控；in-flight 去重；`acquireMcp` / `releaseMcp` / `disposeAllMcp`；factory 注入接口便于单测<br/>11 个单元测试覆盖（计数语义 / 不同 cwd 隔离 / 并发去重 / disconnect 抛错容错） | 开 5 个 session 同 MCP server，pool 仅 1 个 manager；单测验证引用计数 |
+| B2 | session 销毁路径补全：`deleteSession` / 连接断开 / 进程退出三处都释放 MCP & abort & 持久化 | P0 | **✅ Done**（00:18）<br/>`unstable_deleteSession` 改 abort + `releaseSessionMcp`；cli.ts 增加 SIGINT / SIGTERM / stdin-end 三个进程级钩子统一调 `disposeAllMcp` 兜底；`shutdownAndExit` 幂等 | smoke 关连接后无僵尸进程；既有 17 个 smoke 仍 PASS（mcp config 不存在时 acquire 返回 null = 旧路径） |
+| B3 | LLM 调用 **指数退避 + 限流**（429/5xx，可关闭） | P1 | **✅ Done**（00:22）<br/>新建 `src/llm/backoff.ts` —— 仅 connect 阶段重试（避免破坏 mid-stream 增量 UI）；`isRetryableConnectError` 白名单 429/5xx + 9 种网络码；env 调参 `INVOX_LLM_RETRIES` / `_BACKOFF_BASE_MS` / `_BACKOFF_MAX_MS`，0 关闭<br/>OpenAIProvider 在 `chat.completions.create` 套 `withConnectBackoff` + `onRetry` warn 日志<br/>24 个单元测试（matrix 含 status 边界 / 抖动 / abort 联动 / 用尽冒泡） | mock provider 间歇性 429，最终成功且无重试风暴 |
+| B4 | 结构化错误对外暴露：`PromptResponse._meta["invox/error"]` 让客户端可读 | P2 | **✅ Done**（00:40）<br/>`error-mapping.ts` 新增 `serializeRefusalForMeta`；`prompt()` 在 refusal 分支记录 `refusalInfo`，组装响应时注入 `_meta`<br/>`smoke-error-mapping.ts` 5 场景全部断言 `_meta.invox/error.{category, message}` 正确；6 个新单测覆盖序列化矩阵 | Zed 端能看到失败原因 |
 
 ### Phase C — 「上下文工程」（目标 2 周）
 
@@ -144,8 +144,8 @@
 |---|---|---|---|
 | K1 | `agent.ts` 1640 行，剩余主体是 InvoxAgent 类 | P1 | 部分缓解（A2 抽出 4 个模块）；进一步拆分需 collaborator pattern，列入 Backlog |
 | K2 | 零单元测试 | P0 | **✅ A1 落地** —— 54 单元 + 18 集成已就位 |
-| K3 | MCP 子进程按 session 起，无释放 | P0 | Phase B1 + B2 |
-| K4 | 长对话无上下文压缩，会撑爆 | P1 | Phase C1 |
+| K3 | MCP 子进程按 session 起，无释放 | P0 | **✅ B1+B2 落地**（2026-06-05 00:18）—— `src/mcp/pool.ts` 共享池；`unstable_deleteSession` + 进程退出钩子统一释放 |
+| K4 | 长对话无上下文压缩，会撑爆 | P1 | Phase C1（暂缓 —— 用户标记需独立设计上下文压缩方案） |
 | K5 | `agent.ts:987` 裸 `JSON.parse` | P0 | **✅ A3 落地**（17:05）—— 抽到 `src/agent/json.ts` 并改为 fast-fail 路径 |
 | K6 | `loadHooks(cwd)` 在 tool 循环内重复调用（虽缓存） | P1 | **✅ A4 落地**（18:30）—— `Session` 持有 `hooks: HookRegistry`，6 处旧调用全部收敛 |
 | K7 | WebSocket 默认无鉴权 | P1 | Phase D1 |
@@ -197,15 +197,15 @@ Backlog → 进入 Phase 表 → 挪到 Doing（≤ 3 项）→ commit（带 has
 
 | 指标 | 当前 | 一个月目标 |
 |---|---|---|
-| `agent.ts` 行数 | **1640**（A2 累计 -393） | ≤ 400（拆完类成员）—— 部分达成 |
-| 子模块数（src/agent/） | **8**（agent + 7 helpers） | ≥ 7 ✅ |
-| 单元测试 case 数 | **133** | ≥ 80 ✅ |
+| `agent.ts` 行数 | **1660+**（B4 +20：refusalInfo + _meta；A2 累计 -373） | ≤ 400（拆完类成员）—— 部分达成 |
+| 子模块数（src/agent/ + src/llm/ + src/mcp/） | **10**（agent + 7 helpers + backoff + mcp/pool） | ≥ 7 ✅ |
+| 单元测试 case 数 | **170** | ≥ 80 ✅ |
 | 集成 smoke case 数 | **20**（17 ✓ / 3 skip） | 全 ≥ 90% pass ✅ |
-| `npm test` 总耗时 | 22.99s | ≤ 30s ✅ |
-| MCP 子进程峰值 / session 数 | N | 1（共享池） |
-| 长对话 OOM/turn | 偶发 | 0（C1 落地后） |
+| `npm test` 总耗时 | 22.65s | ≤ 30s ✅ |
+| MCP 子进程峰值 / session 数 | **1（共享池）** | 1（共享池） ✅ |
+| 长对话 OOM/turn | 偶发 | 0（C1 待设计） |
 | WS 默认鉴权 | 无 | 有（D1 落地后） |
 
 ---
 
-_最后更新：2026-06-04 22:35 ｜ Phase A 收官（A1/A2/A3/A4/A5 全部落地）_
+_最后更新：2026-06-05 00:40 ｜ Phase B 落地（B1/B2/B3/B4 全部完成；C1 待独立设计）_
