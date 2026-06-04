@@ -20,6 +20,11 @@
 //
 import OpenAI from "openai";
 import { log } from "../log.js";
+import {
+  backoffConfigFromEnv,
+  withConnectBackoff,
+  type BackoffConfig,
+} from "./backoff.js";
 import type {
   FinishReason,
   LLMDelta,
@@ -34,6 +39,10 @@ export interface OpenAIProviderConfig {
   baseURL: string;
   apiKey: string;
   model: string;
+  /**
+   * 可选 backoff 覆盖（测试用）。生产代码不传，从环境变量读取。
+   */
+  backoff?: BackoffConfig;
 }
 
 export class OpenAIProvider implements LLMProvider {
@@ -41,6 +50,7 @@ export class OpenAIProvider implements LLMProvider {
   private client: OpenAI;
   private model: string;
   private baseURL: string;
+  private backoff: BackoffConfig;
   /** Monotonic counter so each LLM call has a short id in logs. */
   private nextCallSeq = 1;
 
@@ -48,6 +58,7 @@ export class OpenAIProvider implements LLMProvider {
     this.client = new OpenAI({ baseURL: cfg.baseURL, apiKey: cfg.apiKey });
     this.model = cfg.model;
     this.baseURL = cfg.baseURL;
+    this.backoff = cfg.backoff ?? backoffConfigFromEnv(process.env);
   }
 
   async *stream(req: LLMRequest): AsyncIterable<LLMDelta> {
@@ -75,29 +86,46 @@ export class OpenAIProvider implements LLMProvider {
 
     let stream;
     try {
-      stream = await this.client.chat.completions.create(
+      // B3：connect 阶段套指数退避（429 / 5xx / 网络错误）。stream 一旦
+      // 开始消费就不再重试 —— mid-stream 重放会破坏 ACP UI 的增量渲染。
+      stream = await withConnectBackoff(
+        () =>
+          this.client.chat.completions.create(
+            {
+              model: modelForCall,
+              stream: true,
+              // Ask the upstream to emit a final usage-only chunk so we can
+              // surface real token counts. Some self-hosted OAI-compat backends
+              // ignore this flag — that's fine, we just don't get a usage delta.
+              stream_options: { include_usage: true },
+              messages: req.messages.map(toOpenAIMessage),
+              ...(req.tools && req.tools.length > 0
+                ? { tools: req.tools, tool_choice: "auto" }
+                : {}),
+              // Pass through reasoning_effort when the agent has thinking
+              // enabled. OpenAI's chat API documents this as `none | minimal
+              // | low | medium | high | xhigh`. Backends that don't recognize
+              // the field typically ignore it; strict ones may 400 — that's
+              // a backend-vs-config mismatch the user can resolve via the
+              // dropdown.
+              ...(req.reasoningEffort && req.reasoningEffort !== "none"
+                ? { reasoning_effort: req.reasoningEffort }
+                : {}),
+            },
+            { signal: req.signal },
+          ),
+        this.backoff,
         {
-          model: modelForCall,
-          stream: true,
-          // Ask the upstream to emit a final usage-only chunk so we can
-          // surface real token counts. Some self-hosted OAI-compat backends
-          // ignore this flag — that's fine, we just don't get a usage delta.
-          stream_options: { include_usage: true },
-          messages: req.messages.map(toOpenAIMessage),
-          ...(req.tools && req.tools.length > 0
-            ? { tools: req.tools, tool_choice: "auto" }
-            : {}),
-          // Pass through reasoning_effort when the agent has thinking
-          // enabled. OpenAI's chat API documents this as `none | minimal
-          // | low | medium | high | xhigh`. Backends that don't recognize
-          // the field typically ignore it; strict ones may 400 — that's
-          // a backend-vs-config mismatch the user can resolve via the
-          // dropdown.
-          ...(req.reasoningEffort && req.reasoningEffort !== "none"
-            ? { reasoning_effort: req.reasoningEffort }
-            : {}),
+          signal: req.signal,
+          onRetry: (attempt, err, delayMs) => {
+            log.warn("llm: retrying after retryable error", {
+              callId,
+              attempt,
+              delayMs,
+              ...describeError(err),
+            });
+          },
         },
-        { signal: req.signal },
       );
     } catch (err) {
       const detail = describeError(err);
