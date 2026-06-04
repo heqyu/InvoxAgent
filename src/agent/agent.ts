@@ -87,6 +87,11 @@ import {
 } from "../plugins/hooks.js";
 import { accumulateTurnUsage } from "./usage-meter.js";
 import { safeParseJSON, parseToolArguments } from "./json.js";
+import {
+  classifyProviderError,
+  formatProviderErrorForUser,
+  type ProviderErrorInfo,
+} from "./error-mapping.js";
 
 /** Read the agent package version once, cache for the process lifetime. */
 let _agentVersion: string | undefined;
@@ -737,8 +742,11 @@ export class InvoxAgent implements Agent {
     });
 
     const max = maxIterations();
-    let stopReason: "end_turn" | "cancelled" | "max_turn_requests" =
-      "max_turn_requests";
+    let stopReason:
+      | "end_turn"
+      | "cancelled"
+      | "max_turn_requests"
+      | "refusal" = "max_turn_requests";
     const hookBase = this.hookBase(session);
     // Mirrors Claude Code: true only after a Stop hook actually blocked and the
     // loop continued. Reset to false when the hook放行 or on first call.
@@ -747,6 +755,13 @@ export class InvoxAgent implements Agent {
       for (let iter = 0; iter < max; iter++) {
         const result = await this.runOneIteration(session);
         if (result.kind === "stop") {
+          // refusal：直接收尾，不跑 Stop hook（错误流已经流出，再跑 hook
+          // 容易掩盖根因）
+          if (result.reason === "refusal") {
+            stopHookActive = false;
+            stopReason = "refusal";
+            break;
+          }
           // Only fire Stop hook on natural end_turn — cancelled and max_iterations
           // go straight through (matches Claude Code: Stop hook only runs when the
           // model naturally decides to stop).
@@ -792,6 +807,20 @@ export class InvoxAgent implements Agent {
       if (stopReason === "max_turn_requests") {
         log.warn("prompt: hit max iterations", { sessionId: session.id, max });
       }
+    } catch (err) {
+      // A5 / K9：兜底 catch —— prompt() 必须始终返回合法 PromptResponse。
+      // 任何 runOneIteration 之外的意外（hook 同步异常、stream 写失败、
+      // 其它编程错误）都映射成 refusal，避免裸 RPC 错误漏出去。
+      const classified = classifyProviderError(err);
+      stopReason = classified.kind === "abort" ? "cancelled" : "refusal";
+      log.error("prompt: unexpected error caught at top level", {
+        sessionId: session.id,
+        stopReason,
+        message:
+          classified.kind === "refusal"
+            ? classified.info.message
+            : "abort signaled at top level",
+      });
     } finally {
       // Always emit a usage summary (even on cancel / max iterations) so the
       // user sees what the partial turn cost. Best-effort: a failure to send
@@ -859,7 +888,9 @@ export class InvoxAgent implements Agent {
   private async runOneIteration(
     session: Session,
   ): Promise<
-    { kind: "stop"; reason: "end_turn" | "cancelled" } | { kind: "continue" }
+    | { kind: "stop"; reason: "end_turn" | "cancelled" }
+    | { kind: "stop"; reason: "refusal"; error: ProviderErrorInfo }
+    | { kind: "continue" }
   > {
     let assistantText = "";
     const toolCalls: ParsedToolCall[] = [];
@@ -926,16 +957,38 @@ export class InvoxAgent implements Agent {
         }
       }
     } catch (err) {
-      if (isAbort(err)) {
+      // A5 / K9：把 provider 抛出的错误映射到 ACP stopReason。AbortError 是
+      // 用户主动取消，走 cancelled；其他统一归类为 refusal 并把可读 message
+      // 通过 agent_message_chunk 告诉用户 —— 不再向 RPC 抛异常。
+      const classified = classifyProviderError(err);
+      if (classified.kind === "abort") {
         if (assistantText)
           session.history.push({ role: "assistant", content: assistantText });
         return { kind: "stop", reason: "cancelled" };
       }
-      log.error(
-        "provider stream failed",
-        err instanceof Error ? err.message : String(err),
-      );
-      throw err;
+      const info = classified.info;
+      log.error("provider stream failed", {
+        category: info.category,
+        ...(info.status !== undefined ? { status: info.status } : {}),
+        ...(info.code !== undefined ? { code: info.code } : {}),
+        message: info.message,
+      });
+      // 如果已经流出来过部分文字，先把它存进 history 避免丢失上下文
+      if (assistantText)
+        session.history.push({ role: "assistant", content: assistantText });
+      // 把错误说给用户听
+      try {
+        await this.conn.sessionUpdate({
+          sessionId: session.id,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: formatProviderErrorForUser(info) },
+          },
+        });
+      } catch {
+        // 写错误信息本身也可能失败（连接已断）—— 静默忽略，stopReason 仍会回报
+      }
+      return { kind: "stop", reason: "refusal", error: info };
     }
 
     if (session.abort.signal.aborted) {
@@ -1424,7 +1477,7 @@ export class InvoxAgent implements Agent {
    */
   private async reportTurnUsage(
     session: Session,
-    stopReason: "end_turn" | "cancelled" | "max_turn_requests",
+    stopReason: "end_turn" | "cancelled" | "max_turn_requests" | "refusal",
   ): Promise<void> {
     const u = session.turnUsage;
     if (u.calls === 0) return;

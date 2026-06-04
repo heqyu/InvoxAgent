@@ -113,6 +113,8 @@ const SMOKES: SmokeCase[] = [
   { file: "smoke-tools.ts", timeoutMs: 30_000 },
   // A3 / K5 验收：畸形 JSON tool_call 不挂 agent，且 LLM 能自我纠错
   { file: "smoke-bad-json.ts", timeoutMs: 30_000 },
+  // A5 / K9 验收：5 种 provider 错误（429/500/auth/network/mid-stream）→ refusal
+  { file: "smoke-error-mapping.ts", timeoutMs: 60_000 },
   { file: "smoke-ws.ts", timeoutMs: 30_000 },
   { file: "smoke-cancel.ts", timeoutMs: 30_000 },
   { file: "smoke-stage6.ts", timeoutMs: 30_000 },

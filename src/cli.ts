@@ -19,6 +19,7 @@ import {
   type SystemPromptDef,
 } from "./agent/agent.js";
 import { EchoProvider } from "./llm/echo.js";
+import { FlakyProvider, type FlakyKind } from "./llm/flaky.js";
 import { BadJsonProvider, MockToolProvider } from "./llm/mock-tools.js";
 import { OpenAIProvider } from "./llm/openai.js";
 import type { LLMProvider } from "./llm/types.js";
@@ -205,6 +206,13 @@ function pickProvider(): LLMProvider {
     // A3 / K5 验收 mock：第一轮吐畸形 JSON tool_call，第二轮自我纠错。
     log.info("provider: mock-bad-json (INVOX_MOCK=bad-json)");
     return new BadJsonProvider();
+  }
+  if (mock === "flaky") {
+    // A5 / K9 验收 mock：故意抛 provider 错误。具体类型由 INVOX_FLAKY_KIND
+    // 控制（429 / 500 / auth / network / mid-stream），默认 429。
+    const kind = (process.env["INVOX_FLAKY_KIND"] ?? "429") as FlakyKind;
+    log.info("provider: mock-flaky", { kind });
+    return new FlakyProvider(kind);
   }
   if (mock === "1") {
     log.info("provider: echo (INVOX_MOCK=1)");
