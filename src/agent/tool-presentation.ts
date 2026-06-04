@@ -37,12 +37,13 @@ export function previewArgs(rawArgs: string): unknown {
 /**
  * 为 tool_call 通知卡片选一个标题。
  *
- * 文件类工具（Read / Write / Edit）刻意忽略 LLM 自报的 description ——
- * 把文件路径放在标题里，让 Zed 的 "Go to File" 能正确识别点击目标。
- * description 仍会通过 tool result body 流给用户。
- *
- * Bash 用反引号包裹命令前 80 字符；Skill 显示 skill 名；其他非文件类工具
- * 回退到 LLM 提供的 description；都没有则用工具名兜底。
+ * 所有内置工具都有参数化标题：
+ *   - 文件类（Read / Write / Edit）—— 用文件路径，让 Zed 的 "Go to File"
+ *     能正确识别点击目标
+ *   - Bash —— 用反引号包裹命令前 80 字符
+ *   - Grep / Glob —— 用 pattern
+ *   - Skill —— 用 skill 名
+ * 其他工具（包括 MCP 工具）回退到工具名。
  */
 export function startTitleFor(call: ParsedToolCall): string {
   const parsed = safeParseJSON(call.arguments);
@@ -71,18 +72,20 @@ export function startTitleFor(call: ParsedToolCall): string {
           ? `\`${c.slice(0, 80)}${c.length > 80 ? "…" : ""}\``
           : "Run command";
       }
+      case "Grep": {
+        const p = String(parsed["pattern"] ?? "");
+        return p ? `Grep ${p}` : "Grep";
+      }
+      case "Glob": {
+        const p = String(parsed["pattern"] ?? "");
+        return p ? `Glob ${p}` : "Glob";
+      }
       case "Skill": {
         const n = String(parsed["name"] ?? "");
         return n ? `Skill: ${n}` : "Run skill";
       }
     }
   }
-  // 非文件类工具回退到 LLM 提供的自由描述
-  const desc =
-    typeof parsed?.["description"] === "string"
-      ? parsed["description"].trim()
-      : "";
-  if (desc) return desc;
   return call.name;
 }
 

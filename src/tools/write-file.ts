@@ -11,7 +11,6 @@ import {
   writeFileDirect,
   resolveToolPath,
 } from "./fs-utils.js";
-import { DESCRIPTION_FIELD } from "./shared.js";
 import {
   errorResult,
   type Tool,
@@ -39,9 +38,8 @@ const spec: ToolSpec = {
           type: "string",
           description: "Full new contents of the file.",
         },
-        description: DESCRIPTION_FIELD,
       },
-      required: ["path", "content", "description"],
+      required: ["path", "content"],
     },
   },
 };

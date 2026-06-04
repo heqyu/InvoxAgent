@@ -31,7 +31,6 @@ import { existsSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { log } from "../log.js";
 import type { ToolSpec } from "../llm/types.js";
-import { DESCRIPTION_FIELD } from "./shared.js";
 import {
   errorResult,
   type Tool,
@@ -56,9 +55,8 @@ const spec: ToolSpec = {
           type: "string",
           description: "The full command line to run.",
         },
-        description: DESCRIPTION_FIELD,
       },
-      required: ["command", "description"],
+      required: ["command"],
     },
   },
 };

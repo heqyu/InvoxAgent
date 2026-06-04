@@ -3,7 +3,6 @@
 import { log } from "../log.js";
 import type { ToolSpec } from "../llm/types.js";
 import { readFileWithCache, resolveToolPath } from "./fs-utils.js";
-import { DESCRIPTION_FIELD } from "./shared.js";
 import {
   errorResult,
   type Tool,
@@ -42,9 +41,8 @@ const spec: ToolSpec = {
           type: "integer",
           description: `Maximum lines to return. Optional; default ${DEFAULT_READ_LIMIT}.`,
         },
-        description: DESCRIPTION_FIELD,
       },
-      required: ["path", "description"],
+      required: ["path"],
     },
   },
 };

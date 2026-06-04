@@ -11,7 +11,6 @@ import { resolve, sep } from "node:path";
 import fg from "fast-glob";
 import { log } from "../log.js";
 import type { ToolSpec } from "../llm/types.js";
-import { DESCRIPTION_FIELD } from "./shared.js";
 import {
   errorResult,
   type Tool,
@@ -50,9 +49,8 @@ const spec: ToolSpec = {
           type: "integer",
           description: `Max paths to return. Default ${DEFAULT_LIMIT}.`,
         },
-        description: DESCRIPTION_FIELD,
       },
-      required: ["pattern", "description"],
+      required: ["pattern"],
     },
   },
 };
@@ -125,7 +123,7 @@ async function execute(
     resultText: display,
     acpContent: [{ type: "content", content: { type: "text", text: display } }],
     kind: "other",
-    title: titleFor(args, pattern),
+    title: titleFor(pattern),
     ok: true,
   };
 }
@@ -136,10 +134,7 @@ function normalizePath(p: string): string {
   return sep === "\\" ? p.replace(/\//g, "\\") : p;
 }
 
-function titleFor(args: Record<string, unknown>, pattern: string): string {
-  const desc =
-    typeof args["description"] === "string" ? args["description"].trim() : "";
-  if (desc) return desc;
+function titleFor(pattern: string): string {
   return `Glob ${pattern}`;
 }
 

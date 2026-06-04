@@ -10,7 +10,6 @@ import { resolve } from "node:path";
 import { rgPath } from "@vscode/ripgrep";
 import { log } from "../log.js";
 import type { ToolSpec } from "../llm/types.js";
-import { DESCRIPTION_FIELD } from "./shared.js";
 import {
   errorResult,
   type Tool,
@@ -75,9 +74,8 @@ const spec: ToolSpec = {
             "Max output lines (after which we truncate). Default unlimited up " +
             "to a 256 KiB byte cap.",
         },
-        description: DESCRIPTION_FIELD,
       },
-      required: ["pattern", "description"],
+      required: ["pattern"],
     },
   },
 };
@@ -241,17 +239,14 @@ async function execute(
         resultText: text,
         acpContent: [{ type: "content", content: { type: "text", text } }],
         kind: "other",
-        title: titleFor(args, pattern),
+        title: titleFor(pattern),
         ok: true,
       });
     });
   });
 }
 
-function titleFor(args: Record<string, unknown>, pattern: string): string {
-  const desc =
-    typeof args["description"] === "string" ? args["description"].trim() : "";
-  if (desc) return desc;
+function titleFor(pattern: string): string {
   return `Grep ${pattern}`;
 }
 

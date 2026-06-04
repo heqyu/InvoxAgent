@@ -20,7 +20,6 @@ import { homedir } from "node:os";
 import { log } from "../log.js";
 import { loadPluginSkills } from "../plugins/loader.js";
 import type { ToolSpec } from "../llm/types.js";
-import { DESCRIPTION_FIELD } from "./shared.js";
 import {
   errorResult,
   type Tool,
@@ -406,9 +405,8 @@ const spec: ToolSpec = {
             "by params[key].",
           additionalProperties: true,
         },
-        description: DESCRIPTION_FIELD,
       },
-      required: ["name", "description"],
+      required: ["name"],
     },
   },
 };

@@ -11,7 +11,6 @@ import {
   writeFileDirect,
   resolveToolPath,
 } from "./fs-utils.js";
-import { DESCRIPTION_FIELD } from "./shared.js";
 import {
   errorResult,
   type Tool,
@@ -54,9 +53,8 @@ const spec: ToolSpec = {
             "Replace every occurrence (default false). When false, old_string " +
             "must be unique in the file.",
         },
-        description: DESCRIPTION_FIELD,
       },
-      required: ["path", "old_string", "new_string", "description"],
+      required: ["path", "old_string", "new_string"],
     },
   },
 };

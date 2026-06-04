@@ -1,7 +1,6 @@
 // MCP tool factory —— 把一个 MCP 工具包装成符合 invox `Tool` 契约的实例。
 
 import type { ToolSpec } from "../llm/types.js";
-import { DESCRIPTION_FIELD } from "../tools/shared.js";
 import {
   errorResult,
   type Tool,
@@ -19,29 +18,21 @@ type OpenAIParameters = {
 };
 
 /**
- * 将 MCP `inputSchema` 转换成给 LLM 的 OpenAI `ToolSpec`，并补上 invox 共享的
- * `description` 字段（每个 invox 工具都有，用作工具卡标题）。
+ * 将 MCP `inputSchema` 透传成给 LLM 的 OpenAI `ToolSpec`。
+ * MCP 服务器自己定义的 input schema 即真理 —— invox 不再向其中注入额外的
+ * 控制字段（`description` 等），避免污染服务器声明的参数列表。
  */
 function inputSchemaToToolSpec(def: McpToolDef): ToolSpec {
   const it = def.inputSchema.type;
   const schemaType =
     typeof it === "string" && it === "object" ? "object" : "object";
 
-  let props: Record<string, unknown>;
-  if (
+  const props: Record<string, unknown> =
     def.inputSchema.properties &&
     typeof def.inputSchema.properties === "object" &&
     !Array.isArray(def.inputSchema.properties)
-  ) {
-    // 合并共享 description 字段 —— LLM 给一段用户可见的卡片标题，
-    // 与其他 invox 工具的写法保持一致。
-    props = {
-      ...(def.inputSchema.properties as Record<string, unknown>),
-      ...DESCRIPTION_FIELD,
-    };
-  } else {
-    props = { ...DESCRIPTION_FIELD };
-  }
+      ? { ...(def.inputSchema.properties as Record<string, unknown>) }
+      : {};
 
   const required = Array.isArray(def.inputSchema.required)
     ? [...def.inputSchema.required]
@@ -78,15 +69,11 @@ export function createMcpTool(
       args: Record<string, unknown>,
       _ctx: ToolExecContext,
     ): Promise<ToolExecResult> {
-      // 转发前剥掉 description —— 它是 invox 内部字段，不属于 MCP 工具的真实输入。
-      const mcpArgs = { ...args };
-      delete mcpArgs.description;
-
       try {
         const result = await manager.callTool(
           def.serverName,
           def.toolName,
-          mcpArgs,
+          args,
         );
 
         // 尽力从 MCP content blocks 抽出文本。
