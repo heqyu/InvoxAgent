@@ -81,7 +81,7 @@ import {
   runStop,
   type HookRegistry,
 } from "../plugins/hooks.js";
-import { accumulateTurnUsage } from "./usage-meter.js";
+import { accumulateTurnUsage, emptyTurnUsage } from "./usage-meter.js";
 import { safeParseJSON, parseToolArguments } from "./json.js";
 import {
   // A2.2：抽出到 ./tool-presentation.js
@@ -89,6 +89,11 @@ import {
   startTitleFor,
   startLocationsFor,
 } from "./tool-presentation.js";
+import {
+  // A2.3：抽出到 ./token-meter.js
+  humanizeTokens,
+  contextWindowFor,
+} from "./token-meter.js";
 import {
   // A2.1：抽出到 ./system-prompt.js；agent.ts re-export 这些符号以保持
   // 外部 API（cli.ts 等）的稳定，避免破坏 import 路径。
@@ -369,7 +374,7 @@ export class InvoxAgent implements Agent {
         system_prompt: defaultPromptId,
         thinking: "off",
       },
-      turnUsage: emptyUsage(),
+      turnUsage: emptyTurnUsage(),
       turnStartedAt: 0,
       hooks: loadHooks(params.cwd),
     };
@@ -468,7 +473,7 @@ export class InvoxAgent implements Agent {
           ? snapshot.selectedModel
           : undefined,
       configValues: restoredConfigValues,
-      turnUsage: emptyUsage(),
+      turnUsage: emptyTurnUsage(),
       turnStartedAt: 0,
       lastTurnUsage: snapshot.lastTurnUsage,
       hooks: loadHooks(params.cwd),
@@ -710,7 +715,7 @@ export class InvoxAgent implements Agent {
     session.abort = new AbortController();
     // Reset turn-level token accounting. We deliberately do NOT carry usage
     // across turns — the per-turn box matches what the user just asked for.
-    session.turnUsage = emptyUsage();
+    session.turnUsage = emptyTurnUsage();
     session.turnStartedAt = Date.now();
 
     const userContent = buildUserContent(params.prompt);
@@ -1650,136 +1655,3 @@ export class InvoxAgent implements Agent {
 
 
 
-function isAbort(err: unknown): boolean {
-  if (
-    err &&
-    typeof err === "object" &&
-    "name" in err &&
-    (err as { name: unknown }).name === "AbortError"
-  )
-    return true;
-  if (err instanceof Error && /aborted/i.test(err.message)) return true;
-  return false;
-}
-
-/** Fresh per-turn token accumulator. */
-function emptyUsage(): {
-  input: number;
-  output: number;
-  total: number;
-  calls: number;
-  maxPrompt: number;
-  maxCached: number;
-  cached: number;
-} {
-  return {
-    input: 0,
-    output: 0,
-    total: 0,
-    calls: 0,
-    maxPrompt: 0,
-    maxCached: 0,
-    cached: 0,
-  };
-}
-
-/**
- * Render an integer token count the way Zed does in its token-meter tooltip:
- * "1234" → "1.2k", "1234567" → "1.2M". Shorter than the raw number, easier
- * to scan inside a single-line thought chunk.
- */
-function humanizeTokens(n: number): string {
-  if (n < 1000) return String(n);
-  if (n < 1_000_000) {
-    const k = n / 1000;
-    return k >= 100 ? `${Math.round(k)}k` : `${k.toFixed(1)}k`;
-  }
-  const m = n / 1_000_000;
-  return m >= 100 ? `${Math.round(m)}M` : `${m.toFixed(1)}M`;
-}
-
-/**
- * Best-effort context-window lookup for a model id. Used as the `size` field
- * on the ACP `usage_update` notification (matches the rendering
- * `Input: <used> / <size>` in clients like Zed).
- *
- * Resolution order:
- *   1. `INVOX_CONTEXT_WINDOW_<MODELID>` env (uppercased, dots/dashes/slashes
- *      → underscores). Lets users override per model — e.g. for
- *      `qwen/qwen3-coder-30b` set `INVOX_CONTEXT_WINDOW_QWEN_QWEN3_CODER_30B=131072`.
- *   2. `INVOX_CONTEXT_WINDOW_DEFAULT` env — fallback for unknown ids.
- *   3. A small built-in table for popular families (gpt-4o, deepseek, qwen, …).
- *   4. Final fallback: 128_000 (~ what most current frontier models offer;
- *      better than 0 which would make Zed render "0/0").
- *
- * Returns a u64-safe integer.
- */
-function contextWindowFor(modelId: string): number {
-  // 1. Per-model env override
-  const envKey = `INVOX_CONTEXT_WINDOW_${modelId.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`;
-  const envOverride = process.env[envKey];
-  if (envOverride) {
-    const n = Number.parseInt(envOverride, 10);
-    if (Number.isFinite(n) && n > 0) return n;
-  }
-  // 2. Global default override
-  const defaultEnv = process.env["INVOX_CONTEXT_WINDOW_DEFAULT"];
-  if (defaultEnv) {
-    const n = Number.parseInt(defaultEnv, 10);
-    if (Number.isFinite(n) && n > 0) return n;
-  }
-  // 3. Built-in heuristics. Order matters — first match wins.
-  const id = modelId.toLowerCase();
-  for (const [pattern, size] of CONTEXT_WINDOW_TABLE) {
-    if (id.includes(pattern)) return size;
-  }
-  // 4. Final fallback. 128k is a safe modern default that won't make Zed
-  // render a meaningless `used / 0` ratio.
-  return 128_000;
-}
-
-/**
- * Substring → context-window pairs. We match by substring rather than exact
- * id so user-supplied display names (e.g. "qwen/qwen3-coder-30b") still
- * resolve. Sizes are vendor-published max context for the family.
- */
-const CONTEXT_WINDOW_TABLE: ReadonlyArray<readonly [string, number]> = [
-  // OpenAI
-  ["gpt-4o-mini", 128_000],
-  ["gpt-4o", 128_000],
-  ["gpt-4.1", 1_000_000],
-  ["gpt-4-turbo", 128_000],
-  ["gpt-4", 8_192],
-  ["gpt-3.5", 16_385],
-  ["o1-mini", 128_000],
-  ["o1", 200_000],
-  ["o3-mini", 200_000],
-  ["o3", 200_000],
-  // Anthropic (via OAI-compat proxies)
-  ["claude-3-5-sonnet", 200_000],
-  ["claude-3-5-haiku", 200_000],
-  ["claude-3-opus", 200_000],
-  ["claude-sonnet-4", 200_000],
-  ["claude-opus-4", 200_000],
-  ["claude", 200_000],
-  // Open weights — common deployments
-  ["deepseek-r1", 128_000],
-  ["deepseek-v3", 128_000],
-  ["deepseek-coder", 128_000],
-  ["deepseek", 128_000],
-  ["qwen3-coder", 256_000],
-  ["qwen3", 128_000],
-  ["qwen2.5", 128_000],
-  ["qwen", 128_000],
-  ["llama-3.3", 128_000],
-  ["llama-3.1", 128_000],
-  ["llama", 8_192],
-  // Xiaomi MiMo. v2.5 / v2.5-pro both ship 1M tokens; the older 7B-RL series
-  // is 32k. Match the v2.5 family first by substring.
-  ["mimo-v2.5", 1_000_000],
-  ["mimo", 32_768],
-  ["mistral-large", 128_000],
-  ["mistral", 32_768],
-  ["gemini-2", 1_000_000],
-  ["gemini", 1_000_000],
-];
