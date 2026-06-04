@@ -216,6 +216,69 @@ describe("loadHooks", () => {
     expect(r1).not.toBe(r2);
   });
 
+  // ── A4 / K6：「prompt loop 不再反复 loadHooks」的命中验收 ───────
+  //
+  // 背景：旧实现里 prompt() 每个 hook 触发点都调 loadHooks(session.cwd)，
+  // 4 次起步、每多一个 tool_call 还 +1。虽然 hookCache 拦住了文件 IO，但
+  // 「显式持有 session.hooks」是 A4 的重点，配合下面的命中验证能锁死
+  // 真实损耗。
+  //
+  // 验证手法：行为级断言 —— 缓存命中后即使磁盘上的 hooks.json 被改写，
+  // 后续 loadHooks 也看不到改动；只有 clearHookCache 才让磁盘最新内容
+  // 重新生效。比 spy node:fs 可靠，且不依赖 ESM mock 黑魔法。
+
+  it("A4: 缓存命中时不重新读 hooks.json（磁盘 mutation 不可见）", () => {
+    const p = createPlugin(env, "io-probe", {
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: "Write",
+            hooks: [{ type: "command", command: "echo first" }],
+          },
+        ],
+      },
+    });
+    writePluginsJson(env, [{ path: p }]);
+    clearHookCache();
+    clearDiscoveryCache();
+
+    // 首次：读取磁盘
+    const r1 = loadHooks(env.cwd);
+    expect(r1.preToolUse).toHaveLength(1);
+    expect(r1.preToolUse[0]!.hooks[0]!.command).toBe("echo first");
+
+    // 磁盘改写 hooks.json —— 如果 loadHooks 真的重读，下面会看到 "MUTATED"
+    writeFileSync(
+      join(p, "hooks", "hooks.json"),
+      JSON.stringify({
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: "Write",
+              hooks: [{ type: "command", command: "echo MUTATED" }],
+            },
+          ],
+        },
+      }),
+      "utf8",
+    );
+
+    // 连续 9 次调用 —— 模拟 prompt loop 里的 SessionStart + UserPromptSubmit
+    // + Stop + 多个 PreToolUse + PostToolUse 触发点
+    for (let i = 0; i < 9; i++) {
+      const ri = loadHooks(env.cwd);
+      expect(ri).toBe(r1); // 引用稳定
+      expect(ri.preToolUse[0]!.hooks[0]!.command).toBe("echo first"); // 没被磁盘改动污染
+    }
+
+    // 显式清缓存后才看到新磁盘内容
+    clearHookCache();
+    clearDiscoveryCache();
+    const rAfter = loadHooks(env.cwd);
+    expect(rAfter).not.toBe(r1);
+    expect(rAfter.preToolUse[0]!.hooks[0]!.command).toBe("echo MUTATED");
+  });
+
   it("disabled plugin 的 hooks 不被加载", () => {
     const p = createPlugin(env, "disabled-hook", {
       hooks: {

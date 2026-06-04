@@ -3,6 +3,7 @@
 // src/tools/.
 
 import { log } from "../log.js";
+import { parseToolArguments } from "../agent/json.js";
 import { kindFromTier, needsPermission, requestPermission } from "./permissions.js";
 import { getTool } from "./registry.js";
 import { errorResult, type ToolExecContext, type ToolExecResult } from "./types.js";
@@ -17,12 +18,13 @@ export async function executeTool(
     return errorResult(`unknown tool: ${name}`, "other", name);
   }
 
-  let args: Record<string, unknown>;
-  try {
-    args = rawArgs.trim() === "" ? {} : (JSON.parse(rawArgs) as Record<string, unknown>);
-  } catch (e) {
-    return errorResult(`bad arguments JSON: ${(e as Error).message}`, "other", `${name}(?)`);
+  // A3 / K5：用共享的 parseToolArguments 替代本地 try/catch；它和 agent.ts 走
+  // 同一套语义（空字符串 → {}，非对象 → err，畸形 JSON → err with preview）。
+  const argsResult = parseToolArguments(rawArgs);
+  if (!argsResult.ok) {
+    return errorResult(argsResult.error, "other", `${name}(?)`);
   }
+  const args = argsResult.value;
 
   if (needsPermission(tool.tier, ctx.policy)) {
     const granted = await requestPermission(tool.name, tool.tier, args, ctx);

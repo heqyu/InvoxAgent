@@ -19,7 +19,7 @@ import {
   type SystemPromptDef,
 } from "./agent/agent.js";
 import { EchoProvider } from "./llm/echo.js";
-import { MockToolProvider } from "./llm/mock-tools.js";
+import { BadJsonProvider, MockToolProvider } from "./llm/mock-tools.js";
 import { OpenAIProvider } from "./llm/openai.js";
 import type { LLMProvider } from "./llm/types.js";
 import { log } from "./log.js";
@@ -200,6 +200,11 @@ function pickProvider(): LLMProvider {
   if (mock === "tools") {
     log.info("provider: mock-tools (INVOX_MOCK=tools)");
     return new MockToolProvider();
+  }
+  if (mock === "bad-json") {
+    // A3 / K5 验收 mock：第一轮吐畸形 JSON tool_call，第二轮自我纠错。
+    log.info("provider: mock-bad-json (INVOX_MOCK=bad-json)");
+    return new BadJsonProvider();
   }
   if (mock === "1") {
     log.info("provider: echo (INVOX_MOCK=1)");

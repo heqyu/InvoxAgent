@@ -67,6 +67,80 @@ export class MockToolProvider implements LLMProvider {
   }
 }
 
+/**
+ * BadJsonProvider — A3 / K5 acceptance harness.
+ *
+ * Phase 1: emit a Read tool_call with **deliberately malformed JSON**
+ *   arguments (truncated string), simulating an LLM that occasionally
+ *   ships broken tool args.
+ *
+ * Phase 2: agent should have written an error tool message back to history
+ *   describing the parse failure (instead of crashing the prompt loop).
+ *   We detect the error in history, then emit a corrected Read tool_call
+ *   — modeling the LLM's "self-correction" path.
+ *
+ * Phase 3: after the corrected Read returns content, finish with a summary.
+ *
+ * This proves: bad JSON does not crash invox; LLM gets the error in
+ * tool result and can recover.
+ */
+export class BadJsonProvider implements LLMProvider {
+  readonly name = "mock-bad-json";
+  private callCounter = 0;
+
+  async *stream(req: LLMRequest): AsyncIterable<LLMDelta> {
+    const lastMsg = req.messages.at(-1);
+    const lastIsTool = lastMsg?.role === "tool";
+
+    if (!lastIsTool) {
+      // Phase 1: emit malformed JSON tool_call.
+      this.callCounter += 1;
+      const id = `bad_${this.callCounter}`;
+      yield { kind: "text", text: "Trying to read with bad args..." };
+      const call: ParsedToolCall = {
+        id,
+        name: "Read",
+        // 截断的 JSON：缺收尾的引号和右大括号
+        arguments: '{"path": "package.json',
+      };
+      yield { kind: "tool_call", call };
+      yield { kind: "finish", reason: "tool_calls" };
+      return;
+    }
+
+    // Phase 2 / 3: 看上一条 tool message 的内容。如果是错误信息，重试一次
+    // 正确的 tool_call —— 模拟 LLM 自我纠错。如果是文件内容（recovery 已成
+    // 功），收尾。
+    const toolResult = contentToString(lastMsg?.content);
+    const isError = /not valid JSON|must be a JSON object/.test(toolResult);
+
+    if (isError) {
+      // Phase 2: self-correct.
+      this.callCounter += 1;
+      const id = `good_${this.callCounter}`;
+      yield {
+        kind: "text",
+        text: " Got the error, retrying with valid JSON.",
+      };
+      const call: ParsedToolCall = {
+        id,
+        name: "Read",
+        arguments: JSON.stringify({ path: "package.json" }),
+      };
+      yield { kind: "tool_call", call };
+      yield { kind: "finish", reason: "tool_calls" };
+      return;
+    }
+
+    // Phase 3: corrected read returned. Finish.
+    yield {
+      kind: "text",
+      text: ` Read succeeded (${toolResult.length} bytes).`,
+    };
+    yield { kind: "finish", reason: "stop" };
+  }
+}
+
 function lastUserContent(msgs: LLMMessage[]): string {
   for (let i = msgs.length - 1; i >= 0; i--) {
     const m = msgs[i];

@@ -111,6 +111,8 @@ interface SmokeCase {
 const SMOKES: SmokeCase[] = [
   { file: "smoke-stdio.ts", timeoutMs: 30_000 },
   { file: "smoke-tools.ts", timeoutMs: 30_000 },
+  // A3 / K5 验收：畸形 JSON tool_call 不挂 agent，且 LLM 能自我纠错
+  { file: "smoke-bad-json.ts", timeoutMs: 30_000 },
   { file: "smoke-ws.ts", timeoutMs: 30_000 },
   { file: "smoke-cancel.ts", timeoutMs: 30_000 },
   { file: "smoke-stage6.ts", timeoutMs: 30_000 },

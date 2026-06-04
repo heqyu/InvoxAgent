@@ -83,8 +83,10 @@ import {
   runPostToolUse,
   runPostToolUseFailure,
   runStop,
+  type HookRegistry,
 } from "../plugins/hooks.js";
 import { accumulateTurnUsage } from "./usage-meter.js";
+import { safeParseJSON, parseToolArguments } from "./json.js";
 
 /** Read the agent package version once, cache for the process lifetime. */
 let _agentVersion: string | undefined;
@@ -160,6 +162,13 @@ interface Session {
   turnStartedAt: number;
   /** MCP client manager — owns connected MCP servers for this session. */
   mcpClient?: McpClientManager;
+  /**
+   * 本会话生效的 hook 注册表（A4 / K6）—— 在 newSession / loadSession 时一次
+   * 加载并缓存到 session 上，prompt loop / 各 hook 触发点全部走 `session.hooks`
+   * 不再反复 `loadHooks(cwd)`。底层 `hookCache` 仍然按 cwd 缓存，但显式持有
+   * 引用让代码意图更清晰、单测注入更容易。
+   */
+  hooks: HookRegistry;
   /**
    * Persisted snapshot of the last completed turn's usage. Survives restarts
    * so the user can see what the previous turn cost after reloadSession.
@@ -345,6 +354,7 @@ export class InvoxAgent implements Agent {
       },
       turnUsage: emptyUsage(),
       turnStartedAt: 0,
+      hooks: loadHooks(params.cwd),
     };
     this.sessions.set(id, session);
     log.info("session created", { id, cwd: params.cwd });
@@ -355,8 +365,7 @@ export class InvoxAgent implements Agent {
     await this.initMcpForSession(session);
 
     // Fire SessionStart hooks (non-blocking, best-effort).
-    const hooks = loadHooks(session.cwd);
-    runSessionStart(hooks, {
+    runSessionStart(session.hooks, {
       hook_event_name: "SessionStart",
       ...this.hookBase(session),
       source: "startup",
@@ -445,6 +454,7 @@ export class InvoxAgent implements Agent {
       turnUsage: emptyUsage(),
       turnStartedAt: 0,
       lastTurnUsage: snapshot.lastTurnUsage,
+      hooks: loadHooks(params.cwd),
     };
     this.sessions.set(session.id, session);
 
@@ -696,8 +706,7 @@ export class InvoxAgent implements Agent {
 
     // Run UserPromptSubmit hooks — plugins can inject additional context
     // or block the prompt entirely.
-    const hooks = loadHooks(session.cwd);
-    const submitResult = await runUserPromptSubmit(hooks, {
+    const submitResult = await runUserPromptSubmit(session.hooks, {
       hook_event_name: "UserPromptSubmit",
       ...this.hookBase(session),
       prompt: contentToString(userContent),
@@ -730,7 +739,6 @@ export class InvoxAgent implements Agent {
     const max = maxIterations();
     let stopReason: "end_turn" | "cancelled" | "max_turn_requests" =
       "max_turn_requests";
-    const stopHooks = loadHooks(session.cwd);
     const hookBase = this.hookBase(session);
     // Mirrors Claude Code: true only after a Stop hook actually blocked and the
     // loop continued. Reset to false when the hook放行 or on first call.
@@ -743,7 +751,7 @@ export class InvoxAgent implements Agent {
           // go straight through (matches Claude Code: Stop hook only runs when the
           // model naturally decides to stop).
           if (result.reason === "end_turn") {
-            const stopResult = await runStop(stopHooks, {
+            const stopResult = await runStop(session.hooks, {
               hook_event_name: "Stop",
               ...hookBase,
               stop_hook_active: stopHookActive,
@@ -981,14 +989,46 @@ export class InvoxAgent implements Agent {
       });
       const toolStartedAt = Date.now();
 
-      // ── PreToolUse hook ──────────────────────────────────────
-      const toolArgs: Record<string, unknown> =
-        call.arguments.trim() === ""
-          ? {}
-          : (JSON.parse(call.arguments) as Record<string, unknown>);
+      // ── Tool 参数解析（A3 / K5）──────────────────────────────
+      // 旧实现：裸 JSON.parse(call.arguments) —— 一个畸形 JSON 直接挂掉
+      // 整个 prompt loop。改为容错版：解析失败 → emit failed update +
+      // 写一条 error tool message 给 LLM 自我纠错 + continue 下一个
+      // tool_call。
+      const argsResult = parseToolArguments(call.arguments);
+      if (!argsResult.ok) {
+        log.warn("tool args parse failed", {
+          name: call.name,
+          toolCallId: call.id,
+          error: argsResult.error,
+        });
+        await this.conn.sessionUpdate({
+          sessionId: session.id,
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId: call.id,
+            status: "failed",
+            title: `${call.name} (bad arguments)`,
+            kind: startKind,
+            content: [
+              {
+                type: "content",
+                content: { type: "text", text: argsResult.error },
+              },
+            ],
+          },
+        });
+        session.history.push({
+          role: "tool",
+          tool_call_id: call.id,
+          content: argsResult.error,
+          name: call.name,
+        });
+        continue;
+      }
+      const toolArgs: Record<string, unknown> = argsResult.value;
 
-      const toolHooks = loadHooks(session.cwd);
-      const preResult = await runPreToolUse(toolHooks, {
+      // ── PreToolUse hook ──────────────────────────────────────
+      const preResult = await runPreToolUse(session.hooks, {
         hook_event_name: "PreToolUse",
         ...this.hookBase(session),
         tool_name: call.name,
@@ -1059,7 +1099,7 @@ export class InvoxAgent implements Agent {
 
       // ── PostToolUse / PostToolUseFailure hooks ────────────────
       if (r.ok) {
-        const postResult = await runPostToolUse(toolHooks, {
+        const postResult = await runPostToolUse(session.hooks, {
           hook_event_name: "PostToolUse",
           ...this.hookBase(session),
           tool_name: call.name,
@@ -1080,7 +1120,7 @@ export class InvoxAgent implements Agent {
           ];
         }
       } else {
-        const postResult = await runPostToolUseFailure(toolHooks, {
+        const postResult = await runPostToolUseFailure(session.hooks, {
           hook_event_name: "PostToolUseFailure",
           ...this.hookBase(session),
           tool_name: call.name,
@@ -1721,14 +1761,8 @@ function uriToPath(uri: string): string {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
-
-function safeParseJSON(s: string): Record<string, unknown> | null {
-  try {
-    return JSON.parse(s) as Record<string, unknown>;
-  } catch {
-    return null;
-  }
-}
+// safeParseJSON 已抽到 ./json.ts（A3 / K5）；这里仅保留 LLM 输出格式化所需的
+// 本地 helper（previewArgs 等）。
 
 function previewArgs(rawArgs: string): unknown {
   const parsed = safeParseJSON(rawArgs);
