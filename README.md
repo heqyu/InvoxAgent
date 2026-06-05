@@ -46,7 +46,7 @@
 
 - Speaks Zed's **Agent Client Protocol** (JSON-RPC 2.0) over stdio (and WebSocket in stage 4+)
 - Bridges to any **OpenAI-compatible** LLM endpoint
-- Streams replies and **routes LLM tool_calls through ACP** — `Read`, `Write`, `Edit`, `Bash`, `Glob`, `Grep` — with a multi-step loop bounded at 8 iterations per turn
+- Streams replies and **routes LLM tool_calls through ACP** — `Read`, `Write`, `Edit`, `MakePlan`, `Bash`, `Glob`, `Grep` — with a multi-step loop bounded at 8 iterations per turn
 
 ## Tools the LLM can call
 
@@ -55,6 +55,7 @@
 | `Read(path)` | `fs/read_text_file` | `fs.readTextFile` |
 | `Write(path, content)` | `fs/write_text_file` (also tries to read old content for diff) | `fs.writeTextFile` |
 | `Edit(path, old_string, new_string)` | `fs/write_text_file` (precise string replacement) | `fs.readTextFile` + `fs.writeTextFile` |
+| `MakePlan(theme, content)` | writes `<cwd>/.invox/plans/<theme>.md` via `fs/write_text_file` | `fs.writeTextFile` |
 | `Bash(command)` | `terminal/create` + `terminal/wait_for_exit` + `terminal/output` | `terminal: true` |
 | `Glob(pattern)` | client-side glob (fast-glob) | — |
 | `Grep(pattern)` | client-side ripgrep | — |
@@ -264,7 +265,7 @@ When you start invox, four built-ins are always available even with zero configu
 | ID | What it does | Tools | MCP |
 |---|---|---|---|
 | `Worker` (default) | General coding assistant — open all tools | all | yes |
-| `Plan` | Read-only research; produces structured plans | `Read` / `Glob` / `Grep` / `Skill` | yes |
+| `Plan` | Read-only research; saves structured plans to `.invox/plans` | `Read` / `Glob` / `Grep` / `Skill` / `MakePlan` | yes |
 | `Ask` | Pure Q&A — no tools at all | (none) | no |
 | `CodeReviewer` | Adversarial review; can `Bash` for `git diff` / lint but never edit | `Read` / `Glob` / `Grep` / `Bash` / `Skill` | yes |
 
@@ -303,7 +304,7 @@ Three patterns, mixable in one array:
 | `["Read","Glob"]` | Strict whitelist |
 | `["-Bash","-Write"]` or `["*","-Bash"]` | Full set minus listed tools |
 
-Tool names are PascalCase (`Read` / `Write` / `Edit` / `Glob` / `Grep` / `Bash` / `Skill`). Unknown names are skipped with a warning.
+Tool names are PascalCase (`Read` / `Write` / `Edit` / `MakePlan` / `Glob` / `Grep` / `Bash` / `Skill`). Unknown names are skipped with a warning.
 
 #### `model` syntax
 

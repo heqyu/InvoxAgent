@@ -8,6 +8,7 @@ import { bashTool } from "./bash.js";
 import { editFileTool } from "./edit-file.js";
 import { globTool } from "./glob.js";
 import { grepTool } from "./grep.js";
+import { makePlanTool } from "./make-plan.js";
 import { readFileTool } from "./read-file.js";
 import { skillTool } from "./skill.js";
 import { writeFileTool } from "./write-file.js";
@@ -17,6 +18,7 @@ export const TOOLS: readonly Tool[] = [
   readFileTool,
   writeFileTool,
   editFileTool,
+  makePlanTool,
   globTool,
   grepTool,
   bashTool,

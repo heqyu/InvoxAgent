@@ -187,13 +187,19 @@ const DEFAULT_USER_AGENTS: Array<Omit<AgentTemplate, "id"> & { id: string }> = [
     id: "Plan",
     name: "Plan",
     description:
-      "只读勘察：仅 Read / Glob / Grep / Skill，绝不修改任何文件，专注产出方案。",
+      "只读勘察 + 方案落盘：Read / Glob / Grep / Skill 调研，MakePlan 写入 .invox/plans。",
     prompt:
       `You are a planning assistant in Zed. You are in PLAN MODE.\n` +
-      `Your only job is to investigate code and produce written plans.\n` +
-      `You have NO write access — Edit, Write, and Bash are unavailable.\n\n` +
-      `# Output contract\n` +
-      `Every plan MUST contain these sections, in order:\n` +
+      `Your job is to investigate code and produce written plans.\n` +
+      `You cannot edit source files or run commands — Edit, Write, and Bash are unavailable.\n` +
+      `You have exactly one persistence tool: MakePlan. It saves Markdown to <cwd>/.invox/plans/<theme>.md.\n\n` +
+      `# Required workflow\n` +
+      `1. Investigate with Read / Glob / Grep / Skill until you have file-backed evidence.\n` +
+      `2. Choose a short, filename-safe theme for the plan.\n` +
+      `3. Call MakePlan with that theme and the complete Markdown plan content.\n` +
+      `4. After MakePlan succeeds, reply briefly with the saved path and a summary.\n\n` +
+      `# Plan content contract\n` +
+      `Every saved plan MUST contain these sections, in order:\n` +
       `1. **Goal** — restate what the user wants in one sentence.\n` +
       `2. **Findings** — bullet list, each citing \`path:line\` for evidence.\n` +
       `   Unverified claims must be marked "(unverified)".\n` +
@@ -207,15 +213,16 @@ const DEFAULT_USER_AGENTS: Array<Omit<AgentTemplate, "id"> & { id: string }> = [
       `- Run Glob + Grep in PARALLEL when you have multiple hypotheses.\n` +
       `- Cite file:line for every claim. No vague "this seems related".\n\n` +
       `# Hard constraints\n` +
-      `- If asked to "just do it" or "implement now", refuse and reply:\n` +
-      `  "I'm in Plan mode — switch the agent dropdown to Worker to apply\n` +
-      `  changes. Here's the plan I'd execute:" then produce the plan anyway.\n` +
+      `- If asked to "just do it" or "implement now", refuse to modify code and\n` +
+      `  save the implementation plan with MakePlan instead.\n` +
+      `- Do not output a final plan only in chat. The durable deliverable is the\n` +
+      `  MakePlan file under <cwd>/.invox/plans/<theme>.md.\n` +
       `- Do not suggest commands the user should paste into a terminal as a\n` +
       `  substitute for using a tool — that's a workaround, not a plan.\n\n` +
       `# Communication\n` +
       `- Use Markdown headings, not prose blobs.\n` +
       `- Match the user's language. Be terse.`,
-    tools: ["Read", "Glob", "Grep", "Skill"],
+    tools: ["Read", "Glob", "Grep", "Skill", "MakePlan"],
     // Plan 需要"高度推理规划"能力 → 默认指向 INVOX_MODEL_PRO
     model: "$MODEL_PRO",
   },
@@ -296,15 +303,33 @@ const DEFAULT_USER_AGENTS: Array<Omit<AgentTemplate, "id"> & { id: string }> = [
  *
  * 写入规则（升级语义）：
  *   - 文件不存在               → 写入完整默认值
- *   - 文件存在且含 model 字段  → 尊重用户，跳过
+ *   - 文件存在且含 model 字段  → 默认尊重用户，跳过
  *   - 文件存在但**缺 model**   → 旧版升级，覆盖写最新模板
  *     （Phase H 引入 model 字段，已部署的旧 seed 文件没这个字段；这条规则
  *      让它一次性升级到带 PRO/LITE 默认的新版本，开发期可控覆盖）
+ *   - 默认 Plan seed 缺 MakePlan → 覆盖写最新模板，让 Plan 能落盘方案
  *   - 文件存在但 JSON 损坏     → 视作需要修复，覆盖写
  *
  * 用户已经手动改过 model 字段（甚至改成 null / "$MY_VAR"）就保留，
  * 不会被反复覆盖。
  */
+function isLegacyDefaultPlanMissingMakePlan(
+  tpl: Omit<AgentTemplate, "id"> & { id: string },
+  parsed: Record<string, unknown>,
+): boolean {
+  if (tpl.id !== "Plan" || !tpl.tools?.includes("MakePlan")) return false;
+  const tools = parsed["tools"];
+  if (!Array.isArray(tools) || tools.includes("MakePlan")) return false;
+
+  const name = String(parsed["name"] ?? "");
+  const prompt = String(parsed["prompt"] ?? "");
+  return (
+    name === "Plan" &&
+    prompt.includes("PLAN MODE") &&
+    prompt.includes("You have NO write access")
+  );
+}
+
 function seedDefaultAgents(): void {
   const userAgentsDir = join(homedir(), ".invox", "agents");
   if (!existsSync(userAgentsDir)) {
@@ -323,8 +348,12 @@ function seedDefaultAgents(): void {
     const filePath = join(userAgentsDir, `${tpl.id}.json`);
 
     // 决定是否（重新）写入
-    let action: "skip" | "create" | "upgrade-no-model" | "repair-broken" =
-      "create";
+    let action:
+      | "skip"
+      | "create"
+      | "upgrade-no-model"
+      | "upgrade-plan-makeplan"
+      | "repair-broken" = "create";
     if (existsSync(filePath)) {
       try {
         const raw = readFileSync(filePath, "utf8");
@@ -341,6 +370,13 @@ function seedDefaultAgents(): void {
           // （Ask 模板没 model 字段，遇到旧版也不强行写入）
           if (!hasModelKey && tpl.model) {
             action = "upgrade-no-model";
+          } else if (
+            isLegacyDefaultPlanMissingMakePlan(
+              tpl,
+              parsed as Record<string, unknown>,
+            )
+          ) {
+            action = "upgrade-plan-makeplan";
           } else {
             action = "skip";
           }

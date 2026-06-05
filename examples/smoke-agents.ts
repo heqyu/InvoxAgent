@@ -143,11 +143,12 @@ async function main(): Promise<void> {
         name: "Plan",
         description: "test override with model",
         prompt:
-          "You are a planning assistant in Zed.\nDo not modify files.",
-        tools: ["Read", "Glob", "Grep", "Skill"],
+          "You are a planning assistant in Zed.\nUse MakePlan to persist plans.",
+        tools: ["Read", "Glob", "Grep", "Skill", "MakePlan"],
         model: "$MODEL_PRO",
       },
       null,
+
       2,
     ),
     "utf8",

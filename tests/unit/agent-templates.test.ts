@@ -75,6 +75,7 @@ const ALL_SPECS: ToolSpec[] = [
   fakeSpec("Read"),
   fakeSpec("Write"),
   fakeSpec("Edit"),
+  fakeSpec("MakePlan"),
   fakeSpec("Glob"),
   fakeSpec("Grep"),
   fakeSpec("Bash"),
@@ -85,6 +86,7 @@ const ALL_SPECS: ToolSpec[] = [
 
 describe("loadAgentTemplates", () => {
   let env: FakeEnv;
+
 
   beforeEach(() => {
     env = makeFakeEnv();
@@ -122,11 +124,20 @@ describe("loadAgentTemplates", () => {
       expect(ask?.mcp).toBe(false);
     });
 
+    it("seed 后的 Plan 模板包含 MakePlan 并要求落盘到 .invox/plans", () => {
+      const r = loadAgentTemplates(env.cwd);
+      const plan = r.find((a) => a.id === "Plan");
+      expect(plan?.tools).toEqual(["Read", "Glob", "Grep", "Skill", "MakePlan"]);
+      expect(plan?.prompt).toContain("MakePlan");
+      expect(plan?.prompt).toContain(".invox/plans/<theme>.md");
+    });
+
     it("seed 不覆盖用户已有的 Plan.json", () => {
       // 用户先写自定义 Plan
       writeAgent(env.home, "Plan", {
         name: "我的 Plan 不要被覆盖",
         prompt: "user custom plan",
+
         model: "my-custom-model", // 含 model 字段 → 视作"已升级"，跳过
       });
       const r = loadAgentTemplates(env.cwd);
@@ -147,12 +158,29 @@ describe("loadAgentTemplates", () => {
       const plan = r.find((a) => a.id === "Plan");
       // 升级后用 DEFAULT_USER_AGENTS 的版本（含 model）
       expect(plan?.model).toBe("$MODEL_PRO");
+      expect(plan?.tools).toContain("MakePlan");
+    });
+
+    it("旧版默认 Plan.json（已有 model 但缺 MakePlan）会升级", () => {
+      writeAgent(env.home, "Plan", {
+        name: "Plan",
+        prompt:
+          "You are a planning assistant in Zed. You are in PLAN MODE.\n" +
+          "You have NO write access — Edit, Write, and Bash are unavailable.",
+        tools: ["Read", "Glob", "Grep", "Skill"],
+        model: "$MODEL_PRO",
+      });
+      const r = loadAgentTemplates(env.cwd);
+      const plan = r.find((a) => a.id === "Plan");
+      expect(plan?.tools).toEqual(["Read", "Glob", "Grep", "Skill", "MakePlan"]);
+      expect(plan?.prompt).toContain("MakePlan");
     });
 
     it("Ask 旧文件（缺 model）不被升级 —— DEFAULT 中 Ask 本来就没 model", () => {
       writeAgent(env.home, "Ask", {
         name: "我的 Ask",
         prompt: "user custom ask",
+
       });
       const r = loadAgentTemplates(env.cwd);
       const ask = r.find((a) => a.id === "Ask");

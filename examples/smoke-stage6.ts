@@ -255,6 +255,35 @@ async function main(): Promise<void> {
   );
   console.error("[stage6] ✓ Write seeds cache so subsequent Edit works");
 
+  // ── 9. MakePlan 只能把方案写到 .invox/plans/<theme>.md。
+  const planContent = "# Demo Plan\n\n## Goal\nSave a plan.\n";
+  r2 = await executeTool(
+    "MakePlan",
+    JSON.stringify({
+      theme: "demo-plan",
+      content: planContent,
+      description: "save plan",
+    }),
+    ctx2,
+  );
+  assert(r2.ok, `9a. MakePlan should succeed: ${r2.resultText}`);
+  const planPath = join(dir, ".invox", "plans", "demo-plan.md");
+  assert(
+    readFileSync(planPath, "utf8") === planContent,
+    "9a. MakePlan should write the expected markdown file",
+  );
+  r2 = await executeTool(
+    "MakePlan",
+    JSON.stringify({
+      theme: "../escape",
+      content: planContent,
+      description: "reject path traversal",
+    }),
+    ctx2,
+  );
+  assert(!r2.ok, `9b. MakePlan should reject path-like themes`);
+  console.error("[stage6] ✓ MakePlan writes only under .invox/plans");
+
   // Cleanup.
   rmSync(dir, { recursive: true, force: true });
 
