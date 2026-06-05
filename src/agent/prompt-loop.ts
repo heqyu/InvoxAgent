@@ -108,11 +108,25 @@ export interface ToolCallBatch {
 
 const NON_PARALLEL_TOOL_NAMES = new Set(["Bash", "Edit"]);
 
+/**
+ * 即便 tier 不是 "read" 也强制视为并行安全的工具。
+ *
+ * SubAgent 是典型例子：它的 tier="execute"（语义上"可以做任何事"），但每个
+ * subagent 跑在独立的 history / toolState / abort / turnUsage 里，多个
+ * subagent 之间没有共享可变状态 —— 真正"并行不安全"的还是它们内部各自
+ * 调到的 Edit / Bash，那一层会被 subagent 自己的 prompt-loop 串行化。
+ *
+ * 让 SubAgent 在父循环里能并行启动，就能让 LLM 一次性派发多个调研子任务
+ * （例：同时跑 Plan + CodeReviewer + Ask），父总耗时 = max(子) 而非 sum(子)。
+ */
+const PARALLEL_SAFE_OVERRIDE_TOOL_NAMES = new Set(["SubAgent"]);
+
 /** 判断单个工具调用是否允许放入并行批次。 */
 export function isParallelSafeToolCall(call: ParsedToolCall): boolean {
   const tool = getTool(call.name);
   if (!tool) return false;
   if (NON_PARALLEL_TOOL_NAMES.has(call.name)) return false;
+  if (PARALLEL_SAFE_OVERRIDE_TOOL_NAMES.has(call.name)) return true;
   return tool.tier === "read";
 }
 

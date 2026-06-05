@@ -55,6 +55,14 @@ export interface SubAgentRunResult {
   stopReason: "end_turn" | "max_turn_requests" | "refusal" | "cancelled";
   /** 实际跑过的 LLM ↔ tool 往返次数。 */
   iterations: number;
+  /**
+   * 本次 subagent 运行的独立日志文件路径。
+   *
+   * subagent 内部所有 sessionUpdate（tool_call / tool_call_update /
+   * agent_message_chunk / usage_update 等）都被父 UI 静默掉、按时间序写到
+   * 这个文件，方便事后查"subagent 到底跑了什么"。日志写入失败时为空。
+   */
+  logPath?: string;
   /** ok=false 时给出的人类可读原因。 */
   error?: string;
 }

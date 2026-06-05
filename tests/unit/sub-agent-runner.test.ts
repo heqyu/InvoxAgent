@@ -5,15 +5,24 @@
 //   - 空 prompt → ok=false
 //   - 已知模板 + 单轮 LLM 回答 → ok=true，finalText 回收 LLM 文本
 //   - 父 abort 触发后 subagent 立即停止，stopReason="cancelled"
-//   - turn usage 合并：parent.turnUsage 累加 subagent 消耗
-//   - 包装的 conn：agent_message_chunk 重写为 agent_thought_chunk，
-//                  usage_update 被吞掉
+//   - turnUsage 不累加：父 turnUsage 仅用于父 context 余量估算
+//   - 包装的 conn：所有 sessionUpdate 全量静默（不向父 UI 转发）
+//   - 独立日志文件：写到 <cwd>/.invox/logs/subagent-*.log，含 start / iter / done
 
 import { describe, expect, it } from "vitest";
 import type {
   AgentSideConnection,
   SessionNotification,
 } from "@agentclientprotocol/sdk";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { runSubAgent } from "../../src/agent/sub-agent-runner.js";
 import type { IterationDeps } from "../../src/agent/prompt-loop.js";
 import type { Session } from "../../src/agent/session-types.js";
@@ -59,10 +68,10 @@ function textRound(text: string): LLMDelta[] {
   ];
 }
 
-function makeParent(): Session {
+function makeParent(cwd?: string): Session {
   return {
     id: "parent-session",
-    cwd: "/tmp/sub-agent-test",
+    cwd: cwd ?? "/tmp/sub-agent-test",
     history: [],
     abort: new AbortController(),
     toolState: { readPaths: new Set(), cache: new FileCache() },
@@ -72,6 +81,12 @@ function makeParent(): Session {
     turnStartedAt: 0,
     hooks: new HookRegistry(),
   };
+}
+
+/** 临时目录 helper —— 给需要"真的写日志文件"的用例用。 */
+function makeTmpCwd(): { cwd: string; cleanup: () => void } {
+  const cwd = mkdtempSync(join(tmpdir(), "invox-sub-agent-test-"));
+  return { cwd, cleanup: () => rmSync(cwd, { recursive: true, force: true }) };
 }
 
 function makeRecordingConn(): {
@@ -174,70 +189,77 @@ describe("runSubAgent", () => {
   });
 
   it("跑通已知模板：LLM 单轮文本输出 → ok=true + finalText 回收", async () => {
-    const parent = makeParent();
-    const { conn, notifs } = makeRecordingConn();
-    const provider = new ScriptedProvider([textRound("hello from sub")]);
-    const registry = new Map([["Worker", WORKER_TPL]]);
-    const deps = makeDeps(conn, provider, registry);
+    const { cwd, cleanup } = makeTmpCwd();
+    try {
+      const parent = makeParent(cwd);
+      const { conn, notifs } = makeRecordingConn();
+      const provider = new ScriptedProvider([textRound("hello from sub")]);
+      const registry = new Map([["Worker", WORKER_TPL]]);
+      const deps = makeDeps(conn, provider, registry);
 
-    const r = await runSubAgent(
-      { parentDeps: deps, parent },
-      { subagentType: "Worker", prompt: "say hi", description: "greet" },
-      new AbortController().signal,
-    );
+      const r = await runSubAgent(
+        { parentDeps: deps, parent },
+        { subagentType: "Worker", prompt: "say hi", description: "greet" },
+        new AbortController().signal,
+      );
 
-    expect(r.ok).toBe(true);
-    expect(r.stopReason).toBe("end_turn");
-    expect(r.iterations).toBe(1);
-    expect(r.finalText).toBe("hello from sub");
+      expect(r.ok).toBe(true);
+      expect(r.stopReason).toBe("end_turn");
+      expect(r.iterations).toBe(1);
+      expect(r.finalText).toBe("hello from sub");
 
-    // 包装的 conn：subagent 的 agent_message_chunk 应被改写为 agent_thought_chunk
-    const updates = notifs.map((n) => n.update.sessionUpdate);
-    expect(updates).toContain("agent_thought_chunk");
-    expect(updates).not.toContain("agent_message_chunk");
+      // 包装 conn 全量静默：所有 sessionUpdate 都不向父 UI 转发
+      expect(notifs).toHaveLength(0);
+    } finally {
+      cleanup();
+    }
   });
 
   it("subagent 的 token 消耗不累加进父 turnUsage（父 turnUsage 仅用于父 context 余量估算）", async () => {
-    const parent = makeParent();
-    // 模拟父已有过一些消耗
-    parent.turnUsage.input = 500;
-    parent.turnUsage.output = 80;
-    parent.turnUsage.total = 580;
-    parent.turnUsage.calls = 1;
-    parent.turnUsage.maxPrompt = 500;
+    const { cwd, cleanup } = makeTmpCwd();
+    try {
+      const parent = makeParent(cwd);
+      // 模拟父已有过一些消耗
+      parent.turnUsage.input = 500;
+      parent.turnUsage.output = 80;
+      parent.turnUsage.total = 580;
+      parent.turnUsage.calls = 1;
+      parent.turnUsage.maxPrompt = 500;
 
-    const { conn, notifs } = makeRecordingConn();
-    const provider = new ScriptedProvider([
-      [
-        { kind: "text", text: "ok" },
-        // subagent 内部产生了 token —— 但不应影响 parent.turnUsage
-        {
-          kind: "usage",
-          usage: { input: 100, output: 20, total: 120, cached: 0 },
-        },
-        { kind: "finish", reason: "stop" },
-      ],
-    ]);
-    const registry = new Map([["Worker", WORKER_TPL]]);
-    const deps = makeDeps(conn, provider, registry);
+      const { conn, notifs } = makeRecordingConn();
+      const provider = new ScriptedProvider([
+        [
+          { kind: "text", text: "ok" },
+          // subagent 内部产生了 token —— 但不应影响 parent.turnUsage
+          {
+            kind: "usage",
+            usage: { input: 100, output: 20, total: 120, cached: 0 },
+          },
+          { kind: "finish", reason: "stop" },
+        ],
+      ]);
+      const registry = new Map([["Worker", WORKER_TPL]]);
+      const deps = makeDeps(conn, provider, registry);
 
-    const r = await runSubAgent(
-      { parentDeps: deps, parent },
-      { subagentType: "Worker", prompt: "x" },
-      new AbortController().signal,
-    );
-    expect(r.ok).toBe(true);
+      const r = await runSubAgent(
+        { parentDeps: deps, parent },
+        { subagentType: "Worker", prompt: "x" },
+        new AbortController().signal,
+      );
+      expect(r.ok).toBe(true);
 
-    // 父 turnUsage 完全不变 —— subagent 跑在独立 history，不占父 context
-    expect(parent.turnUsage.input).toBe(500);
-    expect(parent.turnUsage.output).toBe(80);
-    expect(parent.turnUsage.total).toBe(580);
-    expect(parent.turnUsage.calls).toBe(1);
-    expect(parent.turnUsage.maxPrompt).toBe(500);
+      // 父 turnUsage 完全不变 —— subagent 跑在独立 history，不占父 context
+      expect(parent.turnUsage.input).toBe(500);
+      expect(parent.turnUsage.output).toBe(80);
+      expect(parent.turnUsage.total).toBe(580);
+      expect(parent.turnUsage.calls).toBe(1);
+      expect(parent.turnUsage.maxPrompt).toBe(500);
 
-    // 包装 conn 也不应转发 usage_update notif
-    const updates = notifs.map((n) => n.update.sessionUpdate);
-    expect(updates).not.toContain("usage_update");
+      // 包装 conn 全量静默 —— 不应转发任何 sessionUpdate
+      expect(notifs).toHaveLength(0);
+    } finally {
+      cleanup();
+    }
   });
 
   it("父 abort 触发后 subagent 立即收尾为 cancelled", async () => {
@@ -358,6 +380,120 @@ describe("runSubAgent", () => {
     );
     expect(r.ok).toBe(true);
     expect(r.finalText).toBe("no tools needed");
+  });
+
+  it("写独立日志文件到 <cwd>/.invox/logs/，含 start / iter / done 三段", async () => {
+    const { cwd, cleanup } = makeTmpCwd();
+    try {
+      const parent = makeParent(cwd);
+      const { conn } = makeRecordingConn();
+      const provider = new ScriptedProvider([textRound("logged answer")]);
+      const registry = new Map([["Worker", WORKER_TPL]]);
+      const deps = makeDeps(conn, provider, registry);
+
+      const r = await runSubAgent(
+        { parentDeps: deps, parent },
+        {
+          subagentType: "Worker",
+          prompt: "task A",
+          description: "do task A",
+        },
+        new AbortController().signal,
+      );
+
+      expect(r.ok).toBe(true);
+      expect(r.logPath).toBeTruthy();
+      expect(existsSync(r.logPath!)).toBe(true);
+      // 文件位于 <cwd>/.invox/logs/，文件名以 subagent- 开头
+      expect(r.logPath!.includes(join(".invox", "logs"))).toBe(true);
+      expect(r.logPath!.includes("subagent-")).toBe(true);
+
+      const content = readFileSync(r.logPath!, "utf8");
+      // start 段
+      expect(content).toContain("subagent start");
+      expect(content).toContain("subagent_type: Worker");
+      expect(content).toContain("description:   do task A");
+      expect(content).toContain("model:");
+      expect(content).toContain("prompt:");
+      // iter 段
+      expect(content).toMatch(/iter 1: start/);
+      expect(content).toMatch(/iter 1: stop end_turn/);
+      // done 段
+      expect(content).toContain("subagent done");
+      expect(content).toContain("stopReason:    end_turn");
+      expect(content).toContain("iterations:    1");
+      expect(content).toContain("finalText:");
+      expect(content).toContain("logged answer");
+
+      // 目录里只应有 1 个日志文件
+      const files = readdirSync(join(cwd, ".invox", "logs"));
+      expect(files.filter((f) => f.startsWith("subagent-"))).toHaveLength(1);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("两个 subagent 并发运行，各自有独立日志文件 + 互不污染", async () => {
+    // 同时跑两个 subagent，验证：
+    //   1. Promise.all 等都完成 → 都返回 ok=true
+    //   2. 两个独立日志文件都被生成
+    //   3. 两份 history 互不污染：分别拿到自己的 finalText
+    const { cwd, cleanup } = makeTmpCwd();
+    try {
+      const parent = makeParent(cwd);
+
+      // 两路 provider：每个自己脚本一路，确保两次 stream 调用互不干扰
+      // —— 这里复用 ScriptedProvider，但每个 subagent 各拿一个新实例
+      const { conn } = makeRecordingConn();
+
+      const registry = new Map([["Worker", WORKER_TPL]]);
+      const deps1 = makeDeps(
+        conn,
+        new ScriptedProvider([textRound("sub-A done")]),
+        registry,
+      );
+      const deps2 = makeDeps(
+        conn,
+        new ScriptedProvider([textRound("sub-B done")]),
+        registry,
+      );
+
+      const [rA, rB] = await Promise.all([
+        runSubAgent(
+          { parentDeps: deps1, parent },
+          { subagentType: "Worker", prompt: "task A" },
+          new AbortController().signal,
+        ),
+        runSubAgent(
+          { parentDeps: deps2, parent },
+          { subagentType: "Worker", prompt: "task B" },
+          new AbortController().signal,
+        ),
+      ]);
+
+      expect(rA.ok).toBe(true);
+      expect(rB.ok).toBe(true);
+      expect(rA.finalText).toBe("sub-A done");
+      expect(rB.finalText).toBe("sub-B done");
+
+      // 两个独立日志文件
+      expect(rA.logPath).not.toBe(rB.logPath);
+      expect(existsSync(rA.logPath!)).toBe(true);
+      expect(existsSync(rB.logPath!)).toBe(true);
+
+      // 父 history 完全没被改动
+      expect(parent.history).toEqual([]);
+      // 父 turnUsage 完全没被累加
+      expect(parent.turnUsage.calls).toBe(0);
+
+      // 目录里有 2 个 subagent 文件
+      const files = readdirSync(join(cwd, ".invox", "logs")).filter((f) =>
+        f.startsWith("subagent-"),
+      );
+      expect(files).toHaveLength(2);
+    } finally {
+      cleanup();
+    }
   });
 });
 

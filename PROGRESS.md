@@ -146,6 +146,19 @@
 | I3 | 接线：`tools/types.ts` 加 `SubAgentRunner` 类型 + `ToolExecContext.subAgentRunner?`；`prompt-loop.ts` 加 `IterationDeps.{agentRegistry, inSubAgent}`，`inSubAgent=true` 时剔除 SubAgent 规范，并按需把 `makeSubAgentRunner(session, deps)` 注入 ctx；`agent.ts` 把 `this.agentById` 作为 `agentRegistry` 传入 | P0 | **✅ Done**（22:18）<br/>双层递归屏障：(a) toolSpecs 中剔除 SubAgent；(b) ctx.subAgentRunner=undefined 时工具直接 fail-fast | typecheck 绿；既有 280 测试 + 15 新测 全过 |
 | I4 | 单元测试 `tests/unit/sub-agent-runner.test.ts` —— 9 个 runner 用例 + 6 个工具用例（注册表为空 / 未知 type / 空 prompt / 父 abort / 外部 signal abort / model 解析优先级 / history 隔离 / 工具递归屏障 / provenance header 格式 等） | P0 | **✅ Done**（22:20）<br/>15 case 全过；`npm test` 295 ✓ / 1 skip / 0 fail | 295 测试全绿 |
 
+### Phase I.5 — 「SubAgent v2：UI 收缩 / 独立日志 / 并行执行」（已完成，2026-06-06 01:40）
+
+> 用户原话："subagent 的工具调用收缩在 subagent 内，而不是展示在主 agent。同时 subagent 应该有自己的日志文件，而不是和主 agent 混在一起。另外 subagent 应该是可以支持多个并行的，主 agent 应该等待执行完成。另外父 agent 的 token 消耗主要是用于统计距离 max 还有多大的空间，所以 subagent 占用的不是父 agent 的上下文，无需累加进去。"
+
+| ID | 任务 | 优先级 | 状态 | 验收 |
+|---|---|---|---|---|
+| I5 | 修正 token 语义：subagent 的 turnUsage **不**累加进 parent.turnUsage（删 mergeTurnUsage 函数）。父 turnUsage 仅估父 context 余量；subagent 跑在独立 history，不占父 context | P0 | **✅ Done**（01:14）<br/>测试用例反向断言：subagent 跑完后 parent.turnUsage 维持原值不变 | typecheck 绿 |
+| I6 | 包装 conn 全量静默：subagent 内部所有 `sessionUpdate`（tool_call / tool_call_update / agent_message_chunk / usage_update / ...）都不向父 UI 转发；改为按时间序写到 subagent 自己的日志文件。父对话面板上只看到一张 SubAgent 工具卡 | P0 | **✅ Done**（01:30）<br/>非 sessionUpdate 方法（readTextFile / writeTextFile / requestPermission）原样转发 | 单测断言 `notifs.length === 0` |
+| I7 | 独立日志文件：每个 subagent run 写到 `<cwd>/.invox/logs/subagent-<pid8>-<runid8>-<ts>.log`。同步写（openSync/writeSync/closeSync），保证 runSubAgent 返回时文件可见。失败仅 warn，主流程不挂。日志含 start / iter N / done 三段，外加每条 sessionUpdate 摘要 | P0 | **✅ Done**（01:38）<br/>SubAgentRunResult 加 `logPath?` 字段；SubAgent 工具结果带 `[log: <path>]` provenance header | 单测：日志文件存在、含 start/iter/done 段；并发 subagent 各自独立文件 |
+| I8 | 多 subagent 并行：在 prompt-loop.ts 加 `PARALLEL_SAFE_OVERRIDE_TOOL_NAMES = {"SubAgent"}`，让 SubAgent 即便是 execute tier 也可放进同一并行批次。父 prompt-loop 用 Promise.all 等全部完成才进下一轮 | P0 | **✅ Done**（01:30）<br/>每个 subagent 独立 history/toolState/abort/turnUsage，无共享可变状态 | prompt-loop-parallel.test：[SubAgent×2, Read] 并行 / Edit 屏障 / [SubAgent] 并行 |
+
+
+
 
 
 ---

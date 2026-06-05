@@ -104,6 +104,52 @@ describe("prompt-loop 并行工具调用", () => {
     ]);
   });
 
+  it("SubAgent 即便是 execute tier 也作为并行安全 —— 多 subagent 同 turn 并发启动", () => {
+    // 设计意图：subagent 之间无共享可变状态（各自独立 history/toolState/abort），
+    // LLM 一次性派发 N 个 subagent 时让父 prompt-loop 把它们打成同一个 parallel
+    // batch，总耗时降为 max 而非 sum。
+    const calls = [
+      makeCall("1", "SubAgent", {
+        description: "x",
+        prompt: "p1",
+        subagent_type: "Plan",
+      }),
+      makeCall("2", "SubAgent", {
+        description: "x",
+        prompt: "p2",
+        subagent_type: "Ask",
+      }),
+      makeCall("3", "Read", { path: "x.ts" }),
+      makeCall("4", "Edit", {
+        path: "x.ts",
+        old_string: "a",
+        new_string: "b",
+      }),
+      makeCall("5", "SubAgent", {
+        description: "x",
+        prompt: "p3",
+        subagent_type: "CodeReviewer",
+      }),
+    ];
+
+    expect(isParallelSafeToolCall(calls[0]!)).toBe(true);
+    expect(isParallelSafeToolCall(calls[1]!)).toBe(true);
+    expect(isParallelSafeToolCall(calls[3]!)).toBe(false);
+    expect(isParallelSafeToolCall(calls[4]!)).toBe(true);
+
+    // 期望：[SubAgent×2, Read] 并行，Edit 屏障，[SubAgent] 并行
+    expect(
+      planToolCallBatches(calls).map((batch) => ({
+        mode: batch.mode,
+        names: batch.calls.map((call) => call.name),
+      })),
+    ).toEqual([
+      { mode: "parallel", names: ["SubAgent", "SubAgent", "Read"] },
+      { mode: "serial", names: ["Edit"] },
+      { mode: "parallel", names: ["SubAgent"] },
+    ]);
+  });
+
   it("同一并行批次的 Read 会同时发起，并按原始 tool_call 顺序写入 history", async () => {
     const root = mkdtempSync(join(tmpdir(), "invox-parallel-test-"));
     const cwd = join(root, "project");

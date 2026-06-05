@@ -110,11 +110,27 @@ async function execute(
     const reason =
       runResult.error ??
       `subagent stopped with reason "${runResult.stopReason}"`;
-    return errorResult(reason, "execute", `${titleBase} (${subagentType})`);
+    const logHint = runResult.logPath
+      ? `\n\n(log: ${runResult.logPath})`
+      : "";
+    return errorResult(
+      reason + logHint,
+      "execute",
+      `${titleBase} (${subagentType})`,
+    );
   }
 
   // 成功：拼装带 provenance header 的最终文本
-  const header = `[subagent: ${subagentType}] (${runResult.iterations} iter, ${runResult.stopReason})`;
+  //
+  // header 含日志路径 —— 父 LLM 可以引用给用户，方便事后查 subagent 内部
+  // 跑了哪些工具（UI 上已折叠，日志里仍可读）
+  const headerLines: string[] = [
+    `[subagent: ${subagentType}] (${runResult.iterations} iter, ${runResult.stopReason})`,
+  ];
+  if (runResult.logPath) {
+    headerLines.push(`[log: ${runResult.logPath}]`);
+  }
+  const header = headerLines.join("\n");
   const body =
     runResult.finalText.trim() || "(subagent produced no final message)";
   const resultText = `${header}\n\n${body}`;
