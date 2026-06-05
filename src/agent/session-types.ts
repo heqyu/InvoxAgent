@@ -14,6 +14,7 @@ import type { McpClientManager } from "../mcp/client.js";
 import type { SessionStore } from "../persistence.js";
 import type { SessionToolState } from "../tools/types.js";
 import type { HookRegistry } from "../plugins/hooks.js";
+import type { AgentTemplate } from "./templates.js";
 import type { TurnUsage } from "./usage-meter.js";
 
 /**
@@ -39,9 +40,12 @@ export interface Session {
    * 值类型恒为 string（当前只产出 select kind）。
    *
    * InvoxAgent 内部管理的保留 key：
-   *   - "system_prompt" —— 当前 system prompt 模板的 id
+   *   - "agent"         —— 当前 agent 模板的 id（agents 非空时启用）
+   *   - "system_prompt" —— 当前 system prompt 模板的 id（agents 为空时启用，
+   *                        与 "agent" 互斥）
    *   - "thinking"      —— "off" | "low" | "medium" | "high"
    *                        （请求时映射到 OpenAI 的 reasoning_effort 字段）
+   *   - "model"         —— 透出 ACP set_session_model 的 modelId
    */
   configValues: Record<string, string>;
   /**
@@ -109,15 +113,36 @@ export interface SystemPromptDef {
 
 /**
  * model 选择器之外的全部下拉项配置。
- * 当前包括：system prompt 模板。
+ * 当前包括：自定义 Agent 模板（优先）、system prompt 模板（向后兼容兜底）。
+ *
+ * 路径选择规则（buildConfigOptions / agent.ts 一致）：
+ *   - agents 非空 → 暴露 "Agent" 下拉，**不**暴露 "System Prompt" 下拉。
+ *     Agent 是 superset：自带 prompt + tools 白名单 + mcp 开关。
+ *   - agents 为空 → 走旧 "System Prompt" 路径（systemPrompts 字段必填非空）。
  *
  * thinking 选项是硬编码的（off / low / medium / high，对应 OpenAI 的
  * reasoning_effort）—— 取值由上游 API 决定，不开 env 调参。
  */
 export interface AgentConfigOptions {
+  /**
+   * 系统 prompt 模板列表（仅当 agents 为空时使用）。
+   * 历史上 invox 0.0.1 起就有的字段，保留作为向后兼容兜底。
+   */
   systemPrompts: SystemPromptDef[];
   /** 必须是 systemPrompts[*].id 之一。 */
   defaultSystemPromptId: string;
+  /**
+   * Agent 模板列表 —— 每条捆绑 prompt + tools 白名单 + mcp 开关。
+   *
+   * 非空时取代 systemPrompts，作为 system message 来源 + 工具门禁。
+   * 文件来源 / 内置兜底见 src/agent/templates.ts 的 loadAgentTemplates。
+   */
+  agents: AgentTemplate[];
+  /**
+   * 默认 agent id —— 必须是 agents[*].id 之一。
+   * agents 为空时本字段无意义（可省略）。
+   */
+  defaultAgentId?: string;
 }
 
 /**

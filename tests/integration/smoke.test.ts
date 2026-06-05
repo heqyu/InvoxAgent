@@ -124,7 +124,15 @@ const SMOKES: SmokeCase[] = [
   // 已改为 history.find(role==="user")，恢复运行。
   { file: "smoke-stage7.ts", timeoutMs: 30_000 },
   { file: "smoke-usage-model.ts", timeoutMs: 30_000 },
-  { file: "smoke-config-options.ts", timeoutMs: 30_000 },
+  // 老 smoke 验证 system_prompt 下拉路径 —— Phase G 默认走 agent 路径会
+  // 隐藏 system_prompt 下拉。用 INVOX_AGENTS=disabled 保留旧场景以保证回归。
+  {
+    file: "smoke-config-options.ts",
+    timeoutMs: 30_000,
+    env: { INVOX_AGENTS: "disabled" },
+  },
+  // Phase G：自定义 Agent 模板下拉端到端验证
+  { file: "smoke-agents.ts", timeoutMs: 30_000 },
   { file: "smoke-hooks-protocol.ts", timeoutMs: 45_000 },
   // .mjs 但 import 的是 src/tools/fs-utils.js（NodeNext 风格）—— 必须走 tsx
   // 才能把 .js 解析到 .ts 源码，裸 node 解析失败。

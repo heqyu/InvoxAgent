@@ -13,18 +13,18 @@
 
 ---
 
-## 0. 当前快照（2026-06-05 02:50）
+## 0. 当前快照（2026-06-05 16:18）
 
 | 维度 | 状态 |
 |---|---|
 | 版本 | `0.0.1` |
-| 代码量 | ~9000 行 TS / 55 文件（A2 收尾：agent.ts 869 行 + 6 个新 helper 模块） |
-| 已完成 stage | 0–8（全部 `[VERIFIED]`） |
+| 代码量 | ~9300 行 TS / 56 文件（Phase G：新增 src/agent/templates.ts） |
+| 已完成 stage | 0–8 + Phase A–B + **Phase G**（全部 `[VERIFIED]`） |
 | 传输 | stdio + WebSocket |
-| 工具 | Read / Write / Edit / Bash / Glob / Grep / Skill + MCP 桥接 |
-| 协议外特性 | 会话持久化 / Zed thread 同步 / 模型菜单 / token 计费 / system prompt 模板 / thinking 模式 / 三层 discovery / 统一记忆系统（MemoryProvider）/ 插件 + Hook / MCP 共享池 / 连接重试 / 结构化错误 |
-| 测试 | **vitest 4.1.8**：212 个 case（179 单元 + 33 集成 + 0 其他）— 211 ✓ / 1 skip / 0 fail，25.22s |
-| 已知风险 | `agent.ts` 869 行（仍 > 400，但已大幅减重）；进一步拆需 collaborator pattern |
+| 工具 | Read / Write / Edit / Bash / Glob / Grep / Skill + MCP 桥接（**支持按 agent 模板过滤白名单**） |
+| 协议外特性 | 会话持久化 / Zed thread 同步 / 模型菜单 / token 计费 / system prompt 模板 / **自定义 Agent 模板（Plan/Ask/Worker/CodeReviewer + 用户自定义）** / thinking 模式 / 三层 discovery / 统一记忆系统 / 插件 + Hook / MCP 共享池 / 连接重试 / 结构化错误 |
+| 测试 | **vitest 4.1.8**：240 个 case（207 单元 + 33 集成）— 240 ✓ / 1 skip / 0 fail，25.34s |
+| 已知风险 | `agent.ts` ~960 行（Phase G 净增 ~90 行），仍 > 400；进一步拆需 collaborator pattern |
 
 ---
 
@@ -113,6 +113,16 @@
 | F2 | MCP 远程传输（HTTP / SSE）—— 当前 `mcpCapabilities: { http:false, sse:false }` 待打开 | P2 | smoke 接通一个公开 SSE MCP server |
 | F3 | Invox 自有 Hook 协议版本号 + Claude Code shim 层（终结追逐） | P2 | `HookContext.protocol_version` 字段；老 hook 仍跑通 |
 | F4 | 多 agent 编排（agent-to-agent 通过 invox 桥接） | P3 | demo |
+
+### Phase G — 「自定义 Agent 模板」（已完成，2026-06-05 16:18）
+
+> 用户原话："给 invox 实现自定义 Agent 模板的功能。具体是可以在 `.invox/agents/` 目录下配置多套 agent。比如 Plan、Ask、Worker、Code With Me、Solo、CodeReviewer 等。每个 agent 可以单独配置提示词，可以用的工具集合，是否允许加载 mcp 工具。然后再 zed 下方可以选择使用哪个 agent。"
+
+| ID | 任务 | 优先级 | 状态 | 验收 |
+|---|---|---|---|---|
+| G1 | `src/agent/templates.ts` —— `AgentTemplate` 类型 + 三层 loader（项目/用户/内置）+ `filterToolSpecsByAgent` + `agentAllowsMcp` | P0 | **✅ Done**（16:00）<br/>新建 templates.ts (~280 行) + tests/unit/agent-templates.test.ts (28 case)<br/>4 套内置：Worker（全开）/ Plan（只读勘察）/ Ask（无工具）/ CodeReviewer（只读+Bash） | typecheck 绿；28 个新单测全过 |
+| G2 | 接线：`AgentConfigOptions` 加 `agents` 字段；`buildConfigOptions` 暴露 "agent" 下拉、隐藏 "system_prompt"；agent.ts 处理 `configId="agent"`；prompt-loop 按 agent 过滤 toolSpecs / MCP | P0 | **✅ Done**（16:15）<br/>改 4 文件（session-types / config-options / agent / prompt-loop），新增 `IterationDeps.activeAgent`；私有 `effectiveSystemPromptBody` / `activeAgentFor` helper | typecheck 绿；现有 211 单测全过 |
+| G3 | CLI 接入 + `INVOX_AGENTS` / `INVOX_AGENTS_DIR` / `INVOX_DEFAULT_AGENT` env + `examples/smoke-agents.ts` + README + PROGRESS | P0 | **✅ Done**（16:18）<br/>cli.ts 加 `pickConfigOptions` 升级版；`smoke-agents.ts` 端到端验证（4 场景：下拉 / 切换 / 持久化 / 重启恢复）；老 `smoke-config-options.ts` 加 `INVOX_AGENTS=disabled` 保留旧路径回归 | smoke-agents PASS；`npm test` 240 ✓ / 1 skip |
 
 ---
 
@@ -211,4 +221,4 @@ Backlog → 进入 Phase 表 → 挪到 Doing（≤ 3 项）→ commit（带 has
 
 ---
 
-_最后更新：2026-06-05 02:50 ｜ A2 收尾（agent.ts 1660+ → 869，6 个新 helper）+ K11 / K12 清账（两个 stale smoke 恢复 + agentVersion path bug 修复）_
+_最后更新：2026-06-05 16:18 ｜ Phase G 落地（自定义 Agent 模板：4 套内置 + `.invox/agents/` 项目级 + 用户级；`Agent` 下拉取代 `System Prompt`；按 agent 过滤工具白名单 + MCP 开关；240 测试全绿）_

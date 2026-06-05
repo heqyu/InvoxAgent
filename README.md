@@ -175,7 +175,10 @@ Then in Zed: open the agent panel, pick **invox**, send a prompt. Stage 1 echoes
 | `INVOX_SESSION_TTL_DAYS` | delete sessions older than N days on first save per cwd. `0` disables. | `30` |
 | `INVOX_CONTEXT_WINDOW_<MODEL_ID>` | per-model context window (in tokens) reported via `usage_update`. The MODEL_ID is uppercased with non-alnum characters → `_`. | built-in table |
 | `INVOX_CONTEXT_WINDOW_DEFAULT` | fallback context window when the model id isn't in the built-in table | `128000` |
-| `INVOX_PROMPT_TEMPLATES_FILE` | absolute path to a JSON file (`SystemPromptDef[]`) overriding the built-in System Prompt menu | unset |
+| `INVOX_PROMPT_TEMPLATES_FILE` | absolute path to a JSON file (`SystemPromptDef[]`) overriding the built-in System Prompt menu (only honored when `INVOX_AGENTS=disabled`) | unset |
+| `INVOX_AGENTS` | `disabled` to fall back to the legacy `system_prompt` dropdown | enabled |
+| `INVOX_AGENTS_DIR` | absolute path to scan for `.invox/agents/*.json` (override `process.cwd()`) | unset |
+| `INVOX_DEFAULT_AGENT` | default agent id when multiple are loaded | `Worker` if present |
 
 **Provider selection**:
 - `INVOX_MOCK=1` → `EchoProvider` (deterministic, offline)
@@ -214,6 +217,10 @@ The `size` (context window) used in `usage_update` is looked up from a built-in 
 
 ## Custom session dropdowns (System Prompt + Thinking)
 
+> **⚠ Deprecated** by **Custom Agent templates** (see next section). The
+> `system_prompt` dropdown is only exposed when `INVOX_AGENTS=disabled`,
+> kept for backward compatibility. New users should use Agent templates.
+
 invox advertises additional ACP `SessionConfigOption` dropdowns that Zed renders next to the model selector. They are stored per-session and persist across loads.
 
 | ID | Category | Values | Effect |
@@ -243,6 +250,79 @@ The System Prompt menu defaults to a built-in trio (`default` / `concise` / `rev
 Invalid / missing files fall back to the built-in templates with a warn-level log. The first entry of the list is the per-session default; switch via the dropdown to update the live session.
 
 Switching a dropdown is **forward-only** — it does not rewrite past assistant messages. Only the next user turn sees the new prompt / reasoning level. Use a fresh session if you want a clean slate.
+
+## Custom Agent templates
+
+> **The recommended way to configure invox.** Each Agent bundles a system
+> prompt + a tool whitelist + an MCP enable flag, swappable at runtime
+> via the **Agent** dropdown next to the model selector in Zed.
+
+### Built-in templates
+
+When you start invox, four built-ins are always available even with zero configuration:
+
+| ID | What it does | Tools | MCP |
+|---|---|---|---|
+| `Worker` (default) | General coding assistant — open all tools | all | yes |
+| `Plan` | Read-only research; produces structured plans | `Read` / `Glob` / `Grep` / `Skill` | yes |
+| `Ask` | Pure Q&A — no tools at all | (none) | no |
+| `CodeReviewer` | Adversarial review; can `Bash` for `git diff` / lint but never edit | `Read` / `Glob` / `Grep` / `Bash` / `Skill` | yes |
+
+### Defining your own
+
+Drop a JSON file under `<project>/.invox/agents/` (project-level, wins) or `~/.invox/agents/` (user-level). The file name (without `.json`) is the agent **id**.
+
+```jsonc
+// <project>/.invox/agents/Solo.json
+{
+  "name": "Solo",
+  "description": "Hands-off pair programmer — talks, never touches files.",
+  "prompt": "You are a senior engineer thinking out loud. Suggest, never apply.",
+  "tools": ["Read", "Glob", "Grep"],
+  "mcp": false
+}
+```
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `name` | string | the file id | Display name in the dropdown |
+| `description` | string? | — | Tooltip |
+| `prompt` | string | required | System prompt body (memory / skills sections are auto-appended) |
+| `tools` | string[]? | undefined → all | Tool whitelist (see syntax below) |
+| `mcp` | boolean? | true | Whether MCP tools are exposed to the LLM |
+
+#### `tools` syntax
+
+Three patterns, mixable in one array:
+
+| Form | Meaning |
+|---|---|
+| omitted / `["*"]` | All built-in tools |
+| `[]` | No built-in tools (pure-chat agent) |
+| `["Read","Glob"]` | Strict whitelist |
+| `["-Bash","-Write"]` or `["*","-Bash"]` | Full set minus listed tools |
+
+Tool names are PascalCase (`Read` / `Write` / `Edit` / `Glob` / `Grep` / `Bash` / `Skill`). Unknown names are skipped with a warning.
+
+### Configuration
+
+| Env var | Effect |
+|---|---|
+| `INVOX_AGENTS=disabled` | Hide the Agent dropdown; fall back to legacy System Prompt path |
+| `INVOX_AGENTS_DIR=<path>` | Override scan root (default: `process.cwd()` at startup) |
+| `INVOX_DEFAULT_AGENT=<id>` | Default agent id when multiple are loaded (default: `Worker`) |
+
+Override priority for the agent list (high → low): `<scanRoot>/.invox/agents/*.json` → `~/.invox/agents/*.json` → built-ins. Same `id` overrides; the project layer always wins.
+
+### Behavior
+
+Switching the Agent dropdown via `set_config_option(agent=<id>)`:
+
+1. Atomically rewrites `Session.history[0]` to the new agent's prompt (memory + skills auto-appended).
+2. The next turn sees the new tool whitelist and MCP gating.
+3. Persisted in `.invox/sessions/<id>.json` under `configValues.agent`.
+
+Switching is **forward-only** — past assistant messages are not rewritten. The Agent dropdown is mutually exclusive with the legacy System Prompt dropdown: when ≥ 1 agent is loaded (the default), `system_prompt` is hidden.
 
 ## Skills (reusable workflow templates)
 

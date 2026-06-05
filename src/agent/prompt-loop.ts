@@ -42,6 +42,11 @@ import { parseToolArguments, safeParseJSON } from "./json.js";
 import type { HookBase, Session } from "./session-types.js";
 import { thinkingToReasoningEffort } from "./system-prompt.js";
 import {
+  agentAllowsMcp,
+  filterToolSpecsByAgent,
+  type AgentTemplate,
+} from "./templates.js";
+import {
   previewArgs,
   startLocationsFor,
   startTitleFor,
@@ -62,6 +67,13 @@ export interface IterationDeps {
   /** 构造 hook context base 字段的回调。InvoxAgent 通过它注入
    *  client / version / transcript_path 等只有 agent 知道的字段。 */
   buildHookBase: (session: Session) => HookBase;
+  /**
+   * 当前会话激活的 agent 模板（Phase G）。
+   *
+   *   - undefined → 走旧路径：暴露全部内置工具 + 全部 MCP 工具
+   *   - 已设      → 按 agent.tools 过滤内置工具；按 agent.mcp 控制 MCP 暴露
+   */
+  activeAgent?: AgentTemplate | undefined;
 }
 
 /** runOneIteration 的返回。caller 应不抛异常地处理这三种 case。 */
@@ -82,10 +94,19 @@ export async function runOneIteration(
   let finishReason: "stop" | "tool_calls" | "length" | "other" = "other";
 
   try {
-    // 合并 invox 内置工具与本会话 MCP 工具
-    const mcpSpecs = session.mcpClient?.getToolSpecs() ?? [];
+    // 合并 invox 内置工具与本会话 MCP 工具。Phase G：根据当前 agent 模板过滤。
+    //   - 内置工具按 agent.tools 白名单 / 黑名单过滤
+    //   - MCP 工具按 agent.mcp 开关全 on / 全 off
+    // agent 未设（agents 为空，旧路径）→ 全部暴露。
+    const builtinSpecs = filterToolSpecsByAgent(
+      TOOL_SPECS,
+      deps.activeAgent?.tools,
+    );
+    const mcpSpecs = agentAllowsMcp(deps.activeAgent)
+      ? (session.mcpClient?.getToolSpecs() ?? [])
+      : [];
     const allTools =
-      mcpSpecs.length > 0 ? [...TOOL_SPECS, ...mcpSpecs] : TOOL_SPECS;
+      mcpSpecs.length > 0 ? [...builtinSpecs, ...mcpSpecs] : builtinSpecs;
 
     for await (const delta of deps.provider.stream({
       messages: session.history,

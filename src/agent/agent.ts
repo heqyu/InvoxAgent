@@ -83,6 +83,7 @@ import type {
   Session,
   SystemPromptDef,
 } from "./session-types.js";
+import type { AgentTemplate } from "./templates.js";
 // 把 session-types 中给 cli.ts 用的 3 个公共类型继续从 agent.ts 导出，
 // 避免破坏 `import { type AgentModelConfig } from "./agent/agent.js"` 这条
 // 既有路径。Session / HookBase 是内部细节，不再对外暴露。
@@ -91,6 +92,7 @@ export type {
   AgentModelConfig,
   SystemPromptDef,
 } from "./session-types.js";
+export type { AgentTemplate } from "./templates.js";
 import { replayHistory } from "./replay-history.js";
 import { reportTurnUsage } from "./turn-usage-reporter.js";
 import { buildConfigOptions, buildModelState } from "./config-options.js";
@@ -111,6 +113,8 @@ export class InvoxAgent implements Agent {
   private availableModelIds: Set<string>;
   private configs: AgentConfigOptions;
   private systemPromptById: Map<string, SystemPromptDef>;
+  /** agent id → 模板。Phase G：与 systemPromptById 互斥使用。 */
+  private agentById: Map<string, AgentTemplate>;
   /** syncWithZedThreads 在 agent 生命周期内只跑一次，与 session 数量解耦。 */
   private syncedZed = false;
 
@@ -144,21 +148,36 @@ export class InvoxAgent implements Agent {
     // 配置兜底：原 SYSTEM_PROMPT 作为单条 "default"。CLI 总会传更丰富的配置，
     // 单测可省略。
     this.configs =
-      configs && configs.systemPrompts.length > 0
+      configs && (configs.systemPrompts.length > 0 || configs.agents.length > 0)
         ? configs
         : {
             systemPrompts: [
               { id: "default", name: "Default", prompt: DEFAULT_SYSTEM_PROMPT },
             ],
             defaultSystemPromptId: "default",
+            agents: [],
           };
     this.systemPromptById = new Map(
       this.configs.systemPrompts.map((p) => [p.id, p]),
     );
-    if (!this.systemPromptById.has(this.configs.defaultSystemPromptId)) {
+    if (
+      this.configs.systemPrompts.length > 0 &&
+      !this.systemPromptById.has(this.configs.defaultSystemPromptId)
+    ) {
       // 同 availableModelIds 的防御性兜底：调用方配置自相矛盾时取首项。
       const first = this.configs.systemPrompts[0]!;
       this.configs.defaultSystemPromptId = first.id;
+    }
+
+    // Phase G：agent 模板索引。agents 为空时走旧 system_prompt 路径，本 map 也为空。
+    this.agentById = new Map(this.configs.agents.map((a) => [a.id, a]));
+    if (
+      this.configs.agents.length > 0 &&
+      (!this.configs.defaultAgentId ||
+        !this.agentById.has(this.configs.defaultAgentId))
+    ) {
+      // 防御性兜底：调用方传的 defaultAgentId 与 agents 列表自相矛盾时取首项
+      this.configs.defaultAgentId = this.configs.agents[0]!.id;
     }
   }
 
@@ -202,32 +221,38 @@ export class InvoxAgent implements Agent {
   async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
     this.maybeSyncZedThreads(params.cwd);
     const id = randomUUID();
-    const defaultPromptId = this.configs.defaultSystemPromptId;
+
+    // configValues 初始值：根据 agents / system_prompt 路径择一填充
+    const initialConfigValues: Record<string, string> = { thinking: "off" };
+    if (this.configs.agents.length > 0) {
+      initialConfigValues["agent"] = this.configs.defaultAgentId!;
+    } else {
+      initialConfigValues["system_prompt"] = this.configs.defaultSystemPromptId;
+    }
+    const promptBody = this.effectiveSystemPromptBody(initialConfigValues);
+
     const session: Session = {
       id,
       cwd: params.cwd,
-      history: [
-        systemMessageWithMemoryAndSkills(
-          this.systemPromptById.get(defaultPromptId)!.prompt,
-          params.cwd,
-        ),
-      ],
+      history: [systemMessageWithMemoryAndSkills(promptBody, params.cwd)],
       abort: new AbortController(),
       toolState: {
         readPaths: new Set<string>(),
         cache: new FileCache(),
       },
       createdAt: Date.now(),
-      configValues: {
-        system_prompt: defaultPromptId,
-        thinking: "off",
-      },
+      configValues: initialConfigValues,
       turnUsage: emptyTurnUsage(),
       turnStartedAt: 0,
       hooks: loadHooks(params.cwd),
     };
     this.sessions.set(id, session);
-    log.info("session created", { id, cwd: params.cwd });
+    log.info("session created", {
+      id,
+      cwd: params.cwd,
+      agent: initialConfigValues["agent"],
+      systemPrompt: initialConfigValues["system_prompt"],
+    });
 
     // 连接 .claude/.mcp.json 中定义的 MCP servers。
     // 优雅降级：配置缺失或某 server 启动失败，会话仍可继续，只是没 MCP 工具。
@@ -280,15 +305,22 @@ export class InvoxAgent implements Agent {
     });
 
     // 恢复 configValues，丢掉本版本不再合法的 key（例如用户上次保存后
-    // 把 INVOX_PROMPT_TEMPLATES_FILE 收窄了）。
-    const restoredConfigValues: Record<string, string> = {
-      system_prompt: this.configs.defaultSystemPromptId,
-      thinking: "off",
-    };
+    // 把 INVOX_PROMPT_TEMPLATES_FILE 收窄了，或换了 agents 列表）。
+    const restoredConfigValues: Record<string, string> = { thinking: "off" };
+    if (this.configs.agents.length > 0) {
+      restoredConfigValues["agent"] = this.configs.defaultAgentId!;
+    } else {
+      restoredConfigValues["system_prompt"] =
+        this.configs.defaultSystemPromptId;
+    }
     if (snapshot.configValues) {
       for (const [k, v] of Object.entries(snapshot.configValues)) {
-        if (k === "system_prompt" && this.systemPromptById.has(v)) {
+        if (k === "agent" && this.agentById.has(v)) {
           restoredConfigValues[k] = v;
+        } else if (k === "system_prompt" && this.systemPromptById.has(v)) {
+          // 仅当本版本走旧路径时才接受 system_prompt 持久值；
+          // 否则会让 history[0] 与下拉状态不一致
+          if (this.configs.agents.length === 0) restoredConfigValues[k] = v;
         } else if (k === "thinking" && THINKING_VALUES.has(v)) {
           restoredConfigValues[k] = v;
         }
@@ -325,16 +357,14 @@ export class InvoxAgent implements Agent {
     // 连接 MCP servers（同 newSession）
     await initMcpForSession(session);
 
-    // 用当前 skill 列表刷新 system prompt —— 持久化的 history[0] 可能是
-    // 上一次会话留下的旧版本（或没有）。
-    if (restoredConfigValues.system_prompt) {
-      const def = this.systemPromptById.get(restoredConfigValues.system_prompt);
-      if (def) {
-        session.history[0] = systemMessageWithMemoryAndSkills(
-          def.prompt,
-          session.cwd,
-        );
-      }
+    // 用当前 skill 列表 + 当前 agent/system_prompt 选中值刷新 system message
+    // —— 持久化的 history[0] 可能是上一次会话留下的旧版本。
+    {
+      const promptBody = this.effectiveSystemPromptBody(restoredConfigValues);
+      session.history[0] = systemMessageWithMemoryAndSkills(
+        promptBody,
+        session.cwd,
+      );
     }
 
     await replayHistory(session, this.conn);
@@ -462,10 +492,13 @@ export class InvoxAgent implements Agent {
    * 处理 ACP `session/set_config_option`，驱动 NewSessionResponse.configOptions
    * 公布的自定义下拉：
    *
-   *   - `system_prompt` —— 替换 Session.history[0] 为模板的 prompt。已有的
-   *     user / assistant 消息保持不动；新 prompt 仅影响后续轮次。
+   *   - `agent`         —— Phase G：切换 agent 模板。重写 history[0] 为该 agent
+   *     的 prompt + memory/skills 段。后续 prompt loop 自动按 agent.tools / mcp
+   *     过滤工具集。
    *
-   *   - `thinking` —— 字符串值在 runOneIteration 时映射到 OpenAI 的
+   *   - `system_prompt` —— 旧路径（仅 agents 为空时启用）。同上语义但只换 prompt。
+   *
+   *   - `thinking`      —— 字符串值在 runOneIteration 时映射到 OpenAI 的
    *     reasoning_effort。
    *
    * 按 ACP 规范，响应携带"完整刷新后的 options 列表"——即使只有一项变化也全
@@ -500,7 +533,30 @@ export class InvoxAgent implements Agent {
       session.selectedModel = value;
       // 同步到 configValues，让 configOptionsFor 返回新的 currentValue
       session.configValues.model = value;
+    } else if (params.configId === "agent") {
+      if (this.configs.agents.length === 0) {
+        throw new Error(
+          `configId "agent" not enabled (no agent templates loaded)`,
+        );
+      }
+      const agent = this.agentById.get(value);
+      if (!agent) {
+        throw new Error(
+          `unknown agent value: ${value} (available: ${[...this.agentById.keys()].join(", ")})`,
+        );
+      }
+      session.configValues["agent"] = value;
+      // 就地替换 history[0]：newSession / loadSession 构造保证该位永远是 system message
+      session.history[0] = systemMessageWithMemoryAndSkills(
+        agent.prompt,
+        session.cwd,
+      );
     } else if (params.configId === "system_prompt") {
+      if (this.configs.agents.length > 0) {
+        throw new Error(
+          `configId "system_prompt" disabled when agent templates are active; use "agent" instead`,
+        );
+      }
       const def = this.systemPromptById.get(value);
       if (!def) {
         throw new Error(
@@ -743,7 +799,51 @@ export class InvoxAgent implements Agent {
       policy: this.policy,
       defaultModelId: this.models.defaultModelId,
       buildHookBase: (s) => this.hookBase(s),
+      // Phase G：把"当前激活的 agent 模板"注入 prompt-loop，
+      // 让它按 agent.tools / agent.mcp 过滤暴露给 LLM 的工具集。
+      activeAgent: this.activeAgentFor(session),
     });
+  }
+
+  /**
+   * 当前会话激活的 agent 模板。
+   *
+   *   - agents 为空 → 返回 undefined（旧 system_prompt 路径）
+   *   - configValues.agent 不在最新菜单 → 回退到 defaultAgentId
+   */
+  private activeAgentFor(session: Session): AgentTemplate | undefined {
+    if (this.configs.agents.length === 0) return undefined;
+    const id = session.configValues["agent"] ?? this.configs.defaultAgentId!;
+    return (
+      this.agentById.get(id) ?? this.agentById.get(this.configs.defaultAgentId!)
+    );
+  }
+
+  /**
+   * 给定 configValues，计算应注入 history[0] 的 system prompt 主体（不含
+   * memory / skills 段——那两段由 systemMessageWithMemoryAndSkills 自动追加）。
+   *
+   *   - agents 非空 → 取 configValues.agent 对应模板的 prompt
+   *   - agents 为空 → 走旧 system_prompt 模板路径
+   *
+   * 任何路径都保证能取到值；configValues 中的 id 不在表里时回退到默认 id。
+   */
+  private effectiveSystemPromptBody(
+    configValues: Record<string, string>,
+  ): string {
+    if (this.configs.agents.length > 0) {
+      const id = configValues["agent"] ?? this.configs.defaultAgentId!;
+      const agent =
+        this.agentById.get(id) ??
+        this.agentById.get(this.configs.defaultAgentId!)!;
+      return agent.prompt;
+    }
+    const id =
+      configValues["system_prompt"] ?? this.configs.defaultSystemPromptId;
+    const def =
+      this.systemPromptById.get(id) ??
+      this.systemPromptById.get(this.configs.defaultSystemPromptId)!;
+    return def.prompt;
   }
 
   /** 构造每次 hook 通用的 base 字段。返回 HookBase 给 prompt-loop / 各

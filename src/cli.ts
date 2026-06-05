@@ -15,8 +15,10 @@ import {
   InvoxAgent,
   type AgentConfigOptions,
   type AgentModelConfig,
+  type AgentTemplate,
   type SystemPromptDef,
 } from "./agent/agent.js";
+import { loadAgentTemplates } from "./agent/templates.js";
 import { EchoProvider } from "./llm/echo.js";
 import { FlakyProvider, type FlakyKind } from "./llm/flaky.js";
 import { BadJsonProvider, MockToolProvider } from "./llm/mock-tools.js";
@@ -111,6 +113,14 @@ ENVIRONMENT:
   INVOX_MODELS                    Comma-separated selectable models
   INVOX_API_KEY                   Provider API key
   INVOX_PROMPT_TEMPLATES_FILE     Path to JSON file of system-prompt templates
+                                  (only used when INVOX_AGENTS=disabled)
+  INVOX_AGENTS                    "disabled" → use legacy system_prompt dropdown
+                                  (default: enabled, loads .invox/agents/*.json
+                                   + 4 built-in: Plan/Ask/Worker/CodeReviewer)
+  INVOX_AGENTS_DIR                Root directory containing .invox/agents/
+                                  (default: process cwd at startup)
+  INVOX_DEFAULT_AGENT             Default agent id when multiple are loaded
+                                  (default: "Worker" if present, else first)
   INVOX_PLUGIN_DIR                Path to plugin marketplace root (.plugins-cache.json)
 `,
   );
@@ -143,6 +153,8 @@ async function main(): Promise<void> {
     availableModels: models.available.map((m) => m.modelId),
     systemPrompts: configs.systemPrompts.map((p) => p.id),
     defaultSystemPrompt: configs.defaultSystemPromptId,
+    agents: configs.agents.map((a) => a.id),
+    defaultAgent: configs.defaultAgentId,
   });
 
   const transports: Transport[] = [];
@@ -295,23 +307,58 @@ function pickModels(): AgentModelConfig {
 
 /**
  * 构造 ACP `setSessionConfigOption` 暴露的下拉项。
- * 当前是系统提示词模板选择器（thinking 下拉硬编码在 InvoxAgent 内部，
- * 它的取值由 OpenAI 的 reasoning_effort 枚举决定，不可配置）。
  *
- * 来源顺序：
- *   1. INVOX_PROMPT_TEMPLATES_FILE —— `SystemPromptDef[]` 的 JSON 文件
- *      存在且解析成功时优先采用
- *   2. 内置 3 模板（default / concise / review）
+ * Phase G 路径选择：
+ *   - 检测到任何 agent 模板（项目级 / 用户级 / 内置兜底）→ 走 Agent 路径，
+ *     `setSessionConfigOption` 暴露 "Agent" 下拉，每个 agent 自带 prompt +
+ *     工具白名单 + MCP 开关。systemPrompts 仍存于配置内但不会被暴露。
+ *   - 用户显式 `INVOX_AGENTS=disabled` → agents 数组为空，回退旧 system_prompt 路径
+ *
+ * Agent 模板加载源（高 → 低优先）：
+ *   1. <agentScanCwd>/.invox/agents/*.json  —— 项目级
+ *      其中 agentScanCwd = INVOX_AGENTS_DIR（若设）或 process.cwd()
+ *      （Zed 启动 invox 时 cwd 通常即用户项目根）
+ *   2. ~/.invox/agents/*.json                 —— 用户级
+ *   3. BUILTIN_AGENTS                         —— Plan / Ask / Worker / CodeReviewer 4 套
  *
  * 失败模式（文件缺失 / JSON 损坏 / 空数组）一律 warn 并回退到内置模板，
  * 不让启动卡死。
  */
 function pickConfigOptions(): AgentConfigOptions {
   const systemPrompts = loadPromptTemplates();
-  const defaultId = systemPrompts[0]!.id; // load() 总能返回 ≥ 1 条，可断言
+  const defaultSystemPromptId = systemPrompts[0]!.id; // load() 总能返回 ≥ 1 条
+
+  // INVOX_AGENTS=disabled 用作"我就要用旧 system_prompt 下拉"的逃生阀
+  const agentsDisabled =
+    (process.env["INVOX_AGENTS"] ?? "").toLowerCase() === "disabled";
+
+  let agents: AgentTemplate[] = [];
+  let defaultAgentId: string | undefined;
+  if (!agentsDisabled) {
+    // 优先用 INVOX_AGENTS_DIR 覆盖扫描根 —— 测试 / 多项目场景下让用户显式
+    // 指向 .invox/agents/ 的父目录。未设则用进程 cwd（生产场景下 Zed 启动
+    // invox 时 cwd 通常是用户项目根）。
+    const scanRoot = process.env["INVOX_AGENTS_DIR"] ?? process.cwd();
+    agents = loadAgentTemplates(scanRoot);
+    if (agents.length > 0) {
+      // 选首项作为默认：项目级文件总在最前，用户期望"放在最上面的 agent
+      // 就是默认"。允许用 INVOX_DEFAULT_AGENT 显式覆盖。
+      const envDefault = process.env["INVOX_DEFAULT_AGENT"];
+      if (envDefault && agents.some((a) => a.id === envDefault)) {
+        defaultAgentId = envDefault;
+      } else {
+        // 内置 4 套时优先选 Worker（最通用），否则选首项
+        defaultAgentId =
+          agents.find((a) => a.id === "Worker")?.id ?? agents[0]!.id;
+      }
+    }
+  }
+
   return {
     systemPrompts,
-    defaultSystemPromptId: defaultId,
+    defaultSystemPromptId,
+    agents,
+    ...(defaultAgentId ? { defaultAgentId } : {}),
   };
 }
 
