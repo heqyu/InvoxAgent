@@ -40,7 +40,8 @@ import {
   type SetSessionModelRequest,
   type SetSessionModelResponse,
 } from "@agentclientprotocol/sdk";
-import { log } from "../log.js";
+import { createLogger } from "../log.js";
+const log = createLogger("agent");
 import type { LLMProvider } from "../llm/types.js";
 import { contentToString } from "../llm/utils.js";
 import {
@@ -651,11 +652,8 @@ export class InvoxAgent implements Agent {
     });
 
     const max = maxIterations();
-    let stopReason:
-      | "end_turn"
-      | "cancelled"
-      | "max_turn_requests"
-      | "refusal" = "max_turn_requests";
+    let stopReason: "end_turn" | "cancelled" | "max_turn_requests" | "refusal" =
+      "max_turn_requests";
     /**
      * refusal 时携带 ProviderErrorInfo，最终落到 PromptResponse 的
      * _meta["invox/error"]。给 ACP 客户端一个可机读的错误根因，同时不破坏

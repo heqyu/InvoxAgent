@@ -28,7 +28,8 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { extname, join } from "node:path";
-import { log } from "../log.js";
+import { createLogger } from "../log.js";
+const log = createLogger("templates");
 import type { ToolSpec } from "../llm/types.js";
 
 // ── 类型 ──────────────────────────────────────────────────────────────
@@ -358,11 +359,7 @@ function seedDefaultAgents(): void {
       try {
         const raw = readFileSync(filePath, "utf8");
         const parsed = JSON.parse(raw);
-        if (
-          !parsed ||
-          typeof parsed !== "object" ||
-          Array.isArray(parsed)
-        ) {
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
           action = "repair-broken";
         } else {
           const hasModelKey = "model" in (parsed as Record<string, unknown>);

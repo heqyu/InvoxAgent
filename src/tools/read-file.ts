@@ -1,6 +1,7 @@
 // Read 工具：行号化、分页读，带缓存。
 
-import { log } from "../log.js";
+import { createLogger } from "../log.js";
+const log = createLogger("tools");
 import type { ToolSpec } from "../llm/types.js";
 import { readFileWithCache, resolveToolPath } from "./fs-utils.js";
 import {

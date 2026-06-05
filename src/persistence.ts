@@ -24,7 +24,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { log } from "./log.js";
+import { createLogger } from "./log.js";
+const log = createLogger("persistence");
 import type { LLMMessage } from "./llm/types.js";
 import { contentToString } from "./llm/utils.js";
 

@@ -9,7 +9,8 @@
 import { Readable, Writable } from "node:stream";
 import { ndJsonStream } from "@agentclientprotocol/sdk";
 import type { Stream } from "@agentclientprotocol/sdk";
-import { log } from "../log.js";
+import { createLogger } from "../log.js";
+const log = createLogger("transport");
 import type { Transport } from "./types.js";
 
 export class StdioTransport implements Transport {

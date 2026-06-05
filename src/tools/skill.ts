@@ -17,7 +17,8 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { log } from "../log.js";
+import { createLogger } from "../log.js";
+const log = createLogger("tools");
 import { loadPluginSkills } from "../plugins/loader.js";
 import type { ToolSpec } from "../llm/types.js";
 import {
@@ -280,12 +281,7 @@ function extractDescription(content: string, id: string): string {
   for (const line of lines) {
     const trimmed = line.trim();
     // 跳过空行、frontmatter 分隔、code fence
-    if (
-      !trimmed ||
-      trimmed === "---" ||
-      trimmed.startsWith("```")
-    )
-      continue;
+    if (!trimmed || trimmed === "---" || trimmed.startsWith("```")) continue;
     const desc = trimmed.length > 200 ? trimmed.slice(0, 197) + "…" : trimmed;
     return desc;
   }

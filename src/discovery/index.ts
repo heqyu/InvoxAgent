@@ -14,7 +14,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join, isAbsolute, resolve } from "node:path";
 import { homedir } from "node:os";
-import { log } from "../log.js";
+import { createLogger } from "../log.js";
+const log = createLogger("discovery");
 import type { DiscoveryResult, PluginEntry, SettingsJson } from "./types.js";
 import type { MemorySection } from "./memory-types.js";
 import { BUILTIN_MEMORY_PROVIDERS } from "./memory-providers.js";
@@ -45,13 +46,10 @@ export function discoverDirs(cwd: string): DiscoveryResult {
   const projectSettings = loadSettingsJson(join(projectDir, SETTINGS_JSON));
 
   // 2. plugins.json —— first-found-wins：项目级优先，否则用户级
-  const plugins = loadPluginsJson(
-    join(projectDir, PLUGINS_JSON),
-    cwd,
-  ) ?? loadPluginsJson(
-    join(userDir, PLUGINS_JSON),
-    homedir(),
-  ) ?? [];
+  const plugins =
+    loadPluginsJson(join(projectDir, PLUGINS_JSON), cwd) ??
+    loadPluginsJson(join(userDir, PLUGINS_JSON), homedir()) ??
+    [];
 
   // 3. memories —— 跑一遍所有内置 MemoryProvider，合并 + 按 priority 排序
   const memories = collectMemories(cwd, userDir, projectDir);
@@ -163,9 +161,7 @@ function loadPluginsJson(
     if (typeof e["path"] !== "string" || !e["path"]) continue;
 
     const rawPath = e["path"] as string;
-    const absPath = isAbsolute(rawPath)
-      ? rawPath
-      : resolve(basePath, rawPath);
+    const absPath = isAbsolute(rawPath) ? rawPath : resolve(basePath, rawPath);
 
     entries.push({
       root: absPath,

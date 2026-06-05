@@ -32,7 +32,8 @@
 // matcher 仅 PreToolUse / PostToolUse 生效，按 tool name 正则过滤。
 
 import { spawn } from "node:child_process";
-import { log } from "../log.js";
+import { createLogger } from "../log.js";
+const log = createLogger("plugins");
 import { discoverDirs } from "../discovery/index.js";
 import { join } from "node:path";
 import { readFileSync, existsSync } from "node:fs";

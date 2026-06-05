@@ -18,13 +18,19 @@ import {
   type AgentTemplate,
   type SystemPromptDef,
 } from "./agent/agent.js";
-import { loadAgentTemplates, readEnvModelLite, readEnvModelPro } from "./agent/templates.js";
+import {
+  loadAgentTemplates,
+  readEnvModelLite,
+  readEnvModelPro,
+} from "./agent/templates.js";
 import { EchoProvider } from "./llm/echo.js";
 import { FlakyProvider, type FlakyKind } from "./llm/flaky.js";
 import { BadJsonProvider, MockToolProvider } from "./llm/mock-tools.js";
 import { OpenAIProvider } from "./llm/openai.js";
 import type { LLMProvider } from "./llm/types.js";
-import { log } from "./log.js";
+import { createLogger } from "./log.js";
+import { loadProjectSettings } from "./settings.js";
+const log = createLogger("cli");
 import { disposeAllMcp } from "./mcp/pool.js";
 import { StdioTransport } from "./transports/stdio.js";
 import type { Transport } from "./transports/types.js";
@@ -133,6 +139,7 @@ ENVIRONMENT:
 }
 
 async function main(): Promise<void> {
+  loadProjectSettings(process.cwd());
   const args = parseArgs(process.argv.slice(2));
   const { name, version } = pkg();
 

@@ -110,3 +110,4 @@ Each `Tool` declares a `tier: "read" | "write" | "execute"`. The router's permis
 - **One commit per stage** with `[VERIFIED]` tag (PLAN.md Rule 5). If a stage breaks, `git reset --hard <last-VERIFIED>` and redo; never patch on top.
 - The Zed acceptance addendum (PLAN.md §7) applies to any change that touches the protocol surface: synthetic harness PASS **and** Zed direct-connect must both work before claiming VERIFIED.
 - Logging levels via `INVOX_LOG`: `silent | error | warn | info | debug | trace`. Never enable `trace` in shared environments — it dumps full LLM payloads.
+- Module filtering via `INVOX_LOG_MODULE`: `*` (all), `[]` (none), `agent,llm` (whitelist), `*,-agent` (blacklist). Default `*`. Use `createLogger("name")` per-file; format is `date [level] [module] msg`.

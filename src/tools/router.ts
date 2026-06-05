@@ -1,11 +1,20 @@
 // 工具调度器 —— 解析参数 → 走权限闸门 → 调用工具 execute()。
 // 工具自身的逻辑都在各自文件里，这里只负责派发。
 
-import { log } from "../log.js";
+import { createLogger } from "../log.js";
+const log = createLogger("tools");
 import { parseToolArguments } from "../agent/json.js";
-import { kindFromTier, needsPermission, requestPermission } from "./permissions.js";
+import {
+  kindFromTier,
+  needsPermission,
+  requestPermission,
+} from "./permissions.js";
 import { getTool } from "./registry.js";
-import { errorResult, type ToolExecContext, type ToolExecResult } from "./types.js";
+import {
+  errorResult,
+  type ToolExecContext,
+  type ToolExecResult,
+} from "./types.js";
 
 export async function executeTool(
   name: string,
@@ -31,7 +40,10 @@ export async function executeTool(
       return {
         resultText: `User denied permission for ${name}.`,
         acpContent: [
-          { type: "content", content: { type: "text", text: `Permission denied for ${name}.` } },
+          {
+            type: "content",
+            content: { type: "text", text: `Permission denied for ${name}.` },
+          },
         ],
         kind: kindFromTier(tool.tier),
         title: `${name} (denied)`,

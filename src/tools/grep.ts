@@ -8,7 +8,8 @@
 import { spawn } from "node:child_process";
 import { resolve } from "node:path";
 import { rgPath } from "@vscode/ripgrep";
-import { log } from "../log.js";
+import { createLogger } from "../log.js";
+const log = createLogger("tools");
 import type { ToolSpec } from "../llm/types.js";
 import {
   errorResult,

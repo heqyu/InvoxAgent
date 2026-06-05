@@ -165,6 +165,7 @@ Then in Zed: open the agent panel, pick **invox**, send a prompt. Stage 1 echoes
 | `INVOX_LOG` | log level: `silent` / `error` / `warn` / `info` / `debug` / `trace` | `info` |
 | `INVOX_LOG_FILE` | absolute path to also append logs to (in addition to stderr) | unset |
 | `INVOX_LOG_UTC` | `1` to use ISO UTC timestamps instead of local `MM-DD HH:mm:ss.SSS` | unset |
+| `INVOX_LOG_MODULE` | module filter: `*` (all), `[]` (none), `agent,llm` (whitelist), `*,-agent` (blacklist) | `*` |
 | `INVOX_BASE_URL` | OpenAI-compatible base URL (set both this and API_KEY for real LLM) | — |
 | `INVOX_MODEL` | default model name passed to provider (also the prefilled choice in the client's model dropdown) | `gpt-4o-mini` |
 | `INVOX_MODELS` | comma-separated list of selectable models advertised to the client (e.g. `gpt-4o-mini,gpt-4o,deepseek-chat`). The default `INVOX_MODEL` is auto-included. | unset (menu = `[INVOX_MODEL]`) |

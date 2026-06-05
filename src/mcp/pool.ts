@@ -15,7 +15,8 @@
 // 并发去重：同 cwd 多个 session 并发 acquire 时只 connect 一次（in-flight
 // promise），其余复用结果。
 
-import { log } from "../log.js";
+import { createLogger } from "../log.js";
+const log = createLogger("mcp");
 import { McpClientManager } from "./client.js";
 import { loadMcpConfig } from "./config.js";
 

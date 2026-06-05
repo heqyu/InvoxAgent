@@ -14,7 +14,8 @@
 
 import { WebSocketServer, type WebSocket } from "ws";
 import type { AnyMessage, Stream } from "@agentclientprotocol/sdk";
-import { log } from "../log.js";
+import { createLogger } from "../log.js";
+const log = createLogger("transport");
 import type { Transport } from "./types.js";
 
 export interface WebSocketTransportConfig {
@@ -32,13 +33,18 @@ export class WebSocketTransport implements Transport {
   }
 
   async start(onPeer: (peer: Stream) => void | Promise<void>): Promise<void> {
-    const wss = new WebSocketServer({ host: this.cfg.host, port: this.cfg.port });
+    const wss = new WebSocketServer({
+      host: this.cfg.host,
+      port: this.cfg.port,
+    });
     this.wss = wss;
 
     await new Promise<void>((resolve, reject) => {
       const onListen = (): void => {
         wss.off("error", onErr);
-        log.info(`ws transport: listening on ${this.cfg.host}:${this.cfg.port}`);
+        log.info(
+          `ws transport: listening on ${this.cfg.host}:${this.cfg.port}`,
+        );
         resolve();
       };
       const onErr = (err: Error): void => {
@@ -54,7 +60,10 @@ export class WebSocketTransport implements Transport {
       log.info("ws: client connected", { remote });
       const peer = wsToStream(socket);
       Promise.resolve(onPeer(peer)).catch((err: unknown) => {
-        log.error("ws: onPeer failed", err instanceof Error ? err.message : String(err));
+        log.error(
+          "ws: onPeer failed",
+          err instanceof Error ? err.message : String(err),
+        );
         socket.close(1011, "internal error");
       });
     });

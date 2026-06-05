@@ -10,7 +10,8 @@
 
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { log } from "../log.js";
+import { createLogger } from "../log.js";
+const log = createLogger("plugins");
 import { discoverDirs } from "../discovery/index.js";
 import type { PluginEntry } from "../discovery/types.js";
 

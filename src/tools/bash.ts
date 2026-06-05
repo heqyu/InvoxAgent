@@ -29,7 +29,8 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { isAbsolute } from "node:path";
-import { log } from "../log.js";
+import { createLogger } from "../log.js";
+const log = createLogger("tools");
 import type { ToolSpec } from "../llm/types.js";
 import {
   errorResult,

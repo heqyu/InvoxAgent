@@ -14,7 +14,8 @@
 //            **生产严禁开启** —— prompt / tool 输出可能含 API key、密钥等。
 
 import OpenAI from "openai";
-import { log } from "../log.js";
+import { createLogger } from "../log.js";
+const log = createLogger("llm");
 import {
   backoffConfigFromEnv,
   withConnectBackoff,

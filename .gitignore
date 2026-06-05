@@ -11,8 +11,9 @@ dist/
 # But DO commit project-shared debug configs.
 !.vscode/launch.json
 
-# Session histories — per-project, contain user conversation, never commit
-.invox/
+# Machine-local state (sessions contain user conversations, invox.env has per-host config)
+.invox/sessions/
+.invox/invox.env
 
 # Stray scratch files from manual Zed sessions / sandbox tests
 sorting.txt

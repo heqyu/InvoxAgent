@@ -2,7 +2,8 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { log } from "../log.js";
+import { createLogger } from "../log.js";
+const log = createLogger("mcp");
 import type { McpConfigFile, McpServerConfig } from "./types.js";
 
 /** 解析 cwd 下的 .claude/.mcp.json；文件不存在 / 解析失败 / 无可用条目都返回 null。 */
@@ -75,11 +76,7 @@ export function loadMcpConfig(cwd: string): McpConfigFile | null {
     if (Array.isArray(s.args)) {
       config.args = s.args.map((a) => String(a));
     }
-    if (
-      s.env &&
-      typeof s.env === "object" &&
-      !Array.isArray(s.env)
-    ) {
+    if (s.env && typeof s.env === "object" && !Array.isArray(s.env)) {
       config.env = Object.fromEntries(
         Object.entries(s.env as Record<string, unknown>).map(([k, v]) => [
           k,

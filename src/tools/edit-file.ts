@@ -3,7 +3,8 @@
 // 强制 read-before-edit，让 LLM 不能盲目改文件。
 // 没读过会自动通过 fs-utils 走缓存或 ACP 读一次（read flag 同时置位）。
 
-import { log } from "../log.js";
+import { createLogger } from "../log.js";
+const log = createLogger("tools");
 import type { ToolSpec } from "../llm/types.js";
 import {
   isInsideWorkspace,

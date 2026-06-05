@@ -2,7 +2,8 @@
 
 import { mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { log } from "../log.js";
+import { createLogger } from "../log.js";
+const log = createLogger("tools");
 import type { ToolSpec } from "../llm/types.js";
 import { isInsideWorkspace, readFileDirect } from "./fs-utils.js";
 import {
@@ -43,13 +44,15 @@ async function execute(
   ctx: ToolExecContext,
 ): Promise<ToolExecResult> {
   const themeResult = normalizeTheme(args["theme"]);
-  if (!themeResult.ok) return errorResult(themeResult.error, "edit", "MakePlan");
+  if (!themeResult.ok)
+    return errorResult(themeResult.error, "edit", "MakePlan");
 
   if (typeof args["content"] !== "string") {
     return errorResult("missing 'content'", "edit", "MakePlan");
   }
   const content = args["content"];
-  if (!content.trim()) return errorResult("missing 'content'", "edit", "MakePlan");
+  if (!content.trim())
+    return errorResult("missing 'content'", "edit", "MakePlan");
 
   const theme = themeResult.theme;
 
@@ -87,7 +90,10 @@ async function execute(
   } else {
     try {
       if (ctx.caps.fs?.readTextFile) {
-        const r = await ctx.conn.readTextFile({ sessionId: ctx.sessionId, path });
+        const r = await ctx.conn.readTextFile({
+          sessionId: ctx.sessionId,
+          path,
+        });
         oldText = r.content;
       } else {
         oldText = await readFileDirect(path);
@@ -149,7 +155,8 @@ function normalizeTheme(
   if (/[<>:"/\\|?*\x00-\x1F]/.test(theme)) {
     return {
       ok: false,
-      error: "theme must not contain path separators or invalid filename characters",
+      error:
+        "theme must not contain path separators or invalid filename characters",
     };
   }
 

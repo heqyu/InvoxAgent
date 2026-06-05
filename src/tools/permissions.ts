@@ -1,10 +1,14 @@
 // 权限闸门：从工具 execute() 中抽出来的统一策略点，让每个工具保持精简。
 
-import { log } from "../log.js";
+import { createLogger } from "../log.js";
+const log = createLogger("tools");
 import type { PermissionPolicy, RiskTier, ToolExecContext } from "./types.js";
 
 /** 当前策略下，给定风险等级是否需要走 ACP 权限请求。 */
-export function needsPermission(tier: RiskTier, policy: PermissionPolicy): boolean {
+export function needsPermission(
+  tier: RiskTier,
+  policy: PermissionPolicy,
+): boolean {
   if (policy === "always") return true;
   if (policy === "writes") return tier === "write" || tier === "execute";
   return false;
@@ -37,7 +41,8 @@ export async function requestPermission(
         { optionId: "deny", name: "Deny", kind: "reject_once" },
       ],
     });
-    if (res.outcome.outcome === "selected") return res.outcome.optionId === "allow";
+    if (res.outcome.outcome === "selected")
+      return res.outcome.optionId === "allow";
     return false;
   } catch (e) {
     log.warn("requestPermission failed; defaulting to deny", String(e));

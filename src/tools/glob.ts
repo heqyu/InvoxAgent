@@ -9,7 +9,8 @@
 import { statSync } from "node:fs";
 import { resolve, sep } from "node:path";
 import fg from "fast-glob";
-import { log } from "../log.js";
+import { createLogger } from "../log.js";
+const log = createLogger("tools");
 import type { ToolSpec } from "../llm/types.js";
 import {
   errorResult,

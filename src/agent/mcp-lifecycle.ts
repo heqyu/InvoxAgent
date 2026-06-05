@@ -7,7 +7,8 @@
 //   - 这两个函数之前是 InvoxAgent 的私有方法；抽成 free function 是为了
 //     A2 减重，行为完全不变（只是 `this` 不再需要）
 
-import { log } from "../log.js";
+import { createLogger } from "../log.js";
+const log = createLogger("mcp-lifecycle");
 import { acquireMcp, releaseMcp } from "../mcp/pool.js";
 import type { Session } from "./session-types.js";
 

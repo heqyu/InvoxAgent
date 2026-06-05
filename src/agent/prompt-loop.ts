@@ -21,7 +21,8 @@ import type {
   AgentSideConnection,
   ClientCapabilities,
 } from "@agentclientprotocol/sdk";
-import { log } from "../log.js";
+import { createLogger } from "../log.js";
+const log = createLogger("prompt-loop");
 import type { LLMMessage, LLMProvider, ParsedToolCall } from "../llm/types.js";
 import { createMcpTool } from "../mcp/tool.js";
 import {
@@ -161,9 +162,7 @@ export async function runOneIteration(
       signal: session.abort.signal,
       tools: allTools,
       model: session.selectedModel ?? deps.defaultModelId,
-      reasoningEffort: thinkingToReasoningEffort(
-        session.configValues.thinking,
-      ),
+      reasoningEffort: thinkingToReasoningEffort(session.configValues.thinking),
     })) {
       if (session.abort.signal.aborted) break;
       switch (delta.kind) {

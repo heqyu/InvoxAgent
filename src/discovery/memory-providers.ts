@@ -13,7 +13,8 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { log } from "../log.js";
+import { createLogger } from "../log.js";
+const log = createLogger("discovery");
 import type {
   MemoryProvider,
   MemoryProviderContext,

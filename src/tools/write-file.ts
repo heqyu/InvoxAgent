@@ -3,7 +3,8 @@
 // 当文件存在但 LLM 还没 Read 过时，给一句"软提示" advisory 提醒 LLM
 // 优先 Read → Edit。写完更新缓存供后续 Read 命中。
 
-import { log } from "../log.js";
+import { createLogger } from "../log.js";
+const log = createLogger("tools");
 import type { ToolSpec } from "../llm/types.js";
 import {
   isInsideWorkspace,
