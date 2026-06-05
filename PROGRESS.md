@@ -13,18 +13,18 @@
 
 ---
 
-## 0. 当前快照（2026-06-05 02:00）
+## 0. 当前快照（2026-06-05 02:50）
 
 | 维度 | 状态 |
 |---|---|
 | 版本 | `0.0.1` |
-| 代码量 | ~8780 行 TS / 49 文件（discovery 抽出 memory-types + memory-providers） |
+| 代码量 | ~9000 行 TS / 55 文件（A2 收尾：agent.ts 869 行 + 6 个新 helper 模块） |
 | 已完成 stage | 0–8（全部 `[VERIFIED]`） |
 | 传输 | stdio + WebSocket |
 | 工具 | Read / Write / Edit / Bash / Glob / Grep / Skill + MCP 桥接 |
-| 协议外特性 | 会话持久化 / Zed thread 同步 / 模型菜单 / token 计费 / system prompt 模板 / thinking 模式 / 三层 discovery / **统一记忆系统（MemoryProvider）** / 插件 + Hook / MCP 共享池 / 连接重试 / 结构化错误 |
-| 测试 | **vitest 4.1.8**：207 个 case（174 单元 + 25 集成 + 8 其他）— 204 ✓ / 3 skip / 0 fail，22.87s |
-| 已知风险 | `agent.ts` 1660+ 行 / 2 个 stale smoke / agentVersion path bug |
+| 协议外特性 | 会话持久化 / Zed thread 同步 / 模型菜单 / token 计费 / system prompt 模板 / thinking 模式 / 三层 discovery / 统一记忆系统（MemoryProvider）/ 插件 + Hook / MCP 共享池 / 连接重试 / 结构化错误 |
+| 测试 | **vitest 4.1.8**：212 个 case（179 单元 + 33 集成 + 0 其他）— 211 ✓ / 1 skip / 0 fail，25.22s |
+| 已知风险 | `agent.ts` 869 行（仍 > 400，但已大幅减重）；进一步拆需 collaborator pattern |
 
 ---
 
@@ -66,7 +66,7 @@
 | ID | 任务 | 优先级 | 状态 | 验收 |
 |---|---|---|---|---|
 | A1 | 引入 `vitest` 测试框架；首批覆盖 `discovery/`、`plugins/hooks.ts`（matcher 正则、合并顺序）、`agent` 的 `maxPrompt` 计费、Windows 路径解析；**把所有 examples/smoke-*.ts 接入 vitest 调度** | P0 | **✅ Done**（16:01）<br/>72 cases：54 单元 + 18 集成 → 69 ✓ / 3 skip / 0 fail<br/>顺手抽出 `src/agent/usage-meter.ts`（A2 提前一小步） | `npm test` 绿；CI 跑 ≥ 30 个 case |
-| A2 | **拆分 `agent.ts`** → `agent/connection.ts` / `session.ts` / `prompt-loop.ts` / `usage-meter.ts` / `system-prompt.ts` / `hook-runner.ts` / `model-registry.ts`；单文件 ≤ 400 行 | P0 | 进行中（`usage-meter.ts` + `json.ts` 已就位） | 所有 smoke 仍 PASS；`agent/index.ts` re-export 旧符号保持外部 API 不变 |
+| A2 | **拆分 `agent.ts`** → `agent/connection.ts` / `session.ts` / `prompt-loop.ts` / `usage-meter.ts` / `system-prompt.ts` / `hook-runner.ts` / `model-registry.ts`；单文件 ≤ 400 行 | P0 | **✅ Done**（2026-06-05 02:50）<br/>agent.ts **1660+ → 869 行（-47%）**；新增 6 个 helper：`session-types.ts` (134) / `replay-history.ts` (107) / `turn-usage-reporter.ts` (111) / `config-options.ts` (108) / `mcp-lifecycle.ts` (60) / `prompt-loop.ts` (395)。所有 helper ≤ 400 行；agent.ts 因为剩 ACP entry points + prompt() 主循环（≈175 行）+ 私有胶水，进一步压缩需 collaborator pattern（拆类），列入 Backlog | typecheck 绿 + 211 case PASS + smoke 全 PASS（含恢复运行的 stage6-globgrep / stage7） |
 | A3 | 全局 `safeParseJSON`：替换所有裸 `JSON.parse(call.arguments)`（已知点：`agent.ts:987`），失败时把 error 作为 tool result 返还给 LLM 让其自我纠错 | P0 | **✅ Done**（17:05）<br/>新建 `src/agent/json.ts`（safeParseJSON + parseToolArguments）；`agent.ts:987` 改为 fast-fail 路径；`tools/router.ts` 同步收编<br/>新增 13 个单测 + `smoke-bad-json.ts` 黑盒验证（BadJsonProvider 模拟畸形→自我纠错全链路） | 新增 smoke 用畸形 JSON 触发，agent 不挂 |
 | A4 | `Session` 持有 `hooks: HookRegistry` 与 `mcpManager` 引用，循环里不再反复 `loadHooks(cwd)` | P1 | **✅ Done**（18:30）<br/>Session 接口加 `hooks: HookRegistry` 必选字段；newSession / loadSession 各调一次 `loadHooks` 填充；agent.ts 内 6 处旧调用（SessionStart / UserPromptSubmit / Stop / PreToolUse / PostToolUse / PostToolUseFailure）全部改为 `session.hooks`<br/>`mcpClient` 字段已在 Session 上（不变）；新增 1 个行为级断言验证缓存命中后磁盘 mutation 不可见 | 单测验证缓存命中次数 |
 | A5 | `stopReason` 完整映射：429 → `refusal`，stream 抛错 → 结构化 error，prompt 始终返回合法 `PromptResponse` | P1 | **✅ Done**（20:40）<br/>新建 `src/agent/error-mapping.ts`（`classifyProviderError` + `formatProviderErrorForUser`）；`runOneIteration` 不再 throw，stream 异常 → `{ kind: "stop", reason: "refusal", error }`；`prompt()` 加顶层 try/catch 兜底；新增 `FlakyProvider` + `INVOX_MOCK=flaky` + `INVOX_FLAKY_KIND` env<br/>新增 33 个单测 + 5 场景 smoke（429/500/auth/network/mid-stream）全部映射到 refusal | smoke 模拟 429 / 网络错误，断言 `stopReason` |
@@ -133,6 +133,7 @@
 | 风险盘点 | 拆分前禁止在 `agent.ts` 加业务代码 | 已写入 DIARY Sprint 0 复盘 |
 | 风险盘点 | `CONTEXT_WINDOW_TABLE` 硬编码，应外置为 JSON 或托管到 discovery 配置 | 影响 Phase E |
 | 架构延伸 | **MemoryProvider 注册 API（第二步）**：暴露 `registerMemoryProvider` + `retrieve(query)` 动态记忆钩子（v1 已铺好 collect() 基座，等真有第二个 provider 时再做） | 由本次 discovery/memory 重构衍生 |
+| 架构延伸 | **InvoxAgent 类的 collaborator pattern**：把 prompt() 主循环 + hookBase + persist 等抽成 `PromptOrchestrator`，让 InvoxAgent 只剩 ACP entry points 调度。把 agent.ts 从 869 → ≤ 400 的最后一公里。等真有第二个使用主循环的入口（如 SDK API）时再做，避免 over-engineering | 由本次 A2 衍生 |
 | 用户反馈 | （留空，等真实使用反馈进来） | |
 | 协议同步 | 跟踪 `@agentclientprotocol/sdk` 升级 | 当前 0.23 |
 
@@ -144,7 +145,7 @@
 
 | # | 问题 | 严重度 | 处置 |
 |---|---|---|---|
-| K1 | `agent.ts` 1640 行，剩余主体是 InvoxAgent 类 | P1 | 部分缓解（A2 抽出 4 个模块）；进一步拆分需 collaborator pattern，列入 Backlog |
+| K1 | `agent.ts` **869 行**（A2 收尾后） | P2 | **大幅缓解**（2026-06-05 02:50）—— 1660+ → 869 行（-47%），6 个 helper 各 ≤ 400 行；进一步压到 ≤ 400 需 collaborator pattern（拆类），优先级降为 P2 待真实痛点出现再做 |
 | K2 | 零单元测试 | P0 | **✅ A1 落地** —— 54 单元 + 18 集成已就位 |
 | K3 | MCP 子进程按 session 起，无释放 | P0 | **✅ B1+B2 落地**（2026-06-05 00:18）—— `src/mcp/pool.ts` 共享池；`unstable_deleteSession` + 进程退出钩子统一释放 |
 | K4 | 长对话无上下文压缩，会撑爆 | P1 | Phase C1（暂缓 —— 用户标记需独立设计上下文压缩方案） |
@@ -154,8 +155,8 @@
 | K8 | `CONTEXT_WINDOW_TABLE` 硬编码 | P2 | Backlog |
 | K9 | `stopReason` 不全（无 `refusal` 映射） | P1 | **✅ A5 落地**（20:40）—— 5 种 provider 错误全映射到 `refusal`，prompt 不再抛 RPC 异常 |
 | K10 | Hook 协议追着 Claude Code 跑 | P2 | Phase F3 |
-| K11 | `smoke-stage6-globgrep`（PascalCase 重命名后失效）& `smoke-stage7`（CLAUDE.md/skill 注入后断言失效）—— 两个 stale/fragile smoke，已 skip | P2 | 择期重写或淘汰；新覆盖由单测承担 |
-| K12 | `agentVersion()` path 解析有 pre-existing 缺陷，dev / dist 两种模式都指向不存在的 package.json，函数实际一直返回 `"unknown"` | P3 | 影响极小（仅 hook 诊断字段），单行修复，择期 |
+| K11 | `smoke-stage6-globgrep`（PascalCase 重命名后失效）& `smoke-stage7`（CLAUDE.md/skill 注入后断言失效） | P2 | **✅ Done**（2026-06-05 02:30）—— `smoke-stage6-globgrep` 改 PascalCase 工具名；`smoke-stage7` 改为 `history.find(role==="user")` 匹配新 history[0]=system 的事实；smoke.test.ts 取消两处 skipIf |
+| K12 | `agentVersion()` path 解析有 pre-existing 缺陷 | P3 | **✅ Done**（2026-06-05 02:25）—— `agent-helpers.ts` 路径上溯由 `..` 改为 `../..`（agent/ 子目录多一级）；新增 `tests/unit/agent-helpers.test.ts` 5 个 case 覆盖正路径 / memoise / maxIterations env 边界 |
 
 ---
 
@@ -199,15 +200,15 @@ Backlog → 进入 Phase 表 → 挪到 Doing（≤ 3 项）→ commit（带 has
 
 | 指标 | 当前 | 一个月目标 |
 |---|---|---|
-| `agent.ts` 行数 | **1660+**（B4 +20：refusalInfo + _meta；A2 累计 -373） | ≤ 400（拆完类成员）—— 部分达成 |
-| 子模块数（src/agent/ + src/llm/ + src/mcp/ + src/discovery/） | **13**（agent + 7 helpers + backoff + mcp/pool + discovery/{index,claude-md,memory-types,memory-providers}） | ≥ 7 ✅ |
-| 单元测试 case 数 | **174** | ≥ 80 ✅ |
-| 集成 smoke case 数 | **20**（17 ✓ / 3 skip） | 全 ≥ 90% pass ✅ |
-| `npm test` 总耗时 | 22.87s | ≤ 30s ✅ |
+| `agent.ts` 行数 | **869**（A2 收尾 -791；进一步压缩需 collaborator pattern） | ≤ 400（拆完类成员）—— 部分达成（-47%） |
+| 子模块数（src/agent/ + src/llm/ + src/mcp/ + src/discovery/） | **19**（agent + 13 helpers + backoff + mcp/pool + discovery/{index,claude-md,memory-types,memory-providers}） | ≥ 7 ✅ |
+| 单元测试 case 数 | **179** | ≥ 80 ✅ |
+| 集成 smoke case 数 | **18**（17 ✓ / 1 skip —— stage6-globgrep / stage7 已恢复） | 全 ≥ 90% pass ✅ |
+| `npm test` 总耗时 | 25.22s | ≤ 30s ✅ |
 | MCP 子进程峰值 / session 数 | **1（共享池）** | 1（共享池） ✅ |
 | 长对话 OOM/turn | 偶发 | 0（C1 待设计） |
 | WS 默认鉴权 | 无 | 有（D1 落地后） |
 
 ---
 
-_最后更新：2026-06-05 02:00 ｜ discovery 记忆系统重构（CLAUDE.md → MemoryProvider 抽象，与 skills/hooks 对称）_
+_最后更新：2026-06-05 02:50 ｜ A2 收尾（agent.ts 1660+ → 869，6 个新 helper）+ K11 / K12 清账（两个 stale smoke 恢复 + agentVersion path bug 修复）_

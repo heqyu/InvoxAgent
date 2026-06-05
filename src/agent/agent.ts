@@ -24,7 +24,6 @@ import {
   type AuthenticateResponse,
   type CancelNotification,
   type ClientCapabilities,
-  type ContentBlock,
   type DeleteSessionRequest,
   type DeleteSessionResponse,
   type Implementation,
@@ -32,25 +31,17 @@ import {
   type InitializeResponse,
   type LoadSessionRequest,
   type LoadSessionResponse,
-  type ModelInfo,
   type NewSessionRequest,
   type NewSessionResponse,
   type PromptRequest,
   type PromptResponse,
-  type SessionConfigOption,
-  type SessionModelState,
   type SetSessionConfigOptionRequest,
   type SetSessionConfigOptionResponse,
   type SetSessionModelRequest,
   type SetSessionModelResponse,
 } from "@agentclientprotocol/sdk";
 import { log } from "../log.js";
-import type {
-  LLMMessage,
-  LLMProvider,
-  ParsedToolCall,
-  UsageInfo,
-} from "../llm/types.js";
+import type { LLMProvider } from "../llm/types.js";
 import { contentToString } from "../llm/utils.js";
 import {
   SessionStore,
@@ -60,31 +51,15 @@ import {
   type PersistedSession,
 } from "../persistence.js";
 import { FileCache } from "../tools/cache.js";
-import { kindFromTier } from "../tools/permissions.js";
 import { listAvailableCommands } from "../tools/skill.js";
-import type { McpClientManager } from "../mcp/client.js";
-import { acquireMcp, releaseMcp } from "../mcp/pool.js";
-import { createMcpTool } from "../mcp/tool.js";
-import { getTool, TOOL_SPECS } from "../tools/registry.js";
-import { executeTool } from "../tools/router.js";
-import type { PermissionPolicy, SessionToolState } from "../tools/types.js";
+import type { PermissionPolicy } from "../tools/types.js";
 import {
   loadHooks,
   runSessionStart,
   runUserPromptSubmit,
-  runPreToolUse,
-  runPostToolUse,
-  runPostToolUseFailure,
   runStop,
-  type HookRegistry,
 } from "../plugins/hooks.js";
-import { accumulateTurnUsage, emptyTurnUsage } from "./usage-meter.js";
-import { safeParseJSON, parseToolArguments } from "./json.js";
-import {
-  previewArgs,
-  startTitleFor,
-  startLocationsFor,
-} from "./tool-presentation.js";
+import { emptyTurnUsage } from "./usage-meter.js";
 import { humanizeTokens, contextWindowFor } from "./token-meter.js";
 import { agentVersion, maxIterations } from "./agent-helpers.js";
 import {
@@ -93,121 +68,37 @@ import {
   DEFAULT_SYSTEM_PROMPT,
   systemMessageWithMemoryAndSkills,
   THINKING_VALUES,
-  thinkingToReasoningEffort,
   buildUserContent,
 } from "./system-prompt.js";
 export { DEFAULT_SYSTEM_PROMPT } from "./system-prompt.js";
 import {
   classifyProviderError,
-  formatProviderErrorForUser,
   serializeRefusalForMeta,
   type ProviderErrorInfo,
 } from "./error-mapping.js";
-
-interface Session {
-  id: string;
-  cwd: string;
-  history: LLMMessage[];
-  abort: AbortController;
-  toolState: SessionToolState;
-  store?: SessionStore;
-  createdAt: number;
-  /**
-   * 通过 unstable_setSessionModel 选定的 model id。
-   * undefined 时回退到 agent 默认 model（availableModels[0]，源自 INVOX_MODEL）。
-   */
-  selectedModel?: string;
-  /**
-   * 按 configId 索引的会话级配置值，驱动 ACP setSessionConfigOption 的下拉项。
-   * 值类型恒为 string（当前只产出 select kind）。
-   *
-   * InvoxAgent 内部管理的保留 key（见 DEFAULT_CONFIG_IDS）：
-   *   - "system_prompt" —— 当前 system prompt 模板的 id
-   *   - "thinking"      —— "off" | "low" | "medium" | "high"
-   *                        （请求时映射到 OpenAI 的 reasoning_effort 字段）
-   */
-  configValues: Record<string, string>;
-  /**
-   * 当前 prompt() turn 内累计的 token 计费；进入 prompt() 时重置。
-   * turn 末尾通过 agent_thought_chunk + `invox/usage` _meta 扩展上报给客户端。
-   */
-  turnUsage: {
-    input: number;
-    output: number;
-    total: number;
-    calls: number;
-    /** 本 turn 内单次调用 prompt_tokens 的最大值 —— 实际 context 占用峰值。
-     *  每次调用都 resend 整段 history，故 SUM(prompt_tokens) ≠ context 占用，max 才是。 */
-    maxPrompt: number;
-    /** 本 turn 内所有调用 cache 命中 tokens 之和。 */
-    cached: number;
-    /** 与 maxPrompt 来自同一次调用的 cached tokens。 */
-    maxCached: number;
-  };
-  /** prompt() 起始的 wall-clock ms —— 用来算 turn 耗时。 */
-  turnStartedAt: number;
-  /** MCP client manager —— 持有该会话连接的 MCP servers。 */
-  mcpClient?: McpClientManager;
-  /**
-   * 本会话生效的 hook 注册表。在 newSession / loadSession 时一次性加载并
-   * 缓存到 session 上，prompt loop / 各 hook 触发点全部走 `session.hooks`，
-   * 不再反复 `loadHooks(cwd)`。底层 hookCache 仍按 cwd 缓存，但显式持有
-   * 引用让代码意图更清晰、单测注入更容易。
-   */
-  hooks: HookRegistry;
-  /**
-   * 上一次完成的 turn 用量持久化快照，重启后保留，让 reloadSession 后用户
-   * 仍能看到上一轮花了多少。
-   */
-  lastTurnUsage?: {
-    input: number;
-    output: number;
-    total: number;
-    calls: number;
-    maxPrompt: number;
-    maxCached: number;
-    cached: number;
-    elapsedMs: number;
-    model: string;
-  };
-}
-
-/** 构造 InvoxAgent 时注入的 model 菜单配置。第一项是默认 model。 */
-export interface AgentModelConfig {
-  /** 对客户端公布的 model 列表，必须非空。 */
-  available: ModelInfo[];
-  /** 默认 model id，必须在 available 中。会话尚未通过 setSessionModel 选择
-   *  model 时使用。 */
-  defaultModelId: string;
-}
-
-/**
- * 系统提示词菜单中的一行 —— 渲染为 ACP `select` kind 的 SessionConfigOption
- * （id="system_prompt"）。选中某行会替换 Session.history[0] 为 prompt 文本。
- */
-export interface SystemPromptDef {
-  /** 唯一稳定 id，作为 SessionConfigSelectOption.value。 */
-  id: string;
-  /** 下拉菜单显示的可读名。 */
-  name: string;
-  /** 鼠标悬浮提示（可选）。 */
-  description?: string;
-  /** 真正注入到 history[0] 的 system message 文本。 */
-  prompt: string;
-}
-
-/**
- * model 选择器之外的全部下拉项配置。
- * 当前包括：system prompt 模板。
- *
- * thinking 选项是硬编码的（off / low / medium / high，对应 OpenAI 的
- * reasoning_effort）—— 取值由上游 API 决定，不开 env 调参。
- */
-export interface AgentConfigOptions {
-  systemPrompts: SystemPromptDef[];
-  /** 必须是 systemPrompts[*].id 之一。 */
-  defaultSystemPromptId: string;
-}
+import type {
+  AgentConfigOptions,
+  AgentModelConfig,
+  HookBase,
+  Session,
+  SystemPromptDef,
+} from "./session-types.js";
+// 把 session-types 中给 cli.ts 用的 3 个公共类型继续从 agent.ts 导出，
+// 避免破坏 `import { type AgentModelConfig } from "./agent/agent.js"` 这条
+// 既有路径。Session / HookBase 是内部细节，不再对外暴露。
+export type {
+  AgentConfigOptions,
+  AgentModelConfig,
+  SystemPromptDef,
+} from "./session-types.js";
+import { replayHistory } from "./replay-history.js";
+import { reportTurnUsage } from "./turn-usage-reporter.js";
+import { buildConfigOptions, buildModelState } from "./config-options.js";
+import { initMcpForSession, releaseSessionMcp } from "./mcp-lifecycle.js";
+import {
+  runOneIteration as runIteration,
+  type IterationResult,
+} from "./prompt-loop.js";
 
 export class InvoxAgent implements Agent {
   readonly conn: AgentSideConnection;
@@ -340,7 +231,7 @@ export class InvoxAgent implements Agent {
 
     // 连接 .claude/.mcp.json 中定义的 MCP servers。
     // 优雅降级：配置缺失或某 server 启动失败，会话仍可继续，只是没 MCP 工具。
-    await this.initMcpForSession(session);
+    await initMcpForSession(session);
 
     // 触发 SessionStart hook（不阻塞，best-effort）
     runSessionStart(session.hooks, {
@@ -365,8 +256,8 @@ export class InvoxAgent implements Agent {
 
     return {
       sessionId: id,
-      models: this.modelStateFor(session),
-      configOptions: this.configOptionsFor(session),
+      models: buildModelState(session, this.models),
+      configOptions: buildConfigOptions(session, this.models, this.configs),
     };
   }
 
@@ -432,7 +323,7 @@ export class InvoxAgent implements Agent {
     this.sessions.set(session.id, session);
 
     // 连接 MCP servers（同 newSession）
-    await this.initMcpForSession(session);
+    await initMcpForSession(session);
 
     // 用当前 skill 列表刷新 system prompt —— 持久化的 history[0] 可能是
     // 上一次会话留下的旧版本（或没有）。
@@ -446,7 +337,7 @@ export class InvoxAgent implements Agent {
       }
     }
 
-    await this.replayHistory(session);
+    await replayHistory(session, this.conn);
 
     // 同 newSession，延后一次宏任务发 available commands
     setTimeout(() => this.sendAvailableCommands(session).catch(() => {}), 0);
@@ -492,8 +383,8 @@ export class InvoxAgent implements Agent {
     }
 
     return {
-      models: this.modelStateFor(session),
-      configOptions: this.configOptionsFor(session),
+      models: buildModelState(session, this.models),
+      configOptions: buildConfigOptions(session, this.models, this.configs),
     };
   }
 
@@ -514,7 +405,7 @@ export class InvoxAgent implements Agent {
       } catch {
         // already aborted
       }
-      await this.releaseSessionMcp(session);
+      await releaseSessionMcp(session);
       const s = new SessionStore(session.cwd);
       s.delete(params.sessionId);
       this.sessions.delete(params.sessionId);
@@ -640,7 +531,7 @@ export class InvoxAgent implements Agent {
     });
     this.persist(session);
     return {
-      configOptions: this.configOptionsFor(session),
+      configOptions: buildConfigOptions(session, this.models, this.configs),
     };
   }
 
@@ -784,7 +675,12 @@ export class InvoxAgent implements Agent {
       // 任何收尾路径（含 cancel / max iterations）都尽力上报一次 usage，
       // 让用户看到 partial turn 花了多少。best-effort：上报失败不应掩盖 stopReason。
       try {
-        await this.reportTurnUsage(session, stopReason);
+        await reportTurnUsage(
+          session,
+          stopReason,
+          this.conn,
+          this.models.defaultModelId,
+        );
       } catch (err) {
         log.warn(
           "prompt: usage report failed",
@@ -836,330 +732,23 @@ export class InvoxAgent implements Agent {
   // ── 私有方法 ────────────────────────────────────────────────────
 
   /**
-   * 跑一轮 LLM ↔ tool 往返。返回值：
-   *   - { kind: "stop", reason }   —— 终止（end_turn / cancelled / refusal）
-   *   - { kind: "continue" }       —— 还要继续（有 tool_calls 已被处理）
+   * 跑一轮 LLM ↔ tool 往返。实现见 ./prompt-loop.ts —— InvoxAgent 这里
+   * 只负责把"实例状态视图"打包成 IterationDeps 注进去。
    */
-  private async runOneIteration(
-    session: Session,
-  ): Promise<
-    | { kind: "stop"; reason: "end_turn" | "cancelled" }
-    | { kind: "stop"; reason: "refusal"; error: ProviderErrorInfo }
-    | { kind: "continue" }
-  > {
-    let assistantText = "";
-    const toolCalls: ParsedToolCall[] = [];
-    let finishReason: "stop" | "tool_calls" | "length" | "other" = "other";
-
-    try {
-      // 合并 invox 内置工具与本会话 MCP 工具
-      const mcpSpecs = session.mcpClient?.getToolSpecs() ?? [];
-      const allTools =
-        mcpSpecs.length > 0 ? [...TOOL_SPECS, ...mcpSpecs] : TOOL_SPECS;
-
-      for await (const delta of this.provider.stream({
-        messages: session.history,
-        signal: session.abort.signal,
-        tools: allTools,
-        model: session.selectedModel ?? this.models.defaultModelId,
-        reasoningEffort: thinkingToReasoningEffort(
-          session.configValues.thinking,
-        ),
-      })) {
-        if (session.abort.signal.aborted) break;
-        switch (delta.kind) {
-          case "text":
-            if (delta.text.length > 0) {
-              assistantText += delta.text;
-              await this.conn.sessionUpdate({
-                sessionId: session.id,
-                update: {
-                  sessionUpdate: "agent_message_chunk",
-                  content: { type: "text", text: delta.text },
-                },
-              });
-            }
-            break;
-          case "tool_call":
-            toolCalls.push(delta.call);
-            break;
-          case "usage":
-            this.accumulateUsage(session, delta.usage);
-            break;
-          case "finish":
-            finishReason = delta.reason;
-            break;
-        }
-      }
-    } catch (err) {
-      // 把 provider 抛出的错误映射到 ACP stopReason。
-      // AbortError 是用户主动取消，走 cancelled；其它统一 refusal，并通过
-      // agent_message_chunk 把可读 message 流给用户 —— 不再向 RPC 抛异常。
-      const classified = classifyProviderError(err);
-      if (classified.kind === "abort") {
-        if (assistantText)
-          session.history.push({ role: "assistant", content: assistantText });
-        return { kind: "stop", reason: "cancelled" };
-      }
-      const info = classified.info;
-      log.error("provider stream failed", {
-        category: info.category,
-        ...(info.status !== undefined ? { status: info.status } : {}),
-        ...(info.code !== undefined ? { code: info.code } : {}),
-        message: info.message,
-      });
-      // 已经流出来过部分文字时先存进 history，避免上下文丢失
-      if (assistantText)
-        session.history.push({ role: "assistant", content: assistantText });
-      // 把错误说给用户听
-      try {
-        await this.conn.sessionUpdate({
-          sessionId: session.id,
-          update: {
-            sessionUpdate: "agent_message_chunk",
-            content: { type: "text", text: formatProviderErrorForUser(info) },
-          },
-        });
-      } catch {
-        // 写错误信息本身也可能失败（连接已断）—— 静默忽略，stopReason 仍会回报
-      }
-      return { kind: "stop", reason: "refusal", error: info };
-    }
-
-    if (session.abort.signal.aborted) {
-      if (assistantText)
-        session.history.push({ role: "assistant", content: assistantText });
-      return { kind: "stop", reason: "cancelled" };
-    }
-
-    if (toolCalls.length === 0 || finishReason !== "tool_calls") {
-      session.history.push({ role: "assistant", content: assistantText });
-      return { kind: "stop", reason: "end_turn" };
-    }
-
-    session.history.push({
-      role: "assistant",
-      content: assistantText,
-      tool_calls: toolCalls,
+  private async runOneIteration(session: Session): Promise<IterationResult> {
+    return runIteration(session, {
+      conn: this.conn,
+      provider: this.provider,
+      clientCaps: this.clientCaps,
+      policy: this.policy,
+      defaultModelId: this.models.defaultModelId,
+      buildHookBase: (s) => this.hookBase(s),
     });
-
-    for (const call of toolCalls) {
-      const tool = getTool(call.name);
-      const mcpTool =
-        !tool && call.name.startsWith("mcp__")
-          ? session.mcpClient?.getMcpTool(call.name)
-          : undefined;
-      const startKind = mcpTool
-        ? ("execute" as const)
-        : tool
-          ? kindFromTier(tool.tier)
-          : ("other" as const);
-      const startTitle = startTitleFor(call);
-      const startLocations = startLocationsFor(call);
-
-      await this.conn.sessionUpdate({
-        sessionId: session.id,
-        update: {
-          sessionUpdate: "tool_call",
-          toolCallId: call.id,
-          title: startTitle,
-          kind: startKind,
-          status: "in_progress",
-          rawInput: safeParseJSON(call.arguments) ?? { raw: call.arguments },
-          ...(startLocations ? { locations: startLocations } : {}),
-        },
-      });
-
-      log.info("tool start", {
-        name: call.name,
-        toolCallId: call.id,
-        argsPreview: previewArgs(call.arguments),
-      });
-      const toolStartedAt = Date.now();
-
-      // 工具参数解析（容错版）：旧实现用裸 JSON.parse(call.arguments)，
-      // 一个畸形 JSON 就能挂掉整个 prompt loop。改为：解析失败 → emit failed
-      // update + 写一条 error tool message 给 LLM 自我纠错 + continue 下一个 tool_call。
-      const argsResult = parseToolArguments(call.arguments);
-      if (!argsResult.ok) {
-        log.warn("tool args parse failed", {
-          name: call.name,
-          toolCallId: call.id,
-          error: argsResult.error,
-        });
-        await this.conn.sessionUpdate({
-          sessionId: session.id,
-          update: {
-            sessionUpdate: "tool_call_update",
-            toolCallId: call.id,
-            status: "failed",
-            title: `${call.name} (bad arguments)`,
-            kind: startKind,
-            content: [
-              {
-                type: "content",
-                content: { type: "text", text: argsResult.error },
-              },
-            ],
-          },
-        });
-        session.history.push({
-          role: "tool",
-          tool_call_id: call.id,
-          content: argsResult.error,
-          name: call.name,
-        });
-        continue;
-      }
-      const toolArgs: Record<string, unknown> = argsResult.value;
-
-      // PreToolUse hook
-      const preResult = await runPreToolUse(session.hooks, {
-        hook_event_name: "PreToolUse",
-        ...this.hookBase(session),
-        tool_name: call.name,
-        tool_input: toolArgs,
-      });
-
-      if (!preResult.allow) {
-        // hook 拒绝了 —— emit denied 状态
-        const reason =
-          preResult.reason ?? `Tool "${call.name}" blocked by plugin hook.`;
-        await this.conn.sessionUpdate({
-          sessionId: session.id,
-          update: {
-            sessionUpdate: "tool_call_update",
-            toolCallId: call.id,
-            status: "failed",
-            title: `${call.name} (blocked by hook)`,
-            kind: startKind,
-            content: [
-              { type: "content", content: { type: "text", text: reason } },
-            ],
-          },
-        });
-        session.history.push({
-          role: "tool",
-          tool_call_id: call.id,
-          content: reason,
-          name: call.name,
-        });
-        continue;
-      }
-
-      const r = mcpTool
-        ? await createMcpTool(mcpTool, session.mcpClient!).execute(toolArgs, {
-            conn: this.conn,
-            sessionId: session.id,
-            cwd: session.cwd,
-            caps: this.clientCaps,
-            signal: session.abort.signal,
-            policy: this.policy,
-            toolCallId: call.id,
-            state: session.toolState,
-          })
-        : await executeTool(call.name, JSON.stringify(toolArgs), {
-            conn: this.conn,
-            sessionId: session.id,
-            cwd: session.cwd,
-            caps: this.clientCaps,
-            signal: session.abort.signal,
-            policy: this.policy,
-            toolCallId: call.id,
-            state: session.toolState,
-          });
-
-      log.info("tool end", {
-        name: call.name,
-        toolCallId: call.id,
-        ok: r.ok,
-        elapsedMs: Date.now() - toolStartedAt,
-        resultBytes: r.resultText.length,
-        resultPreview:
-          r.resultText.length > 200
-            ? r.resultText.slice(0, 200) +
-              ` …(+${r.resultText.length - 200} more bytes)`
-            : r.resultText,
-      });
-
-      // PostToolUse / PostToolUseFailure hook
-      if (r.ok) {
-        const postResult = await runPostToolUse(session.hooks, {
-          hook_event_name: "PostToolUse",
-          ...this.hookBase(session),
-          tool_name: call.name,
-          tool_input: toolArgs,
-          tool_response: r.resultText,
-        });
-        if (postResult.systemMessage) {
-          r.resultText += "\n\n" + postResult.systemMessage;
-          r.acpContent = [
-            ...r.acpContent,
-            {
-              type: "content",
-              content: {
-                type: "text",
-                text: "\n\n" + postResult.systemMessage,
-              },
-            },
-          ];
-        }
-      } else {
-        const postResult = await runPostToolUseFailure(session.hooks, {
-          hook_event_name: "PostToolUseFailure",
-          ...this.hookBase(session),
-          tool_name: call.name,
-          tool_input: toolArgs,
-          tool_response: r.resultText,
-        });
-        if (postResult.systemMessage) {
-          r.resultText += "\n\n" + postResult.systemMessage;
-          r.acpContent = [
-            ...r.acpContent,
-            {
-              type: "content",
-              content: {
-                type: "text",
-                text: "\n\n" + postResult.systemMessage,
-              },
-            },
-          ];
-        }
-      }
-
-      await this.conn.sessionUpdate({
-        sessionId: session.id,
-        update: {
-          sessionUpdate: "tool_call_update",
-          toolCallId: call.id,
-          status: r.ok ? "completed" : "failed",
-          title: r.title,
-          kind: r.kind,
-          content: r.acpContent,
-          ...(r.locations ? { locations: r.locations } : {}),
-        },
-      });
-
-      session.history.push({
-        role: "tool",
-        tool_call_id: call.id,
-        content: r.resultText,
-        name: call.name,
-      });
-    }
-
-    return { kind: "continue" };
   }
 
-  /** 构造每次 hook 通用的 base 字段。 */
-  private hookBase(session: Session): {
-    session_id: string;
-    cwd: string;
-    transcript_path?: string;
-    model: string;
-    client: string;
-    version: string;
-  } {
+  /** 构造每次 hook 通用的 base 字段。返回 HookBase 给 prompt-loop / 各
+   *  hook 触发点共用，确保接口统一。 */
+  private hookBase(session: Session): HookBase {
     // transcript_path：磁盘上的 session JSON 文件路径。
     // Claude Code 规范："Path to conversation JSON"。仅当 session 至少
     // 持久化过一次时才设。
@@ -1204,42 +793,9 @@ export class InvoxAgent implements Agent {
    * MCP 子进程。每次 acquire 必须在 session 销毁路径上对应一次 release（见
    * releaseSessionMcp），否则会泄漏子进程。
    */
-  private async initMcpForSession(session: Session): Promise<void> {
-    try {
-      const mcp = await acquireMcp(session.cwd);
-      if (mcp) {
-        session.mcpClient = mcp;
-        log.info("mcp connected for session", {
-          sessionId: session.id,
-          cwd: session.cwd,
-          toolCount: mcp.getToolSpecs().length,
-        });
-      }
-    } catch (e) {
-      log.warn("mcp init failed", {
-        sessionId: session.id,
-        cwd: session.cwd,
-        error: (e as Error).message,
-      });
-      // session 在没有 MCP 工具的情况下继续
-    }
-  }
-
   /**
-   * 释放 session 持有的 MCP 池引用。所有 session 销毁路径
-   * （deleteSession RPC、未来的连接断开路径）都必须经过这里。
+   * MCP 进程池生命周期实现见 ./mcp-lifecycle.ts。
    */
-  private async releaseSessionMcp(session: Session): Promise<void> {
-    if (!session.mcpClient) return;
-    session.mcpClient = undefined;
-    await releaseMcp(session.cwd).catch((e) => {
-      log.warn("mcp pool release error", {
-        sessionId: session.id,
-        cwd: session.cwd,
-        error: (e as Error).message,
-      });
-    });
-  }
 
   /**
    * 把当前 skill 目录作为 ACP `available_commands_update` 通知发出去。
@@ -1299,271 +855,15 @@ export class InvoxAgent implements Agent {
     session.store.save(snapshot);
   }
 
-  /** 构造 session/new、session/load 响应中的 SessionModelState。 */
-  private modelStateFor(session: Session): SessionModelState {
-    return {
-      availableModels: this.models.available,
-      currentModelId: session.selectedModel ?? this.models.defaultModelId,
-    };
-  }
-
-  /**
-   * 构造 session/new、session/load 响应中的 SessionConfigOption[] ——
-   * 客户端底部工具栏据此渲染额外下拉项（"System Prompt"、"Thinking" 等）。
-   *
-   * category 选取：system_prompt 落在 `other` 类别（spec 保留的
-   * "system_prompt" 类别尚未进入 wire 枚举）；thinking 用 spec 定义的
-   * `thought_level` 类别，让客户端能匹配到合适图标。
-   */
-  private configOptionsFor(session: Session): SessionConfigOption[] {
-    const opts: SessionConfigOption[] = [];
-
-    // Model selector ——
-    // 当 configOptions 被填充时 Zed 工具栏会切换到 config_options_view
-    // （与原生 model_selector 互斥，见 thread_view.rs）。我们把 model 选择
-    // 也作为 SessionConfigOption(category:"model") 暴露，让用户不丢失换 model 的能力。
-    if (this.models.available.length > 1) {
-      opts.push({
-        id: "model",
-        name: "Model",
-        description: "LLM model used for the next turn.",
-        category: "model",
-        type: "select",
-        // 来源 selectedModel，让两条路径（setSessionConfigOption 和
-        // unstable_setSessionModel）保持同步
-        currentValue: session.selectedModel ?? this.models.defaultModelId,
-        options: this.models.available.map((m) => ({
-          value: m.modelId,
-          name: m.name ?? m.modelId,
-        })),
-      });
-    }
-
-    // System Prompt selector —— 仅当真正有得选时才公布；
-    // 单模板场景公布只会徒增 UI 杂乱
-    if (this.configs.systemPrompts.length > 1) {
-      opts.push({
-        id: "system_prompt",
-        name: "System Prompt",
-        description: "Switch the system prompt template for the next turn.",
-        // ACP 的稳定 category 是 mode / model / thought_level；
-        // system_prompt 落到自由 string（union 接受 string 用于 forward-compat）
-        category: "system_prompt",
-        type: "select",
-        currentValue:
-          session.configValues.system_prompt ??
-          this.configs.defaultSystemPromptId,
-        options: this.configs.systemPrompts.map((p) => ({
-          value: p.id,
-          name: p.name,
-          ...(p.description ? { description: p.description } : {}),
-        })),
-      });
-    }
-
-    // Thinking / reasoning 强度
-    opts.push({
-      id: "thinking",
-      name: "Thinking",
-      description:
-        "Reasoning effort sent to the upstream model (OpenAI: reasoning_effort). " +
-        "Off disables thinking entirely; higher values cost more tokens but produce better answers on complex tasks.",
-      category: "thought_level",
-      type: "select",
-      currentValue: session.configValues.thinking ?? "off",
-      options: [
-        { value: "off", name: "Off", description: "No reasoning effort." },
-        { value: "low", name: "Low" },
-        { value: "medium", name: "Medium" },
-        { value: "high", name: "High" },
-      ],
-    });
-
-    return opts;
-  }
-
-  /**
-   * 把单次 provider 上报的 usage 块累加到 session 的 per-turn 总数。
-   * 实际累加逻辑放在 ./usage-meter.ts；本方法只是委托，旧调用点保留兼容。
-   * 新代码直接调 `accumulateTurnUsage`。
-   */
-  private accumulateUsage(session: Session, usage: UsageInfo): void {
-    accumulateTurnUsage(session.turnUsage, usage);
-  }
-
-  /**
-   * 上报本 turn 的 token usage。
-   *
-   * 兼容性双通道：
-   *
-   * 1. `usage_update` —— ACP 0.13+ `unstable_session_usage` 特性的官方变种。
-   *    Zed 在 `acp-beta` 开关开启时把它渲染成 model 下拉旁边的小芯片。
-   *    schema：`{ sessionUpdate: "usage_update", used, size, cost? }`。
-   *
-   * 2. `agent_thought_chunk`（带 `_meta.invox/usage`）—— 兜底渲染。
-   *    Zed 把它折叠到 "Thinking" 块里，即便 acp-beta 关着用户也能看到计数。
-   *
-   * provider 没有 yield usage（如 EchoProvider）时两条都跳过。
-   */
-  private async reportTurnUsage(
-    session: Session,
-    stopReason: "end_turn" | "cancelled" | "max_turn_requests" | "refusal",
-  ): Promise<void> {
-    const u = session.turnUsage;
-    if (u.calls === 0) return;
-    const model = session.selectedModel ?? this.models.defaultModelId;
-    const partial = stopReason !== "end_turn";
-
-    // 1. 官方 usage_update（受 Zed acp-beta 控制）
-    const contextWindow = contextWindowFor(model);
-    // 用 maxPrompt 作为 context 占用 —— 每次 LLM 调用都 resend 完整 history，
-    // SUM(prompt_tokens) 是 billing 维度，不是 context 占用维度。
-    const used = u.maxPrompt + u.output;
-    await this.conn.sessionUpdate({
-      sessionId: session.id,
-      update: {
-        sessionUpdate: "usage_update",
-        used,
-        size: contextWindow,
-      },
-    });
-
-    // 2. 算本 turn 耗时
-    const elapsedMs =
-      session.turnStartedAt > 0 ? Date.now() - session.turnStartedAt : 0;
-    const elapsedSec = (elapsedMs / 1000).toFixed(1);
-
-    // 3. 兜底通道：agent_thought_chunk + _meta 扩展
-    const ctxFmt = humanizeTokens(used);
-    const sizeFmt = humanizeTokens(contextWindow);
-    // 显示最大 context 那一次的 cache 命中率。maxCached 与 maxPrompt 保证
-    // 来自同一调用（accumulateUsage 中对齐），比例有意义。
-    // 上限 100% 防 provider bug 上报 cached > prompt。
-    const cacheHint =
-      u.maxCached > 0 && u.maxPrompt > 0
-        ? ` · cache ${Math.round((u.maxCached / u.maxPrompt) * 100)}%`
-        : "";
-    const text =
-      `🪙 Context: ${ctxFmt} / ${sizeFmt}` +
-      ` · ${u.calls} turns · ${elapsedSec}s` +
-      cacheHint +
-      (partial ? ` · ${stopReason}` : "") +
-      ` · ${model}`;
-    await this.conn.sessionUpdate({
-      sessionId: session.id,
-      _meta: {
-        "invox/usage": {
-          turn: {
-            input: u.input,
-            output: u.output,
-            total: u.total,
-            calls: u.calls,
-            maxPrompt: u.maxPrompt,
-            maxCached: u.maxCached,
-            cached: u.cached,
-          },
-          model,
-          contextWindow,
-          stopReason,
-        },
-      },
-      update: {
-        sessionUpdate: "agent_thought_chunk",
-        content: { type: "text", text },
-      },
-    });
-
-    // 4. 持久化 lastTurnUsage 供重启后展示
-    session.lastTurnUsage = {
-      input: u.input,
-      output: u.output,
-      total: u.total,
-      calls: u.calls,
-      maxPrompt: u.maxPrompt,
-      maxCached: u.maxCached,
-      cached: u.cached,
-      elapsedMs,
-      model,
-    };
-  }
-
   /**
    * loadSession 时把磁盘上的 history "重放"给客户端，让 UI 能恢复历史消息和
-   * 工具调用卡片。仅做 UI 重建，不重新跑工具。
+   * 工具调用卡片。仅做 UI 重建，不重新跑工具。实际实现见 ./replay-history.ts。
+   *
+   * 单次 LLM 调用的 usage 累加见 ./usage-meter.ts 的 accumulateTurnUsage；
+   * turn 结束时的 usage 上报（双通道 + lastTurnUsage 写入）见
+   * ./turn-usage-reporter.ts 的 reportTurnUsage。
+   *
+   * SessionModelState / SessionConfigOption[] 构造见 ./config-options.ts 的
+   * buildModelState / buildConfigOptions。
    */
-  private async replayHistory(session: Session): Promise<void> {
-    const toolResultById = new Map<string, LLMMessage>();
-    for (const m of session.history) {
-      if (m.role === "tool" && m.tool_call_id)
-        toolResultById.set(m.tool_call_id, m);
-    }
-
-    for (const m of session.history) {
-      if (m.role === "user") {
-        await this.conn.sessionUpdate({
-          sessionId: session.id,
-          update: {
-            sessionUpdate: "user_message_chunk",
-            content: { type: "text", text: contentToString(m.content) },
-          },
-        });
-        continue;
-      }
-
-      if (m.role === "assistant") {
-        const text = typeof m.content === "string" ? m.content : "";
-        if (text.length > 0) {
-          await this.conn.sessionUpdate({
-            sessionId: session.id,
-            update: {
-              sessionUpdate: "agent_message_chunk",
-              content: { type: "text", text },
-            },
-          });
-        }
-        for (const call of m.tool_calls ?? []) {
-          const tool = getTool(call.name);
-          const replayLocations = startLocationsFor(call);
-          await this.conn.sessionUpdate({
-            sessionId: session.id,
-            update: {
-              sessionUpdate: "tool_call",
-              toolCallId: call.id,
-              title: startTitleFor(call),
-              kind: tool ? kindFromTier(tool.tier) : "other",
-              status: "in_progress",
-              rawInput: safeParseJSON(call.arguments) ?? {
-                raw: call.arguments,
-              },
-              ...(replayLocations ? { locations: replayLocations } : {}),
-            },
-          });
-          const result = toolResultById.get(call.id);
-          const resultText = result
-            ? typeof result.content === "string"
-              ? result.content
-              : JSON.stringify(result.content)
-            : "(no recorded result)";
-          await this.conn.sessionUpdate({
-            sessionId: session.id,
-            update: {
-              sessionUpdate: "tool_call_update",
-              toolCallId: call.id,
-              status: "completed",
-              title: startTitleFor(call),
-              kind: tool ? kindFromTier(tool.tier) : "other",
-              content: [
-                {
-                  type: "content",
-                  content: { type: "text", text: resultText },
-                },
-              ],
-              ...(replayLocations ? { locations: replayLocations } : {}),
-            },
-          });
-        }
-        continue;
-      }
-    }
-  }
 }

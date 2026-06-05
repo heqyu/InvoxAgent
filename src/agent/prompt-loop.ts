@@ -1,0 +1,395 @@
+// 单轮 LLM ↔ tool 往返的核心循环。
+//
+// 设计契约：
+//   - 入参 deps 是 InvoxAgent 内部状态的只读视图（provider、conn、policy、
+//     clientCaps、defaultModelId、hookBase 构造器）。本函数不持有 InvoxAgent
+//     实例引用，便于单测注入 mock
+//   - 返回 discriminated union：
+//       { kind: "stop", reason: "end_turn" | "cancelled" }
+//       { kind: "stop", reason: "refusal", error: ProviderErrorInfo }
+//       { kind: "continue" }
+//   - 失败路径（provider 抛错 / 用户 cancel）已在内部吸收，绝不向上抛 ——
+//     prompt() 调用方拿到的是 "返回值即结论"
+//   - 副作用：可能 push 到 session.history、session.turnUsage、并发出一系列
+//     session/update 通知。LLM 调用 + tool 调用之间的顺序与日志严格保留原状
+//
+// 抽出原因（A2 / PROGRESS Phase A）：旧 InvoxAgent.runOneIteration 是 300+ 行的
+// 私有方法，把 agent.ts 撑到 1660 行；提成 free function 后 prompt-loop 模块
+// 独立可读、可单测，agent.ts 的类骨架留给 ACP 入口。
+
+import type {
+  AgentSideConnection,
+  ClientCapabilities,
+} from "@agentclientprotocol/sdk";
+import { log } from "../log.js";
+import type { LLMProvider, ParsedToolCall } from "../llm/types.js";
+import { createMcpTool } from "../mcp/tool.js";
+import {
+  runPostToolUse,
+  runPostToolUseFailure,
+  runPreToolUse,
+} from "../plugins/hooks.js";
+import { kindFromTier } from "../tools/permissions.js";
+import { getTool, TOOL_SPECS } from "../tools/registry.js";
+import { executeTool } from "../tools/router.js";
+import type { PermissionPolicy } from "../tools/types.js";
+import {
+  classifyProviderError,
+  formatProviderErrorForUser,
+  type ProviderErrorInfo,
+} from "./error-mapping.js";
+import { parseToolArguments, safeParseJSON } from "./json.js";
+import type { HookBase, Session } from "./session-types.js";
+import { thinkingToReasoningEffort } from "./system-prompt.js";
+import {
+  previewArgs,
+  startLocationsFor,
+  startTitleFor,
+} from "./tool-presentation.js";
+import { accumulateTurnUsage } from "./usage-meter.js";
+
+/**
+ * runOneIteration 的依赖注入包。InvoxAgent 在每次调用前打包一次，避免
+ * 每个参数单独传。
+ */
+export interface IterationDeps {
+  conn: AgentSideConnection;
+  provider: LLMProvider;
+  clientCaps: ClientCapabilities;
+  policy: PermissionPolicy;
+  /** session.selectedModel 兜底值（来自 AgentModelConfig.defaultModelId） */
+  defaultModelId: string;
+  /** 构造 hook context base 字段的回调。InvoxAgent 通过它注入
+   *  client / version / transcript_path 等只有 agent 知道的字段。 */
+  buildHookBase: (session: Session) => HookBase;
+}
+
+/** runOneIteration 的返回。caller 应不抛异常地处理这三种 case。 */
+export type IterationResult =
+  | { kind: "stop"; reason: "end_turn" | "cancelled" }
+  | { kind: "stop"; reason: "refusal"; error: ProviderErrorInfo }
+  | { kind: "continue" };
+
+/**
+ * 跑一轮 LLM ↔ tool 往返。
+ */
+export async function runOneIteration(
+  session: Session,
+  deps: IterationDeps,
+): Promise<IterationResult> {
+  let assistantText = "";
+  const toolCalls: ParsedToolCall[] = [];
+  let finishReason: "stop" | "tool_calls" | "length" | "other" = "other";
+
+  try {
+    // 合并 invox 内置工具与本会话 MCP 工具
+    const mcpSpecs = session.mcpClient?.getToolSpecs() ?? [];
+    const allTools =
+      mcpSpecs.length > 0 ? [...TOOL_SPECS, ...mcpSpecs] : TOOL_SPECS;
+
+    for await (const delta of deps.provider.stream({
+      messages: session.history,
+      signal: session.abort.signal,
+      tools: allTools,
+      model: session.selectedModel ?? deps.defaultModelId,
+      reasoningEffort: thinkingToReasoningEffort(
+        session.configValues.thinking,
+      ),
+    })) {
+      if (session.abort.signal.aborted) break;
+      switch (delta.kind) {
+        case "text":
+          if (delta.text.length > 0) {
+            assistantText += delta.text;
+            await deps.conn.sessionUpdate({
+              sessionId: session.id,
+              update: {
+                sessionUpdate: "agent_message_chunk",
+                content: { type: "text", text: delta.text },
+              },
+            });
+          }
+          break;
+        case "tool_call":
+          toolCalls.push(delta.call);
+          break;
+        case "usage":
+          accumulateTurnUsage(session.turnUsage, delta.usage);
+          break;
+        case "finish":
+          finishReason = delta.reason;
+          break;
+      }
+    }
+  } catch (err) {
+    // 把 provider 抛出的错误映射到 ACP stopReason。
+    // AbortError 是用户主动取消，走 cancelled；其它统一 refusal，并通过
+    // agent_message_chunk 把可读 message 流给用户 —— 不再向 RPC 抛异常。
+    const classified = classifyProviderError(err);
+    if (classified.kind === "abort") {
+      if (assistantText)
+        session.history.push({ role: "assistant", content: assistantText });
+      return { kind: "stop", reason: "cancelled" };
+    }
+    const info = classified.info;
+    log.error("provider stream failed", {
+      category: info.category,
+      ...(info.status !== undefined ? { status: info.status } : {}),
+      ...(info.code !== undefined ? { code: info.code } : {}),
+      message: info.message,
+    });
+    // 已经流出来过部分文字时先存进 history，避免上下文丢失
+    if (assistantText)
+      session.history.push({ role: "assistant", content: assistantText });
+    // 把错误说给用户听
+    try {
+      await deps.conn.sessionUpdate({
+        sessionId: session.id,
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: formatProviderErrorForUser(info) },
+        },
+      });
+    } catch {
+      // 写错误信息本身也可能失败（连接已断）—— 静默忽略，stopReason 仍会回报
+    }
+    return { kind: "stop", reason: "refusal", error: info };
+  }
+
+  if (session.abort.signal.aborted) {
+    if (assistantText)
+      session.history.push({ role: "assistant", content: assistantText });
+    return { kind: "stop", reason: "cancelled" };
+  }
+
+  if (toolCalls.length === 0 || finishReason !== "tool_calls") {
+    session.history.push({ role: "assistant", content: assistantText });
+    return { kind: "stop", reason: "end_turn" };
+  }
+
+  session.history.push({
+    role: "assistant",
+    content: assistantText,
+    tool_calls: toolCalls,
+  });
+
+  for (const call of toolCalls) {
+    await runOneToolCall(call, session, deps);
+  }
+
+  return { kind: "continue" };
+}
+
+/**
+ * 处理单个 tool_call —— 解析参数 → PreToolUse hook → 执行 → Post hook →
+ * emit tool_call_update + push 结果到 history。
+ *
+ * 抽出来主要是为了把 runOneIteration 的体量再压一档；逻辑严格不变。
+ * 失败路径自吞，不向调用方抛错（与原实现一致）。
+ */
+async function runOneToolCall(
+  call: ParsedToolCall,
+  session: Session,
+  deps: IterationDeps,
+): Promise<void> {
+  const tool = getTool(call.name);
+  const mcpTool =
+    !tool && call.name.startsWith("mcp__")
+      ? session.mcpClient?.getMcpTool(call.name)
+      : undefined;
+  const startKind = mcpTool
+    ? ("execute" as const)
+    : tool
+      ? kindFromTier(tool.tier)
+      : ("other" as const);
+  const startTitle = startTitleFor(call);
+  const startLocations = startLocationsFor(call);
+
+  await deps.conn.sessionUpdate({
+    sessionId: session.id,
+    update: {
+      sessionUpdate: "tool_call",
+      toolCallId: call.id,
+      title: startTitle,
+      kind: startKind,
+      status: "in_progress",
+      rawInput: safeParseJSON(call.arguments) ?? { raw: call.arguments },
+      ...(startLocations ? { locations: startLocations } : {}),
+    },
+  });
+
+  log.info("tool start", {
+    name: call.name,
+    toolCallId: call.id,
+    argsPreview: previewArgs(call.arguments),
+  });
+  const toolStartedAt = Date.now();
+
+  // 工具参数解析（容错版）：旧实现用裸 JSON.parse(call.arguments)，
+  // 一个畸形 JSON 就能挂掉整个 prompt loop。改为：解析失败 → emit failed
+  // update + 写一条 error tool message 给 LLM 自我纠错 + return 继续下一个 tool_call。
+  const argsResult = parseToolArguments(call.arguments);
+  if (!argsResult.ok) {
+    log.warn("tool args parse failed", {
+      name: call.name,
+      toolCallId: call.id,
+      error: argsResult.error,
+    });
+    await deps.conn.sessionUpdate({
+      sessionId: session.id,
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId: call.id,
+        status: "failed",
+        title: `${call.name} (bad arguments)`,
+        kind: startKind,
+        content: [
+          {
+            type: "content",
+            content: { type: "text", text: argsResult.error },
+          },
+        ],
+      },
+    });
+    session.history.push({
+      role: "tool",
+      tool_call_id: call.id,
+      content: argsResult.error,
+      name: call.name,
+    });
+    return;
+  }
+  const toolArgs: Record<string, unknown> = argsResult.value;
+
+  // PreToolUse hook
+  const preResult = await runPreToolUse(session.hooks, {
+    hook_event_name: "PreToolUse",
+    ...deps.buildHookBase(session),
+    tool_name: call.name,
+    tool_input: toolArgs,
+  });
+
+  if (!preResult.allow) {
+    // hook 拒绝了 —— emit denied 状态
+    const reason =
+      preResult.reason ?? `Tool "${call.name}" blocked by plugin hook.`;
+    await deps.conn.sessionUpdate({
+      sessionId: session.id,
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId: call.id,
+        status: "failed",
+        title: `${call.name} (blocked by hook)`,
+        kind: startKind,
+        content: [{ type: "content", content: { type: "text", text: reason } }],
+      },
+    });
+    session.history.push({
+      role: "tool",
+      tool_call_id: call.id,
+      content: reason,
+      name: call.name,
+    });
+    return;
+  }
+
+  const r = mcpTool
+    ? await createMcpTool(mcpTool, session.mcpClient!).execute(toolArgs, {
+        conn: deps.conn,
+        sessionId: session.id,
+        cwd: session.cwd,
+        caps: deps.clientCaps,
+        signal: session.abort.signal,
+        policy: deps.policy,
+        toolCallId: call.id,
+        state: session.toolState,
+      })
+    : await executeTool(call.name, JSON.stringify(toolArgs), {
+        conn: deps.conn,
+        sessionId: session.id,
+        cwd: session.cwd,
+        caps: deps.clientCaps,
+        signal: session.abort.signal,
+        policy: deps.policy,
+        toolCallId: call.id,
+        state: session.toolState,
+      });
+
+  log.info("tool end", {
+    name: call.name,
+    toolCallId: call.id,
+    ok: r.ok,
+    elapsedMs: Date.now() - toolStartedAt,
+    resultBytes: r.resultText.length,
+    resultPreview:
+      r.resultText.length > 200
+        ? r.resultText.slice(0, 200) +
+          ` …(+${r.resultText.length - 200} more bytes)`
+        : r.resultText,
+  });
+
+  // PostToolUse / PostToolUseFailure hook
+  if (r.ok) {
+    const postResult = await runPostToolUse(session.hooks, {
+      hook_event_name: "PostToolUse",
+      ...deps.buildHookBase(session),
+      tool_name: call.name,
+      tool_input: toolArgs,
+      tool_response: r.resultText,
+    });
+    if (postResult.systemMessage) {
+      r.resultText += "\n\n" + postResult.systemMessage;
+      r.acpContent = [
+        ...r.acpContent,
+        {
+          type: "content",
+          content: {
+            type: "text",
+            text: "\n\n" + postResult.systemMessage,
+          },
+        },
+      ];
+    }
+  } else {
+    const postResult = await runPostToolUseFailure(session.hooks, {
+      hook_event_name: "PostToolUseFailure",
+      ...deps.buildHookBase(session),
+      tool_name: call.name,
+      tool_input: toolArgs,
+      tool_response: r.resultText,
+    });
+    if (postResult.systemMessage) {
+      r.resultText += "\n\n" + postResult.systemMessage;
+      r.acpContent = [
+        ...r.acpContent,
+        {
+          type: "content",
+          content: {
+            type: "text",
+            text: "\n\n" + postResult.systemMessage,
+          },
+        },
+      ];
+    }
+  }
+
+  await deps.conn.sessionUpdate({
+    sessionId: session.id,
+    update: {
+      sessionUpdate: "tool_call_update",
+      toolCallId: call.id,
+      status: r.ok ? "completed" : "failed",
+      title: r.title,
+      kind: r.kind,
+      content: r.acpContent,
+      ...(r.locations ? { locations: r.locations } : {}),
+    },
+  });
+
+  session.history.push({
+    role: "tool",
+    tool_call_id: call.id,
+    content: r.resultText,
+    name: call.name,
+  });
+}
