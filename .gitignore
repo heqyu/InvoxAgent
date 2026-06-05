@@ -20,3 +20,6 @@ convert_time.ps1
 convert_time.py
 .claude
 .codegraph
+
+# CodeBuddy IDE 本地元数据（每台机器自己生成，不入库）
+.codebuddy/
