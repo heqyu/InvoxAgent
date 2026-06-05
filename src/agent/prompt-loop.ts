@@ -22,7 +22,7 @@ import type {
   ClientCapabilities,
 } from "@agentclientprotocol/sdk";
 import { log } from "../log.js";
-import type { LLMProvider, ParsedToolCall } from "../llm/types.js";
+import type { LLMMessage, LLMProvider, ParsedToolCall } from "../llm/types.js";
 import { createMcpTool } from "../mcp/tool.js";
 import {
   runPostToolUse,
@@ -81,6 +81,54 @@ export type IterationResult =
   | { kind: "stop"; reason: "end_turn" | "cancelled" }
   | { kind: "stop"; reason: "refusal"; error: ProviderErrorInfo }
   | { kind: "continue" };
+
+export interface ToolCallBatch {
+  readonly mode: "parallel" | "serial";
+  readonly calls: ParsedToolCall[];
+}
+
+const NON_PARALLEL_TOOL_NAMES = new Set(["Bash", "Edit"]);
+
+/** 判断单个工具调用是否允许放入并行批次。 */
+export function isParallelSafeToolCall(call: ParsedToolCall): boolean {
+  const tool = getTool(call.name);
+  if (!tool) return false;
+  if (NON_PARALLEL_TOOL_NAMES.has(call.name)) return false;
+  return tool.tier === "read";
+}
+
+/**
+ * 按明显顺序依赖把 tool_calls 切成批次。
+ *
+ * 设计选择：只有内置只读工具可并行；写入/执行类工具、MCP 工具、未知工具都作为
+ * 顺序屏障。这样 `Read`/`Glob`/`Grep`/`Skill` 等无明显依赖的调用会并发，
+ * `Edit` 与 `Bash` 默认不可并行，`Write`/`MakePlan` 也因会改文件与缓存而串行。
+ */
+export function planToolCallBatches(
+  toolCalls: readonly ParsedToolCall[],
+): ToolCallBatch[] {
+  const batches: ToolCallBatch[] = [];
+  let parallelCalls: ParsedToolCall[] = [];
+
+  const flushParallel = (): void => {
+    if (parallelCalls.length === 0) return;
+    batches.push({ mode: "parallel", calls: parallelCalls });
+    parallelCalls = [];
+  };
+
+  for (const call of toolCalls) {
+    if (isParallelSafeToolCall(call)) {
+      parallelCalls.push(call);
+      continue;
+    }
+
+    flushParallel();
+    batches.push({ mode: "serial", calls: [call] });
+  }
+
+  flushParallel();
+  return batches;
+}
 
 /**
  * 跑一轮 LLM ↔ tool 往返。
@@ -194,25 +242,50 @@ export async function runOneIteration(
     tool_calls: toolCalls,
   });
 
-  for (const call of toolCalls) {
-    await runOneToolCall(call, session, deps);
-  }
+  await executeToolCallBatches(toolCalls, session, deps);
 
   return { kind: "continue" };
 }
 
+/** 按批次执行工具调用，并保证写入 history 的 tool message 顺序与 LLM 输出一致。 */
+async function executeToolCallBatches(
+  toolCalls: readonly ParsedToolCall[],
+  session: Session,
+  deps: IterationDeps,
+): Promise<void> {
+  const batches = planToolCallBatches(toolCalls);
+  for (const batch of batches) {
+    if (batch.mode === "parallel") {
+      log.info("tool batch start", {
+        mode: "parallel",
+        count: batch.calls.length,
+        names: batch.calls.map((call) => call.name),
+      });
+      const messages = await Promise.all(
+        batch.calls.map((call) => runOneToolCall(call, session, deps)),
+      );
+      session.history.push(...messages);
+      continue;
+    }
+
+    const call = batch.calls[0];
+    if (!call) continue;
+    session.history.push(await runOneToolCall(call, session, deps));
+  }
+}
+
 /**
  * 处理单个 tool_call —— 解析参数 → PreToolUse hook → 执行 → Post hook →
- * emit tool_call_update + push 结果到 history。
+ * emit tool_call_update + 返回结果消息，调用方负责按批次顺序写入 history。
  *
- * 抽出来主要是为了把 runOneIteration 的体量再压一档；逻辑严格不变。
+ * 抽出来主要是为了把 runOneIteration 的体量再压一档。
  * 失败路径自吞，不向调用方抛错（与原实现一致）。
  */
 async function runOneToolCall(
   call: ParsedToolCall,
   session: Session,
   deps: IterationDeps,
-): Promise<void> {
+): Promise<LLMMessage> {
   const tool = getTool(call.name);
   const mcpTool =
     !tool && call.name.startsWith("mcp__")
@@ -272,13 +345,12 @@ async function runOneToolCall(
         ],
       },
     });
-    session.history.push({
+    return {
       role: "tool",
       tool_call_id: call.id,
       content: argsResult.error,
       name: call.name,
-    });
-    return;
+    };
   }
   const toolArgs: Record<string, unknown> = argsResult.value;
 
@@ -305,13 +377,12 @@ async function runOneToolCall(
         content: [{ type: "content", content: { type: "text", text: reason } }],
       },
     });
-    session.history.push({
+    return {
       role: "tool",
       tool_call_id: call.id,
       content: reason,
       name: call.name,
-    });
-    return;
+    };
   }
 
   const r = mcpTool
@@ -407,10 +478,10 @@ async function runOneToolCall(
     },
   });
 
-  session.history.push({
+  return {
     role: "tool",
     tool_call_id: call.id,
     content: r.resultText,
     name: call.name,
-  });
+  };
 }
