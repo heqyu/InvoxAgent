@@ -45,6 +45,38 @@ export const DEFAULT_SYSTEM_PROMPT =
 // ── system message 拼装 ──────────────────────────────────────────────
 
 /**
+ * 从 env 推断当前 shell 的友好名。LLM 只需要"我该用什么命令语法"这个层级
+ * 的信息，所以归一化到几个粗类即可：
+ *   - bash / zsh / fish / sh    —— POSIX-like，含 Git Bash for Windows
+ *   - pwsh / powershell         —— PowerShell（Core / Windows 都归这个）
+ *   - cmd                       —— Windows cmd.exe
+ *   - unknown                   —— 拿不到时由模型按 platform 自行判断
+ *
+ * 优先级：
+ *   1. process.env.SHELL —— Unix 以及 Git Bash 都设这个
+ *   2. process.env.PSModulePath 存在 → pwsh（PowerShell 启动时一定设）
+ *   3. process.env.ComSpec / win32 → cmd
+ *   4. fallback "unknown"
+ *
+ * 模块内部使用，不导出（用户级 prompt 不该依赖具体值）。
+ */
+function detectShell(): string {
+  const sh = process.env["SHELL"];
+  if (sh && sh.length > 0) {
+    // /usr/bin/bash → bash；/bin/zsh → zsh
+    const base = sh.replace(/\\/g, "/").split("/").pop() ?? sh;
+    return base.replace(/\.exe$/i, "").toLowerCase() || "unknown";
+  }
+  // PowerShell 启动时一定有 PSModulePath；放在 ComSpec 之前判断
+  // 因为 pwsh 在 Windows 下也能看到 ComSpec。
+  if (process.env["PSModulePath"]) return "pwsh";
+  if (process.platform === "win32" && process.env["ComSpec"]) return "cmd";
+  return "unknown";
+}
+
+
+
+/**
  * 把 prompt body 拼装成完整 system message：
  *   1. 用户传入的 prompt 主体
  *   2. # Context（当前日期 + 平台 + cwd）
@@ -60,16 +92,22 @@ export function systemMessageWithMemoryAndSkills(
 ): LLMMessage {
   let content = prompt;
 
-  // 0. Context：日期 + 平台 —— 帮助 LLM 生成正确的 shell 命令
+  // 0. Context：日期 + 平台 + shell + node 版本 —— 让 LLM 生成正确的命令。
+  //    特别是 shell：Git Bash 要求正斜杠路径，cmd / pwsh 又是另一套语法；
+  //    模型必须知道才能避免常见错误。
   const now = new Date();
   const dateStr = now.toISOString().slice(0, 10); // YYYY-MM-DD
   const platform = process.platform; // "win32" | "darwin" | "linux"
   const arch = process.arch; // "x64" | "arm64" | ...
   const release = os.release(); // 如 "10.0.26100"
+  const shell = detectShell(); // "bash" / "zsh" / "pwsh" / "cmd" / "unknown"
+  const nodeVer = process.version; // 如 "v22.11.0"
   content +=
     `\n\n# Context\n\n` +
     `Current date: ${dateStr}\n` +
     `Platform: ${platform} (${arch}), release ${release}\n` +
+    `Shell: ${shell}\n` +
+    `Node: ${nodeVer}\n` +
     `Working directory: ${cwd}`;
 
   // 1. Memory（来自 discovery 的所有 MemoryProvider —— 当前内置 CLAUDE.md，

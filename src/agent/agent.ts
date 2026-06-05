@@ -84,6 +84,7 @@ import type {
   SystemPromptDef,
 } from "./session-types.js";
 import type { AgentTemplate } from "./templates.js";
+import { resolveAgentModel } from "./templates.js";
 // 把 session-types 中给 cli.ts 用的 3 个公共类型继续从 agent.ts 导出，
 // 避免破坏 `import { type AgentModelConfig } from "./agent/agent.js"` 这条
 // 既有路径。Session / HookBase 是内部细节，不再对外暴露。
@@ -253,6 +254,15 @@ export class InvoxAgent implements Agent {
       agent: initialConfigValues["agent"],
       systemPrompt: initialConfigValues["system_prompt"],
     });
+
+    // Phase H：默认 agent 若指定 model（如 Worker 默认 "$MODEL_LITE"），
+    // 在 session 一开始就同步到 selectedModel + configValues.model，让用户
+    // 第一次发 prompt 就用对模型。env 未设时静默回退到 default model（在
+    // applyAgentModel 内 warn）。
+    if (this.configs.agents.length > 0) {
+      const defaultAgent = this.agentById.get(this.configs.defaultAgentId!);
+      if (defaultAgent) this.applyAgentModel(session, defaultAgent);
+    }
 
     // 连接 .claude/.mcp.json 中定义的 MCP servers。
     // 优雅降级：配置缺失或某 server 启动失败，会话仍可继续，只是没 MCP 工具。
@@ -551,6 +561,8 @@ export class InvoxAgent implements Agent {
         agent.prompt,
         session.cwd,
       );
+      // Phase H：同步切换 model —— agent.model 解析后写入 session.selectedModel
+      this.applyAgentModel(session, agent);
     } else if (params.configId === "system_prompt") {
       if (this.configs.agents.length > 0) {
         throw new Error(
@@ -844,6 +856,46 @@ export class InvoxAgent implements Agent {
       this.systemPromptById.get(id) ??
       this.systemPromptById.get(this.configs.defaultSystemPromptId)!;
     return def.prompt;
+  }
+
+  /**
+   * Phase H：把 agent.model 应用到 session.selectedModel（+ configValues.model）。
+   *
+   *   - agent.model 未设 → 不动 selectedModel，让用户原本的选择保留
+   *   - agent.model = "$MODEL_PRO" / "$MODEL_LITE" / 具体 id → 解析后写入
+   *   - 解析后的 id 不在 availableModelIds 里 → 动态加入（让 ACP model 下拉
+   *     也能展示新 id；防御性地避免 `unstable_setSessionModel` 路径被拒）
+   *   - 解析后与原 selectedModel 相同 → 不更新（避免无效 log 噪音）
+   *
+   * 永不抛错：env 未设时 resolveAgentModel 内部 warn + 回退 fallback；
+   * 这里再判一次"resolved 是否就是 fallback" —— 是则视作"agent 没有覆盖
+   * 意图"，保留 selectedModel 现状。
+   */
+  private applyAgentModel(session: Session, agent: AgentTemplate): void {
+    if (!agent.model) return;
+    const fallback = session.selectedModel ?? this.models.defaultModelId;
+    const resolved = resolveAgentModel(agent.model, fallback);
+    if (resolved === fallback) return; // env 未设 / 等于当前 → no-op
+
+    if (!this.availableModelIds.has(resolved)) {
+      // 把 PRO/LITE 解析出但不在原 INVOX_MODELS 列表里的 id 动态并入
+      this.availableModelIds.add(resolved);
+      this.models.available.push({ modelId: resolved, name: resolved });
+      log.info("agent model: added resolved id to availableModels", {
+        agentId: agent.id,
+        modelField: agent.model,
+        resolved,
+      });
+    }
+
+    session.selectedModel = resolved;
+    session.configValues["model"] = resolved;
+    log.info("agent model: applied", {
+      sessionId: session.id,
+      agentId: agent.id,
+      modelField: agent.model,
+      resolved,
+    });
   }
 
   /** 构造每次 hook 通用的 base 字段。返回 HookBase 给 prompt-loop / 各

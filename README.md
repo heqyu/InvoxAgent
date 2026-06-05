@@ -290,6 +290,7 @@ Drop a JSON file under `<project>/.invox/agents/` (project-level, wins) or `~/.i
 | `prompt` | string | required | System prompt body (memory / skills sections are auto-appended) |
 | `tools` | string[]? | undefined → all | Tool whitelist (see syntax below) |
 | `mcp` | boolean? | true | Whether MCP tools are exposed to the LLM |
+| `model` | string? | undefined → keep current | Model id or `$ENV_VAR` reference (see below) |
 
 #### `tools` syntax
 
@@ -304,6 +305,31 @@ Three patterns, mixable in one array:
 
 Tool names are PascalCase (`Read` / `Write` / `Edit` / `Glob` / `Grep` / `Bash` / `Skill`). Unknown names are skipped with a warning.
 
+#### `model` syntax
+
+Each agent can pin a model — useful when you want planning agents on a smarter (more expensive) model and worker agents on a cheaper one.
+
+| Form | Meaning |
+|---|---|
+| omitted | Use whatever model the user has selected in the Model dropdown |
+| `"gpt-4o"` (any literal string) | Use this id directly |
+| `"$MODEL_PRO"` | Resolve to `INVOX_MODEL_PRO` env (or `MODEL_PRO` alias) |
+| `"$MODEL_LITE"` | Resolve to `INVOX_MODEL_LITE` env (or `MODEL_LITE` alias) |
+| `"$ANY_VAR"` | Resolve to `process.env.ANY_VAR` (forward-compat for any custom env) |
+
+When the env is unset, invox warns and falls back to the user's currently selected model — agent switching never fails because of a missing env.
+
+**Built-in defaults**:
+
+- `Worker.model = "$MODEL_LITE"` — execution work, cheaper model recommended
+- `Plan.model = "$MODEL_PRO"` — needs strong reasoning
+- `CodeReviewer.model = "$MODEL_PRO"` — adversarial review benefits from a smarter model
+- `Ask.model` is unset — pure Q&A, user decides
+
+So setting `INVOX_MODEL_PRO=claude-3-5-sonnet INVOX_MODEL_LITE=gpt-4o-mini` gives you a useful out-of-the-box behavior: switching the Agent dropdown automatically picks the right model.
+
+When an agent template's `model` resolves to an id not already in `INVOX_MODELS`, invox auto-injects it into the model menu so the dropdown stays consistent.
+
 ### Configuration
 
 | Env var | Effect |
@@ -311,6 +337,8 @@ Tool names are PascalCase (`Read` / `Write` / `Edit` / `Glob` / `Grep` / `Bash` 
 | `INVOX_AGENTS=disabled` | Hide the Agent dropdown; fall back to legacy System Prompt path |
 | `INVOX_AGENTS_DIR=<path>` | Override scan root (default: `process.cwd()` at startup) |
 | `INVOX_DEFAULT_AGENT=<id>` | Default agent id when multiple are loaded (default: `Worker`) |
+| `INVOX_MODEL_PRO=<id>` | Resolves `$MODEL_PRO` references in `agent.model` (alias: `MODEL_PRO`) |
+| `INVOX_MODEL_LITE=<id>` | Resolves `$MODEL_LITE` references in `agent.model` (alias: `MODEL_LITE`) |
 
 Override priority for the agent list (high → low): `<scanRoot>/.invox/agents/*.json` → `~/.invox/agents/*.json` → built-ins. Same `id` overrides; the project layer always wins.
 

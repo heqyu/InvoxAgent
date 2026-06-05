@@ -124,6 +124,17 @@
 | G2 | 接线：`AgentConfigOptions` 加 `agents` 字段；`buildConfigOptions` 暴露 "agent" 下拉、隐藏 "system_prompt"；agent.ts 处理 `configId="agent"`；prompt-loop 按 agent 过滤 toolSpecs / MCP | P0 | **✅ Done**（16:15）<br/>改 4 文件（session-types / config-options / agent / prompt-loop），新增 `IterationDeps.activeAgent`；私有 `effectiveSystemPromptBody` / `activeAgentFor` helper | typecheck 绿；现有 211 单测全过 |
 | G3 | CLI 接入 + `INVOX_AGENTS` / `INVOX_AGENTS_DIR` / `INVOX_DEFAULT_AGENT` env + `examples/smoke-agents.ts` + README + PROGRESS | P0 | **✅ Done**（16:18）<br/>cli.ts 加 `pickConfigOptions` 升级版；`smoke-agents.ts` 端到端验证（4 场景：下拉 / 切换 / 持久化 / 重启恢复）；老 `smoke-config-options.ts` 加 `INVOX_AGENTS=disabled` 保留旧路径回归 | smoke-agents PASS；`npm test` 240 ✓ / 1 skip |
 
+### Phase H — 「Agent 模型配置 + INVOX_MODEL_PRO/LITE」（已完成，2026-06-05 17:35）
+
+> 用户原话："给 agent 增加模型的配置。同时给 invox 定义2个环境变量， MODEL_PRO  MODEL_LITE，意思是当任务需要高度推理规划时使用专业模型，当只负责干活时使用 LITE。agent 的模型配置要么可以配具体的模型 id，要么就是配环境变量。"
+
+| ID | 任务 | 优先级 | 状态 | 验收 |
+|---|---|---|---|---|
+| H1 | `AgentTemplate.model` 字段 + `resolveAgentModel` 纯函数（占位符 `$MODEL_PRO/$MODEL_LITE/$ANY_VAR` 解析）+ 22 单测 | P0 | **✅ Done**（17:20）<br/>`readEnvModelPro/Lite` helper：先 `INVOX_MODEL_PRO/LITE` 标准名，回退 `MODEL_PRO/LITE` 别名；空字符串视为未设；解析失败 warn + 回退，永不抛错 | 51 个 agent-templates 单测 PASS |
+| H2 | CLI 接入：`pickModels()` 把 PRO/LITE 解析后的实际值并入 `availableModels`；help 文档更新 | P0 | **✅ Done**（17:25）<br/>解析失败时静默不并入；解析成功且不重复时 push 到 menu 末尾 | typecheck 绿 |
+| H3 | `agent.ts.applyAgentModel` —— newSession 默认 agent 应用 model；setSessionConfigOption(agent) 切换同步 selectedModel + configValues.model；解析后的 id 不在 `availableModelIds` 里时动态加入 | P0 | **✅ Done**（17:30）<br/>永不抛错（fallback 等于当前时 no-op）；prompt-loop 零改动（继续读 session.selectedModel）；BUILTIN/SEED 默认 model：Worker→`$MODEL_LITE`、Plan/CodeReviewer→`$MODEL_PRO`、Ask 不设 | smoke-agents 扩展 8 步全过 |
+| H4 | smoke-agents 扩展 + README/PROGRESS | P0 | **✅ Done**（17:35）<br/>4 个新断言：默认 Worker→test-lite-model、PRO/LITE 自动入 menu、切 Plan→model 同步切到 test-pro-model、磁盘 selectedModel=test-pro-model | `npm test` 263 ✓ / 1 skip |
+
 ---
 
 ## 3. Doing（当前 Sprint，活动 ≤ 3 项）
@@ -221,4 +232,4 @@ Backlog → 进入 Phase 表 → 挪到 Doing（≤ 3 项）→ commit（带 has
 
 ---
 
-_最后更新：2026-06-05 16:18 ｜ Phase G 落地（自定义 Agent 模板：4 套内置 + `.invox/agents/` 项目级 + 用户级；`Agent` 下拉取代 `System Prompt`；按 agent 过滤工具白名单 + MCP 开关；240 测试全绿）_
+_最后更新：2026-06-05 17:35 ｜ Phase H 落地（Agent 模型配置：`AgentTemplate.model` 支持 `$MODEL_PRO/LITE/任意 ENV` 占位符；新增 `INVOX_MODEL_PRO/LITE` 一等环境变量；BUILTIN：Worker→LITE，Plan/CodeReviewer→PRO；切 agent 自动同步 model 下拉；263 测试全绿）_

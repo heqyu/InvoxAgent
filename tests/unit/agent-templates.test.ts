@@ -23,6 +23,9 @@ import {
   agentAllowsMcp,
   filterToolSpecsByAgent,
   loadAgentTemplates,
+  readEnvModelLite,
+  readEnvModelPro,
+  resolveAgentModel,
   type AgentTemplate,
 } from "../../src/agent/templates.js";
 
@@ -124,11 +127,48 @@ describe("loadAgentTemplates", () => {
       writeAgent(env.home, "Plan", {
         name: "我的 Plan 不要被覆盖",
         prompt: "user custom plan",
+        model: "my-custom-model", // 含 model 字段 → 视作"已升级"，跳过
       });
       const r = loadAgentTemplates(env.cwd);
       const plan = r.find((a) => a.id === "Plan");
       expect(plan?.name).toBe("我的 Plan 不要被覆盖");
       expect(plan?.prompt).toBe("user custom plan");
+      expect(plan?.model).toBe("my-custom-model");
+    });
+
+    it("旧版 Plan.json（缺 model 字段）会被自动升级补 model=$MODEL_PRO", () => {
+      // 模拟 Phase G 时部署的旧 seed：没有 model 字段
+      writeAgent(env.home, "Plan", {
+        name: "Plan",
+        prompt: "old plan prompt without model",
+        tools: ["Read", "Glob"],
+      });
+      const r = loadAgentTemplates(env.cwd);
+      const plan = r.find((a) => a.id === "Plan");
+      // 升级后用 DEFAULT_USER_AGENTS 的版本（含 model）
+      expect(plan?.model).toBe("$MODEL_PRO");
+    });
+
+    it("Ask 旧文件（缺 model）不被升级 —— DEFAULT 中 Ask 本来就没 model", () => {
+      writeAgent(env.home, "Ask", {
+        name: "我的 Ask",
+        prompt: "user custom ask",
+      });
+      const r = loadAgentTemplates(env.cwd);
+      const ask = r.find((a) => a.id === "Ask");
+      // 用户自定义保留（DEFAULT.Ask 没 model 字段，所以不触发升级）
+      expect(ask?.name).toBe("我的 Ask");
+      expect(ask?.prompt).toBe("user custom ask");
+    });
+
+    it("损坏的 JSON 文件会被修复覆盖", () => {
+      const dir = join(env.home, ".invox", "agents");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "Plan.json"), "{not-json:::", "utf8");
+      const r = loadAgentTemplates(env.cwd);
+      const plan = r.find((a) => a.id === "Plan");
+      // 修复后是 DEFAULT 版本
+      expect(plan?.model).toBe("$MODEL_PRO");
     });
   });
 
@@ -339,5 +379,163 @@ describe("agentAllowsMcp", () => {
   it("agent.mcp = false → false", () => {
     const a: AgentTemplate = { id: "x", name: "x", prompt: "p", mcp: false };
     expect(agentAllowsMcp(a)).toBe(false);
+  });
+});
+
+describe("resolveAgentModel", () => {
+  const fb = "fallback-model";
+
+  it("undefined → fallback", () => {
+    expect(resolveAgentModel(undefined, fb, {})).toBe(fb);
+  });
+
+  it("空字符串 → fallback", () => {
+    expect(resolveAgentModel("", fb, {})).toBe(fb);
+  });
+
+  it("具体 id（不以 $ 开头）→ 原样返回", () => {
+    expect(resolveAgentModel("gpt-4o", fb, {})).toBe("gpt-4o");
+    expect(resolveAgentModel("qwen3-coder-30b", fb, {})).toBe(
+      "qwen3-coder-30b",
+    );
+  });
+
+  it("$MODEL_PRO 优先 INVOX_MODEL_PRO", () => {
+    expect(
+      resolveAgentModel("$MODEL_PRO", fb, {
+        INVOX_MODEL_PRO: "claude-3-opus",
+        MODEL_PRO: "should-be-ignored",
+      }),
+    ).toBe("claude-3-opus");
+  });
+
+  it("$MODEL_PRO 回退 MODEL_PRO（无前缀别名）", () => {
+    expect(
+      resolveAgentModel("$MODEL_PRO", fb, { MODEL_PRO: "claude-3-opus" }),
+    ).toBe("claude-3-opus");
+  });
+
+  it("$MODEL_PRO 两个 env 都未设 → fallback", () => {
+    expect(resolveAgentModel("$MODEL_PRO", fb, {})).toBe(fb);
+  });
+
+  it("$MODEL_LITE 优先 INVOX_MODEL_LITE", () => {
+    expect(
+      resolveAgentModel("$MODEL_LITE", fb, {
+        INVOX_MODEL_LITE: "gpt-4o-mini",
+        MODEL_LITE: "ignored",
+      }),
+    ).toBe("gpt-4o-mini");
+  });
+
+  it("$MODEL_LITE 回退 MODEL_LITE", () => {
+    expect(
+      resolveAgentModel("$MODEL_LITE", fb, { MODEL_LITE: "haiku" }),
+    ).toBe("haiku");
+  });
+
+  it("$MODEL_LITE 都未设 → fallback", () => {
+    expect(resolveAgentModel("$MODEL_LITE", fb, {})).toBe(fb);
+  });
+
+  it("$ANY_VAR 通用 env 引用", () => {
+    expect(
+      resolveAgentModel("$MY_CUSTOM_MODEL", fb, {
+        MY_CUSTOM_MODEL: "deepseek-r1",
+      }),
+    ).toBe("deepseek-r1");
+  });
+
+  it("$ANY_VAR 未设 → fallback", () => {
+    expect(resolveAgentModel("$NONEXISTENT", fb, {})).toBe(fb);
+  });
+
+  it("$MODEL_PRO 不会因为 INVOX_MODEL_PRO 是空字符串就接受", () => {
+    // 空字符串视为未设，回退到 MODEL_PRO 别名再回退到 fallback
+    expect(
+      resolveAgentModel("$MODEL_PRO", fb, {
+        INVOX_MODEL_PRO: "",
+        MODEL_PRO: "alias-value",
+      }),
+    ).toBe("alias-value");
+  });
+});
+
+describe("readEnvModelPro / readEnvModelLite", () => {
+  it("两个 env 都没设 → undefined", () => {
+    expect(readEnvModelPro({})).toBeUndefined();
+    expect(readEnvModelLite({})).toBeUndefined();
+  });
+
+  it("INVOX_ 前缀优先于无前缀别名", () => {
+    expect(
+      readEnvModelPro({ INVOX_MODEL_PRO: "primary", MODEL_PRO: "alias" }),
+    ).toBe("primary");
+    expect(
+      readEnvModelLite({ INVOX_MODEL_LITE: "primary", MODEL_LITE: "alias" }),
+    ).toBe("primary");
+  });
+
+  it("仅 alias 时回退使用 alias", () => {
+    expect(readEnvModelPro({ MODEL_PRO: "alias-only" })).toBe("alias-only");
+    expect(readEnvModelLite({ MODEL_LITE: "alias-only" })).toBe("alias-only");
+  });
+
+  it("空字符串视为未设", () => {
+    expect(readEnvModelPro({ INVOX_MODEL_PRO: "" })).toBeUndefined();
+  });
+});
+
+describe("loadAgentTemplates: model 字段", () => {
+  let env: FakeEnv;
+
+  beforeEach(() => {
+    env = makeFakeEnv();
+    fakeHome = env.home;
+  });
+
+  afterEach(() => {
+    env.cleanup();
+  });
+
+  it("解析文件中的 model 字段", () => {
+    writeAgent(env.cwd, "Coder", {
+      prompt: "p",
+      model: "gpt-4o",
+    });
+    const r = loadAgentTemplates(env.cwd);
+    expect(r.find((a) => a.id === "Coder")?.model).toBe("gpt-4o");
+  });
+
+  it("model 字段为空字符串 → 视作未设", () => {
+    writeAgent(env.cwd, "NoModel", {
+      prompt: "p",
+      model: "",
+    });
+    const r = loadAgentTemplates(env.cwd);
+    expect(r.find((a) => a.id === "NoModel")?.model).toBeUndefined();
+  });
+
+  it("内置 Worker 默认带 model=$MODEL_LITE", () => {
+    const worker = BUILTIN_AGENTS.find((a) => a.id === "Worker");
+    expect(worker?.model).toBe("$MODEL_LITE");
+  });
+
+  it("seed 出的 Plan 默认带 model=$MODEL_PRO", () => {
+    const r = loadAgentTemplates(env.cwd);
+    const plan = r.find((a) => a.id === "Plan");
+    expect(plan?.model).toBe("$MODEL_PRO");
+  });
+
+  it("seed 出的 CodeReviewer 默认带 model=$MODEL_PRO", () => {
+    const r = loadAgentTemplates(env.cwd);
+    const reviewer = r.find((a) => a.id === "CodeReviewer");
+    expect(reviewer?.model).toBe("$MODEL_PRO");
+  });
+
+  it("seed 出的 Ask 不设 model（用户决定）", () => {
+    const r = loadAgentTemplates(env.cwd);
+    const ask = r.find((a) => a.id === "Ask");
+    expect(ask?.model).toBeUndefined();
   });
 });

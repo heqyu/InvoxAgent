@@ -18,7 +18,7 @@ import {
   type AgentTemplate,
   type SystemPromptDef,
 } from "./agent/agent.js";
-import { loadAgentTemplates } from "./agent/templates.js";
+import { loadAgentTemplates, readEnvModelLite, readEnvModelPro } from "./agent/templates.js";
 import { EchoProvider } from "./llm/echo.js";
 import { FlakyProvider, type FlakyKind } from "./llm/flaky.js";
 import { BadJsonProvider, MockToolProvider } from "./llm/mock-tools.js";
@@ -111,6 +111,12 @@ ENVIRONMENT:
   INVOX_BASE_URL                  OpenAI-compatible base URL
   INVOX_MODEL                     Default model name passed to provider
   INVOX_MODELS                    Comma-separated selectable models
+  INVOX_MODEL_PRO                 Model id for "$MODEL_PRO" agent placeholder
+                                  (used by Plan / CodeReviewer by default)
+                                  alias: MODEL_PRO (without INVOX_ prefix)
+  INVOX_MODEL_LITE                Model id for "$MODEL_LITE" agent placeholder
+                                  (used by Worker by default)
+                                  alias: MODEL_LITE (without INVOX_ prefix)
   INVOX_API_KEY                   Provider API key
   INVOX_PROMPT_TEMPLATES_FILE     Path to JSON file of system-prompt templates
                                   (only used when INVOX_AGENTS=disabled)
@@ -290,6 +296,10 @@ function pickPolicy(): PermissionPolicy {
  * 规则：默认 model **永远**出现在菜单里（不在则被 unshift 到首位）。否则 Zed
  * 用户可能落到一个 currentModelId 不在 availableModels 的会话，UI 下拉框空白。
  *
+ * Phase H：把 INVOX_MODEL_PRO / INVOX_MODEL_LITE 解析后的实际值自动并入
+ * 菜单（如果它们已设置且不重复）。这样 agent.model="$MODEL_PRO" 切换时，
+ * 解析出的 model id 一定能在下拉里找到，不会出现"切了但 UI 不显示"的别扭。
+ *
  * name 字段默认就用 modelId —— OAI 兼容 provider 不会上报友好显示名；
  * 想要更好看的标签可以后续单独加配置。
  */
@@ -301,6 +311,14 @@ function pickModels(): AgentModelConfig {
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
   if (!ids.includes(fallback)) ids.unshift(fallback);
+
+  // INVOX_MODEL_PRO / INVOX_MODEL_LITE：作为 agent.model 占位符引用的目标，
+  // 把它们解析后的实际 id 也并入 menu。
+  const proId = readEnvModelPro();
+  if (proId && !ids.includes(proId)) ids.push(proId);
+  const liteId = readEnvModelLite();
+  if (liteId && !ids.includes(liteId)) ids.push(liteId);
+
   const available: ModelInfo[] = ids.map((id) => ({ modelId: id, name: id }));
   return { available, defaultModelId: fallback };
 }
