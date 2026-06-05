@@ -156,6 +156,9 @@
 | I6 | 包装 conn 全量静默：subagent 内部所有 `sessionUpdate`（tool_call / tool_call_update / agent_message_chunk / usage_update / ...）都不向父 UI 转发；改为按时间序写到 subagent 自己的日志文件。父对话面板上只看到一张 SubAgent 工具卡 | P0 | **✅ Done**（01:30）<br/>非 sessionUpdate 方法（readTextFile / writeTextFile / requestPermission）原样转发 | 单测断言 `notifs.length === 0` |
 | I7 | 独立日志文件：每个 subagent run 写到 `<cwd>/.invox/logs/subagent-<pid8>-<runid8>-<ts>.log`。同步写（openSync/writeSync/closeSync），保证 runSubAgent 返回时文件可见。失败仅 warn，主流程不挂。日志含 start / iter N / done 三段，外加每条 sessionUpdate 摘要 | P0 | **✅ Done**（01:38）<br/>SubAgentRunResult 加 `logPath?` 字段；SubAgent 工具结果带 `[log: <path>]` provenance header | 单测：日志文件存在、含 start/iter/done 段；并发 subagent 各自独立文件 |
 | I8 | 多 subagent 并行：在 prompt-loop.ts 加 `PARALLEL_SAFE_OVERRIDE_TOOL_NAMES = {"SubAgent"}`，让 SubAgent 即便是 execute tier 也可放进同一并行批次。父 prompt-loop 用 Promise.all 等全部完成才进下一轮 | P0 | **✅ Done**（01:30）<br/>每个 subagent 独立 history/toolState/abort/turnUsage，无共享可变状态 | prompt-loop-parallel.test：[SubAgent×2, Read] 并行 / Edit 屏障 / [SubAgent] 并行 |
+| I9 | 实时进度回流：`SubAgentRunRequest` 加 `parentToolCallId`；runner 内 `makeProgressEmitter` 用未经 wrap 的原 conn 发 `tool_call_update` 更新父 SubAgent 工具卡 content；wrappedConn 拦到 inner `tool_call` 时旁路给 emitter；末态 `acpContent` 把 progressLines（"▸ Glob ..." / "▸ Read ..." 等）作为审计轨迹拼到工具卡内（`resultText` 不含，避免污染父 LLM context） | P0 | **✅ Done**（01:52）<br/>UI 卡片首行始终是 `Log: <path>`，让用户能直接从卡片看到独立日志位置（解决"日志文件放哪里"的发现性问题）；progressLines 出现在 `SubAgentRunResult` 与最终 acpContent，但**不**进 resultText | sub-agent-runner.test：进度 lines 含 "Log:" + "▸ subagent started" + "▸ Read"；不传 parentToolCallId 时保持纯静默 |
+
+
 
 
 

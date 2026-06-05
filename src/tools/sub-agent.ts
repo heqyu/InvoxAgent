@@ -95,10 +95,15 @@ async function execute(
   }
 
   // 实际跑 subagent —— runner 内部捕获所有异常，永不抛错
+  // 把父 toolCallId 透传给 runner，让它在跑过程中向父工具卡的 content 实时
+  // 追加进度行（"▸ Glob **/*.ts" / "▸ Read package.json" 之类），用户在父
+  // UI 上能看到正在执行的内部工具，subagent 跑完后由父 prompt-loop 的末态
+  // tool_call_update 一并覆盖为 final acpContent
   const runResult = await ctx.subAgentRunner(
     {
       subagentType,
       prompt,
+      parentToolCallId: ctx.toolCallId,
       ...(description ? { description } : {}),
       ...(modelOverride ? { modelOverride } : {}),
     },
@@ -120,10 +125,13 @@ async function execute(
     );
   }
 
-  // 成功：拼装带 provenance header 的最终文本
+  // 成功：拼装两份文本：
   //
-  // header 含日志路径 —— 父 LLM 可以引用给用户，方便事后查 subagent 内部
-  // 跑了哪些工具（UI 上已折叠，日志里仍可读）
+  //   - resultText（喂给父 LLM 的工具结果）：紧凑 header + finalText。**不含**
+  //     进度行 —— 否则 audit 列表会污染父 LLM 的 context，且每条进度都用
+  //     token，浪费成本。
+  //   - acpContent（UI 渲染的工具卡内容）：进度审计轨迹（▸ ...）+ 分隔线 +
+  //     finalText。让用户在末态卡里仍能复盘 subagent 跑了哪些工具，无需翻日志
   const headerLines: string[] = [
     `[subagent: ${subagentType}] (${runResult.iterations} iter, ${runResult.stopReason})`,
   ];
@@ -135,11 +143,18 @@ async function execute(
     runResult.finalText.trim() || "(subagent produced no final message)";
   const resultText = `${header}\n\n${body}`;
 
+  // UI 文本：审计轨迹 + finalText
+  const progressLines = runResult.progressLines ?? [];
+  const uiSections: string[] = [header];
+  if (progressLines.length > 0) {
+    uiSections.push(progressLines.join("\n"));
+  }
+  uiSections.push(body);
+  const uiText = uiSections.join("\n\n");
+
   return {
     resultText,
-    acpContent: [
-      { type: "content", content: { type: "text", text: resultText } },
-    ],
+    acpContent: [{ type: "content", content: { type: "text", text: uiText } }],
     kind: "execute",
     title: `${titleBase} (${subagentType})`,
     ok: true,

@@ -45,6 +45,13 @@ export interface SubAgentRunRequest {
   description?: string;
   /** 显式 model id 覆盖；优先级高于 agent.model。 */
   modelOverride?: string;
+  /**
+   * 父 tool_call 的 id —— 用来在 subagent 跑过程中向"父 SubAgent 工具卡"
+   * 反馈实时进度（每发起一个内部工具调用就在卡片内追加一行）。
+   * SubAgent 工具从 ToolExecContext.toolCallId 拿到后透传过来。
+   * 缺省时 runner 不发进度更新（subagent 卡保持 in_progress 等末态覆盖）。
+   */
+  parentToolCallId?: string;
 }
 
 export interface SubAgentRunResult {
@@ -63,6 +70,13 @@ export interface SubAgentRunResult {
    * 这个文件，方便事后查"subagent 到底跑了什么"。日志写入失败时为空。
    */
   logPath?: string;
+  /**
+   * 进度轨迹：subagent 跑过程中累计的可读"操作清单"（每条形如
+   * `▸ Glob **\/*.ts` —— 一行一个内部工具调用）。SubAgent 工具用它在最终
+   * acpContent 里渲染审计轨迹，这样末态卡片不光显示 finalText，也能复盘
+   * "subagent 跑了哪些工具"。缺省值（runner 没生成进度时）为空数组。
+   */
+  progressLines?: string[];
   /** ok=false 时给出的人类可读原因。 */
   error?: string;
 }

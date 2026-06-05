@@ -495,6 +495,117 @@ describe("runSubAgent", () => {
       cleanup();
     }
   });
+
+  it("传入 parentToolCallId 时，inner tool_call 触发父工具卡的 tool_call_update（实时进度）", async () => {
+    // 模拟 LLM 第一轮发出一个内部 tool_call（Read），第二轮直接回答收尾。
+    // 期望：runner 通过父 conn 发出至少 2 帧 tool_call_update（"started" 帧 +
+    // "▸ Read xxx" 帧），且这些 update 的 toolCallId === parentToolCallId。
+    const { cwd, cleanup } = makeTmpCwd();
+    try {
+      const parent = makeParent(cwd);
+      const { conn, notifs } = makeRecordingConn();
+
+      // 给 subagent 开一个 Read 工具的白名单 —— 让 prompt-loop 能真的执行
+      // 这个 inner tool_call 并 emit `tool_call` 通知（tool 执行也读文件，
+      // 我们在 cwd 下放一个文件让 Read 成功）
+      const { writeFileSync } = await import("node:fs");
+      writeFileSync(join(cwd, "hello.txt"), "hi", "utf8");
+
+      const tplWithRead: AgentTemplate = {
+        id: "ReaderAgent",
+        name: "ReaderAgent",
+        prompt: "you can read files",
+        tools: ["Read"],
+        mcp: false,
+      };
+
+      // Round 1：发起 Read tool_call；Round 2：finish=stop（结束）
+      const provider = new ScriptedProvider([
+        [
+          {
+            kind: "tool_call",
+            call: {
+              id: "inner-call-1",
+              name: "Read",
+              arguments: JSON.stringify({ path: join(cwd, "hello.txt") }),
+            },
+          },
+          { kind: "finish", reason: "tool_calls" },
+        ],
+        [
+          { kind: "text", text: "done reading" },
+          { kind: "finish", reason: "stop" },
+        ],
+      ]);
+
+      const registry = new Map([["ReaderAgent", tplWithRead]]);
+      const deps = makeDeps(conn, provider, registry);
+
+      const r = await runSubAgent(
+        { parentDeps: deps, parent },
+        {
+          subagentType: "ReaderAgent",
+          prompt: "read the file",
+          parentToolCallId: "parent-tc-42",
+        },
+        new AbortController().signal,
+      );
+
+      expect(r.ok).toBe(true);
+
+      // 父 conn 收到的所有 update 应 *只* 是 tool_call_update（subagent
+      // 内部的 tool_call 等被 wrappedConn 静默；只有 progress emitter 会
+      // 发 tool_call_update 到父 conn）
+      const seen = notifs.map((n) => ({
+        kind: n.update.sessionUpdate,
+        toolCallId: (n.update as { toolCallId?: string }).toolCallId,
+      }));
+      const progressNotifs = seen.filter(
+        (e) =>
+          e.kind === "tool_call_update" && e.toolCallId === "parent-tc-42",
+      );
+      // 至少 2 帧：startup 帧（"subagent started"）+ Read 帧
+      expect(progressNotifs.length).toBeGreaterThanOrEqual(2);
+
+      // 不应有任何 sessionUpdate 用别的 toolCallId（即没漏出 inner 子卡）
+      const otherToolCallIds = seen.filter(
+        (e) =>
+          e.toolCallId !== undefined && e.toolCallId !== "parent-tc-42",
+      );
+      expect(otherToolCallIds).toHaveLength(0);
+
+      // 进度 lines 应包含 Log 行 + started + Read 行
+      expect(r.progressLines).toBeDefined();
+      const lines = r.progressLines!;
+      expect(lines[0]).toMatch(/^Log: /);
+      expect(lines.some((l) => l === "▸ subagent started")).toBe(true);
+      expect(lines.some((l) => l.startsWith("▸ Read"))).toBe(true);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("不传 parentToolCallId 时，runner 不发任何 tool_call_update（保持纯静默）", async () => {
+    const { cwd, cleanup } = makeTmpCwd();
+    try {
+      const parent = makeParent(cwd);
+      const { conn, notifs } = makeRecordingConn();
+      const provider = new ScriptedProvider([textRound("hi")]);
+      const registry = new Map([["Worker", WORKER_TPL]]);
+      const deps = makeDeps(conn, provider, registry);
+
+      const r = await runSubAgent(
+        { parentDeps: deps, parent },
+        { subagentType: "Worker", prompt: "x" },
+        new AbortController().signal,
+      );
+      expect(r.ok).toBe(true);
+      expect(r.progressLines).toBeUndefined();
+      expect(notifs).toHaveLength(0);
+    } finally {
+      cleanup();
+    }
+  });
 });
 
 describe("SubAgent 工具暴露", () => {

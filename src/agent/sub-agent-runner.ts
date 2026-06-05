@@ -68,6 +68,11 @@ export interface SubAgentRunOptions {
   prompt: string;
   description?: string;
   modelOverride?: string;
+  /**
+   * 父 SubAgent tool_call 的 id —— 用来在跑的过程中向"父工具卡"实时追加进度行。
+   * 由 SubAgent 工具从 ToolExecContext.toolCallId 透传。缺省时 runner 不发进度更新。
+   */
+  parentToolCallId?: string;
 }
 
 export interface SubAgentRunResult {
@@ -77,6 +82,8 @@ export interface SubAgentRunResult {
   iterations: number;
   /** 本次运行的独立日志文件绝对路径；写入失败时为 undefined。 */
   logPath?: string;
+  /** 进度轨迹累计行（runner 已发完最后一帧；调用方可作为 audit trail 渲染）。 */
+  progressLines?: string[];
   error?: string;
 }
 
@@ -190,6 +197,79 @@ function ts(): string {
   return new Date().toISOString();
 }
 
+// ── 进度回流（实时更新父 SubAgent 工具卡的 content）────────────────────
+
+/**
+ * subagent 跑过程中"父工具卡"的实时进度回流。
+ *
+ * 工作机制：
+ *   - 每当 wrapped conn 拦截到一条 inner `tool_call` 通知，就抽出 title 字段
+ *     追加一行 `▸ <Title>` 到内部 lines 列表
+ *   - 每次追加都立刻通过**未经 wrap 的原 conn** 发一条 `tool_call_update`，
+ *     toolCallId = 父 SubAgent tool_call 的 id；只更新 `content` 字段，不动
+ *     `status`/`title`/`kind`（让 ACP 客户端做 partial merge），父卡保持
+ *     in_progress 状态，直到父 prompt-loop 在 subagent 收尾后发末态 update
+ *   - lines[0] 永远是 `Log: <path>` —— 用户能从 UI 卡片直接看到独立日志位置
+ *
+ * 节流：暂不做。tool_call 是稀疏事件（每秒至多几个），1:1 emit 可接受；
+ * 真有抖动再加 200ms debounce。
+ *
+ * 失败容错：sessionUpdate 抛错全吞掉 —— 进度回流是 nice-to-have，挂掉也不能
+ * 让 subagent 主流程跟着挂。
+ */
+interface ProgressEmitter {
+  recordInnerToolCall(title: string): void;
+  /** 把 final 的 progressLines（含 Log 行 + 所有 ▸ 行）暴露给 caller。 */
+  lines(): readonly string[];
+}
+
+function makeProgressEmitter(
+  conn: AgentSideConnection,
+  sessionId: string,
+  parentToolCallId: string,
+  logPath: string | undefined,
+): ProgressEmitter {
+  const lines: string[] = [];
+  if (logPath) lines.push(`Log: ${logPath}`);
+  lines.push("▸ subagent started");
+
+  // 起手立刻发一帧，让用户立即看到日志路径 + "started" 行
+  void emit();
+
+  function renderText(): string {
+    return lines.join("\n");
+  }
+
+  async function emit(): Promise<void> {
+    try {
+      await conn.sessionUpdate({
+        sessionId,
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: parentToolCallId,
+          status: "in_progress",
+          content: [
+            {
+              type: "content",
+              content: { type: "text", text: renderText() },
+            },
+          ],
+        },
+      });
+    } catch {
+      // 进度回流失败吞掉 —— 主流程不挂
+    }
+  }
+
+  return {
+    recordInnerToolCall: (title: string) => {
+      lines.push(`▸ ${title}`);
+      void emit();
+    },
+    lines: () => lines.slice(),
+  };
+}
+
 // ── 主入口 ────────────────────────────────────────────────────────────
 
 /**
@@ -289,7 +369,20 @@ export async function runSubAgent(
   };
 
   // 5. 派生 sub IterationDeps：覆盖 conn / activeAgent / inSubAgent
-  const wrappedConn = wrapConnForSubAgent(parentDeps.conn, logFile);
+  //
+  // 进度回流：当父 SubAgent 工具有 toolCallId 时，构造 progress emitter，把
+  // 「subagent 内部每发起一个 inner tool_call」实时回流到父工具卡的 content
+  // —— 用未经 wrap 的原 conn（parentDeps.conn）发，避免被 wrappedConn 静默掉。
+  const progress: ProgressEmitter | undefined = opts.parentToolCallId
+    ? makeProgressEmitter(
+        parentDeps.conn,
+        parent.id,
+        opts.parentToolCallId,
+        logFile.path || undefined,
+      )
+    : undefined;
+
+  const wrappedConn = wrapConnForSubAgent(parentDeps.conn, logFile, progress);
   const subDeps: IterationDeps = {
     ...parentDeps,
     conn: wrappedConn,
@@ -375,6 +468,7 @@ export async function runSubAgent(
     stopReason,
     iterations,
     ...(logFile.path ? { logPath: logFile.path } : {}),
+    ...(progress ? { progressLines: [...progress.lines()] } : {}),
     ...(runError ? { error: runError } : {}),
   };
 }
@@ -470,6 +564,9 @@ function summarizeNotif(n: SessionNotification): string {
  *     subagent 自己的日志文件。这样父对话面板上只看到一张"SubAgent"工具卡，
  *     子工具卡（Read/Glob/Edit/...）/ subagent 的对话流 / usage 全部"折叠"
  *     在卡内（视觉上 = 隐藏；实际 = 写到日志）
+ *   - 但当 progress emitter 注入时，inner `tool_call` 通知会被旁路到 emitter，
+ *     由它通过未经 wrap 的原 conn 发 `tool_call_update` 更新父 SubAgent 卡的
+ *     content，让用户看到实时进度行
  *   - 非 sessionUpdate 方法（readTextFile / writeTextFile / requestPermission
  *     / sessionUpdateExt 等）原样转发到原 conn，bind 到 target 上避免 this 丢失
  *     —— 这些是工具执行所必需的协议入口，不能静默
@@ -480,6 +577,7 @@ function summarizeNotif(n: SessionNotification): string {
 function wrapConnForSubAgent(
   conn: AgentSideConnection,
   logFile: SubAgentLogFile,
+  progress: ProgressEmitter | undefined,
 ): AgentSideConnection {
   return new Proxy(conn, {
     get(target, prop, _receiver) {
@@ -488,6 +586,19 @@ function wrapConnForSubAgent(
           // 全量静默：不向父 UI 发任何 session/update。改为镜像到 subagent
           // 自己的日志文件。
           logFile.write(`${ts()}   ${summarizeNotif(notif)}`);
+          // 进度旁路：inner `tool_call` 起始事件向 emitter 报告，由它
+          // 用未经 wrap 的 conn 更新父工具卡 content（实时进度行）
+          if (progress) {
+            const u = notif.update as { sessionUpdate: string } & Record<
+              string,
+              unknown
+            >;
+            if (u.sessionUpdate === "tool_call") {
+              const title =
+                typeof u["title"] === "string" ? u["title"] : "(no title)";
+              progress.recordInnerToolCall(title);
+            }
+          }
           return;
         };
       }
