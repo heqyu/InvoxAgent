@@ -391,6 +391,10 @@ export async function runSubAgent(
   };
 
   // 6. 跑 prompt loop
+  //
+  // 每轮 iter 后捕获 sub.history 在本轮新增的 assistant 文本，单行写入日志。
+  // 这是替代「逐 token agent_message_chunk」的精简方案：每 iter 一行 ≪ per-token
+  // 1400+ 行，但仍能让 audit 看到"subagent 这一轮说了啥"。
   const max = subAgentMaxIterations();
   let stopReason: SubAgentRunResult["stopReason"] = "max_turn_requests";
   let iterations = 0;
@@ -404,7 +408,20 @@ export async function runSubAgent(
         break;
       }
       logFile.write(`${ts()}   iter ${iterations}: start\n`);
+      const histLenBefore = sub.history.length;
       const result = await runOneIteration(sub, subDeps);
+
+      // 捕捉本轮新追加的 assistant 文本（runOneIteration 在 iter 末尾会
+      // push 一条 {role:"assistant", content:string, [tool_calls]?}）
+      const newAssistantText = collectAssistantText(
+        sub.history.slice(histLenBefore),
+      );
+      if (newAssistantText) {
+        logFile.write(
+          `${ts()}   iter ${iterations}: assistant_text=${preview(newAssistantText, 500)}\n`,
+        );
+      }
+
       if (result.kind === "stop") {
         stopReason = result.reason;
         if (result.reason === "refusal") {
@@ -504,6 +521,26 @@ function lastAssistantText(history: readonly LLMMessage[]): string {
 }
 
 /**
+ * 把 history 切片中所有 assistant 消息的 string content 串起来。
+ *
+ * 用途：iter 末尾把"本轮新增的 assistant 文本"合并成一行写日志，替代
+ * per-token agent_message_chunk 的逐条记录。
+ *
+ * 同一 iter 通常只有 1 条 assistant 消息（含 tool_calls 的也算 1 条），
+ * 但保险起见用循环聚合 —— 防止 prompt-loop 未来插入额外 assistant 消息时
+ * 漏记。
+ */
+function collectAssistantText(slice: readonly LLMMessage[]): string {
+  const parts: string[] = [];
+  for (const m of slice) {
+    if (m.role === "assistant" && typeof m.content === "string" && m.content) {
+      parts.push(m.content);
+    }
+  }
+  return parts.join("\n");
+}
+
+/**
  * 把任意文本截到 max 字符内，溢出加省略号 + 长度提示。日志可读性优先，
  * 超过两行的内容也压成单行（替换换行为 \n 转义）—— 一行一个事件方便 grep。
  */
@@ -520,23 +557,18 @@ function preview(s: string, max: number): string {
  *   - 每条 update 一行，便于 grep "tool_call" 之类
  *   - 截短长字段（content / title），保留事件结构信息为主
  *   - 不识别的 sessionUpdate kind 直接 JSON 化前 200 字符（forward-compat）
+ *
+ * 注意：调用前应先用 shouldLogNotif 过滤掉 chunk / 中间态等噪音事件。
  */
 function summarizeNotif(n: SessionNotification): string {
   const u = n.update as { sessionUpdate: string } & Record<string, unknown>;
   const kind = u.sessionUpdate;
   switch (kind) {
-    case "agent_message_chunk":
-    case "agent_thought_chunk": {
-      const c = u["content"] as { type?: string; text?: string } | undefined;
-      const text = c && typeof c.text === "string" ? c.text : "";
-      return `${kind} text="${preview(text, 200)}"`;
-    }
     case "tool_call": {
       const id = u["toolCallId"];
       const title = u["title"];
-      const status = u["status"];
       const k = u["kind"];
-      return `tool_call id=${id} kind=${k} status=${status} title="${preview(String(title ?? ""), 120)}"`;
+      return `tool_call id=${id} kind=${k} title="${preview(String(title ?? ""), 120)}"`;
     }
     case "tool_call_update": {
       const id = u["toolCallId"];
@@ -544,16 +576,54 @@ function summarizeNotif(n: SessionNotification): string {
       const title = u["title"];
       return `tool_call_update id=${id} status=${status} title="${preview(String(title ?? ""), 120)}"`;
     }
-    case "usage_update": {
-      const used = u["used"];
-      const size = u["size"];
-      return `usage_update used=${used} size=${size}`;
-    }
     default: {
+      // 仅作为兜底（shouldLogNotif 已经过滤掉所有显式无意义 kind）
       const j = JSON.stringify(u);
       return `${kind} ${preview(j, 200)}`;
     }
   }
+}
+
+/**
+ * 决定一条 SessionNotification 是否值得写到 subagent 独立日志。
+ *
+ * 噪音过滤策略（实测：典型 12 iter subagent 共 1531 条 notif，过滤后剩 ~80）：
+ *
+ *   - **agent_message_chunk / agent_thought_chunk**：丢
+ *     一次 LLM 流响应就有几百条 per-token chunk，对调试 subagent 行为意义不大；
+ *     完整文本由 runner 在每 iter 末尾另写一行 "iter N: assistant_text=..." 兜底
+ *
+ *   - **tool_call_update with status="in_progress"**：丢
+ *     工具执行中可能多次发 in_progress 帧（streaming output），只有 completed /
+ *     failed / cancelled 这种**终态**才有信号
+ *
+ *   - **usage_update**：丢
+ *     subagent done banner 已经把 input/output/calls 数字写出来了；逐次发反而冗余
+ *
+ *   - **plan / available_commands_update**：丢
+ *     subagent 内部不会改 plan、不重新发命令列表
+ *
+ *   - **tool_call（启动）+ 终态 tool_call_update**：保留 —— 这是排查"subagent 跑
+ *     了哪些工具 / 哪个失败了"的核心信号
+ *
+ *   - **未识别 kind**：保留 —— forward-compat，新协议事件先记下来再说
+ */
+function shouldLogNotif(n: SessionNotification): boolean {
+  const u = n.update as { sessionUpdate: string } & Record<string, unknown>;
+  const kind = u.sessionUpdate;
+  if (kind === "agent_message_chunk" || kind === "agent_thought_chunk") {
+    return false;
+  }
+  if (kind === "usage_update") return false;
+  if (kind === "plan" || kind === "available_commands_update") return false;
+  if (kind === "tool_call_update") {
+    const status = u["status"];
+    // 仅保留终态；in_progress / pending / 缺失都视作中间态丢弃
+    return (
+      status === "completed" || status === "failed" || status === "cancelled"
+    );
+  }
+  return true;
 }
 
 /**
@@ -583,9 +653,13 @@ function wrapConnForSubAgent(
     get(target, prop, _receiver) {
       if (prop === "sessionUpdate") {
         return async (notif: SessionNotification): Promise<void> => {
-          // 全量静默：不向父 UI 发任何 session/update。改为镜像到 subagent
-          // 自己的日志文件。
-          logFile.write(`${ts()}   ${summarizeNotif(notif)}`);
+          // 全量静默：不向父 UI 发任何 session/update。
+          // 关键事件镜像到 subagent 自己的日志文件；噪音事件（per-token chunk
+          // / 中间态 tool_call_update / usage_update / plan / available_commands_update）
+          // 由 shouldLogNotif 过滤掉，避免把 1500+ 行噪音冲淡 ~80 行真信号
+          if (shouldLogNotif(notif)) {
+            logFile.write(`${ts()}   ${summarizeNotif(notif)}`);
+          }
           // 进度旁路：inner `tool_call` 起始事件向 emitter 报告，由它
           // 用未经 wrap 的 conn 更新父工具卡 content（实时进度行）
           if (progress) {

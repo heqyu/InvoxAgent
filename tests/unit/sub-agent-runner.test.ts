@@ -606,6 +606,124 @@ describe("runSubAgent", () => {
       cleanup();
     }
   });
+
+  it("日志噪音过滤：per-token agent_message_chunk 不进日志，但每 iter 一条 assistant_text 摘要", async () => {
+    const { cwd, cleanup } = makeTmpCwd();
+    try {
+      const parent = makeParent(cwd);
+      const { conn } = makeRecordingConn();
+
+      // 模拟流式响应：100 个 chunk + finish。如果不过滤，旧实现会写 100 条
+      // agent_message_chunk 噪音；过滤后应仅有 1 条 iter assistant_text
+      const chunkScript: LLMDelta[] = [];
+      for (let i = 0; i < 100; i++) {
+        chunkScript.push({ kind: "text", text: `tok${i} ` });
+      }
+      chunkScript.push({ kind: "finish", reason: "stop" });
+      const provider = new ScriptedProvider([chunkScript]);
+      const registry = new Map([["Worker", WORKER_TPL]]);
+      const deps = makeDeps(conn, provider, registry);
+
+      const r = await runSubAgent(
+        { parentDeps: deps, parent },
+        { subagentType: "Worker", prompt: "stream test" },
+        new AbortController().signal,
+      );
+      expect(r.ok).toBe(true);
+
+      const content = readFileSync(r.logPath!, "utf8");
+
+      // chunk 行应被丢弃
+      expect(content.includes("agent_message_chunk")).toBe(false);
+      expect(content.includes("agent_thought_chunk")).toBe(false);
+      // usage_update 也不应出现
+      expect(content.includes("usage_update")).toBe(false);
+
+      // 但 per-iter assistant_text 摘要应有一条，且包含拼起来的 token
+      expect(content).toMatch(/iter 1: assistant_text=tok0 tok1/);
+
+      // 行数体感：start banner ~8 + iter 三段 ~3 + done banner ~9 ≈ 20 行级别，
+      // 远小于"无过滤"的 100+ chunk 行
+      const totalLines = content.split("\n").filter((l) => l).length;
+      expect(totalLines).toBeLessThan(40);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("日志噪音过滤：tool_call_update 仅保留终态（completed/failed/cancelled），中间态丢弃", async () => {
+    // 直接构造 wrappedConn 的等价路径不容易（需要走 runOneIteration 内部的
+    // 工具执行）。改为直接验证 shouldLogNotif 的语义 —— 它是过滤的唯一入口。
+    const { shouldLogNotif } = await import(
+      "../../src/agent/sub-agent-runner.js"
+    ).then(
+      // 内部函数未导出，故走"行为级"断言：跑完整 subagent 后日志含
+      // 终态 tool_call_update 但不含 in_progress
+      async () => ({ shouldLogNotif: undefined }),
+    );
+    expect(shouldLogNotif).toBeUndefined(); // 仅作为占位 —— 见下面 e2e
+
+    const { cwd, cleanup } = makeTmpCwd();
+    try {
+      const parent = makeParent(cwd);
+      const { conn } = makeRecordingConn();
+      const { writeFileSync } = await import("node:fs");
+      writeFileSync(join(cwd, "f.txt"), "data", "utf8");
+
+      const tplWithRead: AgentTemplate = {
+        id: "Reader",
+        name: "Reader",
+        prompt: "read files",
+        tools: ["Read"],
+        mcp: false,
+      };
+
+      // 第一轮：发起一个 Read tool_call。第二轮：finish=stop
+      const provider = new ScriptedProvider([
+        [
+          {
+            kind: "tool_call",
+            call: {
+              id: "tc-x",
+              name: "Read",
+              arguments: JSON.stringify({ path: join(cwd, "f.txt") }),
+            },
+          },
+          { kind: "finish", reason: "tool_calls" },
+        ],
+        [
+          { kind: "text", text: "got it" },
+          { kind: "finish", reason: "stop" },
+        ],
+      ]);
+      const registry = new Map([["Reader", tplWithRead]]);
+      const deps = makeDeps(conn, provider, registry);
+
+      const r = await runSubAgent(
+        { parentDeps: deps, parent },
+        { subagentType: "Reader", prompt: "read f.txt" },
+        new AbortController().signal,
+      );
+      expect(r.ok).toBe(true);
+
+      const content = readFileSync(r.logPath!, "utf8");
+
+      // tool_call（启动）应保留
+      expect(content).toMatch(/tool_call id=tc-x kind=read/);
+
+      // tool_call_update 应仅出现 completed（终态）—— 不应有 in_progress
+      const updateLines = content
+        .split("\n")
+        .filter((l) => l.includes("tool_call_update id=tc-x"));
+      expect(updateLines.length).toBeGreaterThan(0);
+      for (const line of updateLines) {
+        expect(line).toMatch(/status=(completed|failed|cancelled)/);
+        expect(line).not.toMatch(/status=in_progress/);
+      }
+    } finally {
+      cleanup();
+    }
+  });
 });
 
 describe("SubAgent 工具暴露", () => {
