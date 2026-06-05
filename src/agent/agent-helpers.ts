@@ -12,14 +12,17 @@ let _agentVersion: string | undefined;
  * 读取 invox 自身 package.json 的 version 字段（用于 hook context、
  * MCP client identity 等诊断字段）。失败永远返回 "unknown"，不抛错。
  *
- * 已知缺陷：路径解析在 dev/dist 两种模式下都指不到真实文件，函数实际
- * 一直返回 "unknown"。当前调用点只把它作为诊断字段，影响可忽略，
- * 留作 backlog 待修。
+ * 路径上溯两级：
+ *   dev:  <root>/src/agent/agent-helpers.ts → __dirname=<root>/src/agent/ → ../../
+ *   dist: <root>/dist/agent/agent-helpers.js → __dirname=<root>/dist/agent/ → ../../
+ * 两边都命中 <root>/package.json。
+ *
+ * （旧实现只跳一级到 src/ 或 dist/，永远 ENOENT；K12 修复见 PROGRESS.md）
  */
 export function agentVersion(): string {
   if (!_agentVersion) {
     try {
-      const p = join(__dirname, "..", "package.json");
+      const p = join(__dirname, "..", "..", "package.json");
       _agentVersion = (
         JSON.parse(readFileSync(p, "utf8")) as { version: string }
       ).version;

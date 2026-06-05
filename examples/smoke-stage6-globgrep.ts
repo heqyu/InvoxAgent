@@ -41,13 +41,13 @@ async function main(): Promise<void> {
     state: { readPaths: new Set(), cache: new FileCache() },
   };
 
-  // ── 1. glob '**/*.ts' returns 3 ts files (excludes node_modules).
+  // ── 1. Glob '**/*.ts' returns 3 ts files (excludes node_modules).
   let r = await executeTool(
-    "glob",
+    "Glob",
     JSON.stringify({ pattern: "**/*.ts", description: "find ts" }),
     ctx,
   );
-  assert(r.ok, `1. glob should succeed`);
+  assert(r.ok, `1. Glob should succeed`);
   // Body lines = absolute paths. Distinguish from header lines like
   // "Pattern: **/*.ts" by requiring a Windows drive letter or POSIX root.
   const lines1 = r.resultText
@@ -63,13 +63,13 @@ async function main(): Promise<void> {
   );
   console.error("[stage6gg] ✓ glob returns 3 ts files, ignores node_modules");
 
-  // ── 2. glob with explicit path narrows the search.
+  // ── 2. Glob with explicit path narrows the search.
   r = await executeTool(
-    "glob",
+    "Glob",
     JSON.stringify({ pattern: "**/*.ts", path: "tests", description: "find tests" }),
     ctx,
   );
-  assert(r.ok, `2. scoped glob should succeed`);
+  assert(r.ok, `2. scoped Glob should succeed`);
   const lines2 = r.resultText
     .split("\n")
     .filter((l) => l.match(/^([A-Za-z]:[\\/]|\/).+\.ts$/));
@@ -80,10 +80,10 @@ async function main(): Promise<void> {
   );
   console.error("[stage6gg] ✓ glob honors explicit path");
 
-  // ── 3. grep finds 'Foo' in 3 files (a.ts, b.ts, a.test.ts, README) — wait,
+  // ── 3. Grep finds 'Foo' in 3 files (a.ts, b.ts, a.test.ts, README) — wait,
   //   README also has Foo. Let's expect 4 total file matches.
   r = await executeTool(
-    "grep",
+    "Grep",
     JSON.stringify({
       pattern: "Foo",
       output_mode: "files_with_matches",
@@ -91,7 +91,7 @@ async function main(): Promise<void> {
     }),
     ctx,
   );
-  assert(r.ok, `3. grep -l should succeed`);
+  assert(r.ok, `3. Grep -l should succeed`);
   // Body lines that look like absolute paths (skip header).
   const fileLines = r.resultText
     .split("\n")
@@ -100,27 +100,27 @@ async function main(): Promise<void> {
     fileLines.length === 4,
     `3. expected Foo in 4 files (a.ts, b.ts, a.test.ts, README.md), got ${fileLines.length}: ${r.resultText}`,
   );
-  console.error("[stage6gg] ✓ grep -l finds Foo in 4 files (excluding node_modules)");
+  console.error("[stage6gg] ✓ Grep -l finds Foo in 4 files (excluding node_modules)");
 
-  // ── 4. grep content mode shows lineno:text.
+  // ── 4. Grep content mode shows lineno:text.
   r = await executeTool(
-    "grep",
+    "Grep",
     JSON.stringify({
       pattern: "export class Foo",
       description: "find class def",
     }),
     ctx,
   );
-  assert(r.ok, `4. grep content should succeed`);
+  assert(r.ok, `4. Grep content should succeed`);
   // ripgrep output: <path>:<line>:<text>
   const matchLine = r.resultText.split("\n").find((l) => /a\.ts:\d+:export class Foo/.test(l));
   assert(matchLine !== undefined, `4. expected 'a.ts:N:export class Foo' line: ${r.resultText}`);
-  console.error("[stage6gg] ✓ grep content mode emits path:line:text");
+  console.error("[stage6gg] ✓ Grep content mode emits path:line:text");
 
-  // ── 5. grep with case-insensitive picks up matches that differ only in case.
+  // ── 5. Grep with case-insensitive picks up matches that differ only in case.
   writeFileSync(join(dir, "src", "case.ts"), "TODO: handle this\ntodo: another\n");
   r = await executeTool(
-    "grep",
+    "Grep",
     JSON.stringify({
       pattern: "todo:",
       case_insensitive: true,
@@ -129,15 +129,15 @@ async function main(): Promise<void> {
     }),
     ctx,
   );
-  assert(r.ok, `5. grep -i -c should succeed`);
+  assert(r.ok, `5. Grep -i -c should succeed`);
   // Body should contain "case.ts:2" (file with 2 matches).
   const countLine = r.resultText.split("\n").find((l) => /case\.ts:2$/.test(l));
   assert(countLine !== undefined, `5. expected 'case.ts:2' count line: ${r.resultText}`);
-  console.error("[stage6gg] ✓ grep --case-insensitive --count works");
+  console.error("[stage6gg] ✓ Grep --case-insensitive --count works");
 
-  // ── 6. grep with glob filter constrains files searched.
+  // ── 6. Grep with glob filter constrains files searched.
   r = await executeTool(
-    "grep",
+    "Grep",
     JSON.stringify({
       pattern: "Foo",
       glob: "*.md",
@@ -146,7 +146,7 @@ async function main(): Promise<void> {
     }),
     ctx,
   );
-  assert(r.ok, `6. grep with glob should succeed`);
+  assert(r.ok, `6. Grep with glob should succeed`);
   const mdMatches = r.resultText
     .split("\n")
     .filter((l) => l.match(/^([A-Za-z]:[\\/]|\/).+\.(ts|md)$/));
@@ -154,7 +154,7 @@ async function main(): Promise<void> {
     mdMatches.length === 1 && mdMatches[0]?.endsWith("README.md"),
     `6. expected only README.md, got: ${mdMatches.join("\n")}`,
   );
-  console.error("[stage6gg] ✓ grep --glob restricts to file types");
+  console.error("[stage6gg] ✓ Grep --glob restricts to file types");
 
   rmSync(dir, { recursive: true, force: true });
   console.error("[stage6gg] PASS");

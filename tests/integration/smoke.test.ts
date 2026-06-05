@@ -118,26 +118,11 @@ const SMOKES: SmokeCase[] = [
   { file: "smoke-ws.ts", timeoutMs: 30_000 },
   { file: "smoke-cancel.ts", timeoutMs: 30_000 },
   { file: "smoke-stage6.ts", timeoutMs: 30_000 },
-  // stale: e877046 把工具名改成 PascalCase（"glob" → "Glob"）后此 smoke 未跟改，
-  // 直接调 executeTool("glob", ...) 已永远 fail。Stage 6.3/6.4 的实际验收已经
-  // 由 smoke-stage6 + smoke-tools + 单测 hooks-matcher/usage-meter 等共同覆盖。
-  // PROGRESS Known Issue：择期重写或淘汰。
-  {
-    file: "smoke-stage6-globgrep.ts",
-    timeoutMs: 30_000,
-    skipIf: () => true,
-    skipReason: "stale after PascalCase rename (e877046); see PROGRESS K11",
-  },
-  // fragile: 此 smoke 断言 session.history[0] 是 user message，但 7aef1eb 起
-  // history[0] 是注入了 CLAUDE.md / skill catalog 的 system message。Stage 7
-  // 的 session 持久化已 VERIFIED；此 smoke 失去了独立验收价值。
-  // PROGRESS Known Issue：择期重写或淘汰。
-  {
-    file: "smoke-stage7.ts",
-    timeoutMs: 30_000,
-    skipIf: () => true,
-    skipReason: "fragile after CLAUDE.md/skill injection (7aef1eb); see PROGRESS K11",
-  },
+  // K11.a：原工具名大小写错（"glob"/"grep"）已修为 "Glob"/"Grep"，恢复运行。
+  { file: "smoke-stage6-globgrep.ts", timeoutMs: 30_000 },
+  // K11.b：原断言 history[0] 是 user，但 7aef1eb 起 history[0] 是 system；
+  // 已改为 history.find(role==="user")，恢复运行。
+  { file: "smoke-stage7.ts", timeoutMs: 30_000 },
   { file: "smoke-usage-model.ts", timeoutMs: 30_000 },
   { file: "smoke-config-options.ts", timeoutMs: 30_000 },
   { file: "smoke-hooks-protocol.ts", timeoutMs: 45_000 },

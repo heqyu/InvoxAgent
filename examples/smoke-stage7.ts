@@ -124,11 +124,16 @@ const persisted = JSON.parse(readFileSync(sessFile, "utf8"));
 assert(persisted.id === sessionId, `2. persisted id mismatch`);
 assert(
   Array.isArray(persisted.history) && persisted.history.length >= 2,
-  `2. history should have ≥2 messages (user + assistant), got ${persisted.history?.length}`,
+  `2. history should have ≥2 messages (system + user + assistant), got ${persisted.history?.length}`,
+);
+// 注意：自 7aef1eb（CLAUDE.md / skill 注入）起，history[0] 是 system message；
+// 用户原文消息是 history 中第一条 role==="user" 的项，不能再用下标 0。
+const firstUser = persisted.history.find(
+  (m: { role: string; content: unknown }) => m.role === "user",
 );
 assert(
-  persisted.history[0].role === "user" && persisted.history[0].content === "hello stage 7",
-  `2. first message should be the user prompt`,
+  firstUser && firstUser.content === "hello stage 7",
+  `2. first user message should be the prompt; got ${JSON.stringify(firstUser)}`,
 );
 console.error("[stage7] ✓ phase 1 file persisted under .invox/sessions/");
 
