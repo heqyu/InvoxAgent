@@ -135,6 +135,19 @@
 | H3 | `agent.ts.applyAgentModel` —— newSession 默认 agent 应用 model；setSessionConfigOption(agent) 切换同步 selectedModel + configValues.model；解析后的 id 不在 `availableModelIds` 里时动态加入 | P0 | **✅ Done**（17:30）<br/>永不抛错（fallback 等于当前时 no-op）；prompt-loop 零改动（继续读 session.selectedModel）；BUILTIN/SEED 默认 model：Worker→`$MODEL_LITE`、Plan/CodeReviewer→`$MODEL_PRO`、Ask 不设 | smoke-agents 扩展 8 步全过 |
 | H4 | smoke-agents 扩展 + README/PROGRESS | P0 | **✅ Done**（17:35）<br/>4 个新断言：默认 Worker→test-lite-model、PRO/LITE 自动入 menu、切 Plan→model 同步切到 test-pro-model、磁盘 selectedModel=test-pro-model | `npm test` 263 ✓ / 1 skip |
 
+### Phase I — 「SubAgent 工具：让 LLM 委派子任务给 agent 模板」（已完成，2026-06-05 22:20）
+
+> 用户原话："给 invox 实现 SubAgent tool，subagent 可以加载 agent 模板来创建新的子agent。工具定义和参数可以参考 Claude Code 的 Agent tool。"
+
+| ID | 任务 | 优先级 | 状态 | 验收 |
+|---|---|---|---|---|
+| I1 | `src/agent/sub-agent-runner.ts` —— `runSubAgent(deps, opts, signal)`：解析 model 占位符 → 构造独立 sub-Session（共享 cwd / mcpClient / hooks / abort，但独立 history / toolState / turnUsage）→ 跑 prompt-loop（注入 `inSubAgent=true`）→ 合并 turnUsage 回父 → 返回最终 assistant 文本 | P0 | **✅ Done**（22:18）<br/>Proxy 包装 conn：`agent_message_chunk`→`agent_thought_chunk`，`usage_update` 吞掉；abort 链路双向（父 abort / 外部 signal 任一触发即停）；max iter `INVOX_SUBAGENT_MAX_ITERATIONS` env 可调，默认 min(父上限, 25) | typecheck 绿；15 个新单测 PASS |
+| I2 | `src/tools/sub-agent.ts` —— `subAgentTool` 工具：spec 含 description / prompt / subagent_type / model（前 3 个 required）；execute 校验 + 调 `ctx.subAgentRunner` + 拼装带 provenance header 的结果 | P0 | **✅ Done**（22:18）<br/>tier=`execute`（writes/always 策略下需许可一次）；递归屏障检查 `subAgentRunner` 是否注入；title 用 description 优先 | tool 注册到 TOOLS 数组；spec.required=["description","prompt","subagent_type"] |
+| I3 | 接线：`tools/types.ts` 加 `SubAgentRunner` 类型 + `ToolExecContext.subAgentRunner?`；`prompt-loop.ts` 加 `IterationDeps.{agentRegistry, inSubAgent}`，`inSubAgent=true` 时剔除 SubAgent 规范，并按需把 `makeSubAgentRunner(session, deps)` 注入 ctx；`agent.ts` 把 `this.agentById` 作为 `agentRegistry` 传入 | P0 | **✅ Done**（22:18）<br/>双层递归屏障：(a) toolSpecs 中剔除 SubAgent；(b) ctx.subAgentRunner=undefined 时工具直接 fail-fast | typecheck 绿；既有 280 测试 + 15 新测 全过 |
+| I4 | 单元测试 `tests/unit/sub-agent-runner.test.ts` —— 9 个 runner 用例 + 6 个工具用例（注册表为空 / 未知 type / 空 prompt / 父 abort / 外部 signal abort / model 解析优先级 / history 隔离 / 工具递归屏障 / provenance header 格式 等） | P0 | **✅ Done**（22:20）<br/>15 case 全过；`npm test` 295 ✓ / 1 skip / 0 fail | 295 测试全绿 |
+
+
+
 ---
 
 ## 3. Doing（当前 Sprint，活动 ≤ 3 项）

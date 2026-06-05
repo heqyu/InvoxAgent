@@ -33,7 +33,7 @@ import {
 import { kindFromTier } from "../tools/permissions.js";
 import { getTool, TOOL_SPECS } from "../tools/registry.js";
 import { executeTool } from "../tools/router.js";
-import type { PermissionPolicy } from "../tools/types.js";
+import type { PermissionPolicy, SubAgentRunner } from "../tools/types.js";
 import {
   classifyProviderError,
   formatProviderErrorForUser,
@@ -75,6 +75,24 @@ export interface IterationDeps {
    *   - 已设      → 按 agent.tools 过滤内置工具；按 agent.mcp 控制 MCP 暴露
    */
   activeAgent?: AgentTemplate | undefined;
+  /**
+   * 全部 agent 模板（id → 模板）。SubAgent 工具据此查找 subagent_type。
+   *
+   * 作为 subagent 启动入口的依赖；空 map / undefined 时 SubAgent 工具会拒绝
+   * 启动并返回友好错误。InvoxAgent 在拼装 deps 时直接传入 this.agentById。
+   */
+  agentRegistry?: ReadonlyMap<string, AgentTemplate>;
+  /**
+   * 是否处于 subagent 内部（递归屏障）。
+   *
+   *   - false / undefined（默认）→ 父循环：SubAgent 工具暴露给 LLM
+   *   - true                       → subagent 循环：从 toolSpecs 中剔除 SubAgent，
+   *                                  且不向 ToolExecContext 注入 subAgentRunner
+   *
+   * 这一招是双保险：(a) LLM 看不到 SubAgent 工具，自然不会调用；
+   * (b) 即便 LLM 凭借训练记忆硬调，runner 缺失会让其失败而非递归爆炸。
+   */
+  inSubAgent?: boolean;
 }
 
 /** runOneIteration 的返回。caller 应不抛异常地处理这三种 case。 */
@@ -147,10 +165,18 @@ export async function runOneIteration(
     //   - 内置工具按 agent.tools 白名单 / 黑名单过滤
     //   - MCP 工具按 agent.mcp 开关全 on / 全 off
     // agent 未设（agents 为空，旧路径）→ 全部暴露。
-    const builtinSpecs = filterToolSpecsByAgent(
+    let builtinSpecs = filterToolSpecsByAgent(
       TOOL_SPECS,
       deps.activeAgent?.tools,
     );
+    // 递归屏障：subagent 内部强制剔除 SubAgent 工具，无视 agent.tools 是否
+    // 显式列入。这条 belt-and-suspenders 保证再激进的 agent 模板也无法
+    // 嵌套启动 subagent。
+    if (deps.inSubAgent) {
+      builtinSpecs = builtinSpecs.filter(
+        (s) => s.function.name !== "SubAgent",
+      );
+    }
     const mcpSpecs = agentAllowsMcp(deps.activeAgent)
       ? (session.mcpClient?.getToolSpecs() ?? [])
       : [];
@@ -384,27 +410,29 @@ async function runOneToolCall(
     };
   }
 
+  // ToolExecContext 共用部分 —— 两条分支（MCP / 内置）都用同一份。
+  // SubAgent 工具会读 ctx.subAgentRunner；其它工具应忽略。
+  // 递归屏障：subagent 内部不注入 runner，让 SubAgent 工具直接 fail-fast。
+  const baseExecCtx = {
+    conn: deps.conn,
+    sessionId: session.id,
+    cwd: session.cwd,
+    caps: deps.clientCaps,
+    signal: session.abort.signal,
+    policy: deps.policy,
+    toolCallId: call.id,
+    state: session.toolState,
+    ...(deps.inSubAgent
+      ? {}
+      : { subAgentRunner: makeSubAgentRunner(session, deps) }),
+  };
+
   const r = mcpTool
-    ? await createMcpTool(mcpTool, session.mcpClient!).execute(toolArgs, {
-        conn: deps.conn,
-        sessionId: session.id,
-        cwd: session.cwd,
-        caps: deps.clientCaps,
-        signal: session.abort.signal,
-        policy: deps.policy,
-        toolCallId: call.id,
-        state: session.toolState,
-      })
-    : await executeTool(call.name, JSON.stringify(toolArgs), {
-        conn: deps.conn,
-        sessionId: session.id,
-        cwd: session.cwd,
-        caps: deps.clientCaps,
-        signal: session.abort.signal,
-        policy: deps.policy,
-        toolCallId: call.id,
-        state: session.toolState,
-      });
+    ? await createMcpTool(mcpTool, session.mcpClient!).execute(
+        toolArgs,
+        baseExecCtx,
+      )
+    : await executeTool(call.name, JSON.stringify(toolArgs), baseExecCtx);
 
   log.info("tool end", {
     name: call.name,
@@ -482,5 +510,30 @@ async function runOneToolCall(
     tool_call_id: call.id,
     content: r.resultText,
     name: call.name,
+  };
+}
+
+/**
+ * 构造一个绑定到当前父 session + IterationDeps 的 SubAgent 启动闭包。
+ *
+ * 工厂模式而非全局函数：闭包捕获 session（取 cwd / mcpClient / hooks /
+ * abort / turnUsage 合并）与 deps（取 provider / clientCaps / policy /
+ * defaultModelId / buildHookBase / agentRegistry）；从 ToolExecContext
+ * 视角看，subAgentRunner 只是个"接受 SubAgentRunRequest 返回结果"的纯函数。
+ *
+ * 动态 import sub-agent-runner 是不必要的（无循环依赖：sub-agent-runner →
+ * prompt-loop 是单向引用，prompt-loop → sub-agent-runner 也是单向）。但为了
+ * 避免「import 时自身评估」造成的隐性环（agent.ts → prompt-loop.ts →
+ * sub-agent-runner.ts → prompt-loop.ts），这里用 lazy 顶层 import 而非
+ * 在 makeSubAgentRunner 体内 require —— 都是 ESM，标准 import 即可。
+ */
+function makeSubAgentRunner(
+  parent: Session,
+  parentDeps: IterationDeps,
+): SubAgentRunner {
+  return async (req, signal) => {
+    // 延迟到调用时再 import，规避静态分析层面的潜在循环依赖（v1 防御性写法）
+    const { runSubAgent } = await import("./sub-agent-runner.js");
+    return runSubAgent({ parentDeps, parent }, req, signal);
   };
 }

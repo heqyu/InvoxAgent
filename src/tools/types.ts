@@ -26,6 +26,44 @@ export interface SessionToolState {
   cache: FileCache;
 }
 
+/**
+ * SubAgent 调用入口签名 —— 由 prompt-loop 在构造 ToolExecContext 时按需注入。
+ *
+ * 设计点：
+ *   - 类型定义放在 tools/types.ts（而非 agent/）以避免 tools → agent 的反向依赖
+ *   - subagent 内部跑一轮完整的 prompt loop，期间可能再触发各种工具；本 runner
+ *     的实现在 src/agent/sub-agent-runner.ts，prompt-loop 把闭包注入工具上下文
+ *   - 同一会话最多嵌套 1 层：进入 subagent 后 ctx.subAgentRunner 必为 undefined，
+ *     防止递归爆炸（见 prompt-loop.ts 的 inSubAgent 分支）
+ */
+export interface SubAgentRunRequest {
+  /** 选用哪个 agent 模板 id（如 "Plan" / "Ask" / "CodeReviewer" / "Worker"）。 */
+  subagentType: string;
+  /** 作为 subagent 单条 user message 的任务说明文本。 */
+  prompt: string;
+  /** UI 工具卡显示用的简短任务名（3-5 词）。 */
+  description?: string;
+  /** 显式 model id 覆盖；优先级高于 agent.model。 */
+  modelOverride?: string;
+}
+
+export interface SubAgentRunResult {
+  /** 仅当 stopReason === "end_turn" 才视为成功；其它都视为失败让 LLM 自我纠错。 */
+  ok: boolean;
+  /** subagent 最后一条 assistant 消息的纯文本；refusal 时可能为空。 */
+  finalText: string;
+  stopReason: "end_turn" | "max_turn_requests" | "refusal" | "cancelled";
+  /** 实际跑过的 LLM ↔ tool 往返次数。 */
+  iterations: number;
+  /** ok=false 时给出的人类可读原因。 */
+  error?: string;
+}
+
+export type SubAgentRunner = (
+  req: SubAgentRunRequest,
+  signal: AbortSignal,
+) => Promise<SubAgentRunResult>;
+
 /** 工具 execute() 的运行时上下文。 */
 export interface ToolExecContext {
   conn: AgentSideConnection;
@@ -36,6 +74,13 @@ export interface ToolExecContext {
   policy: PermissionPolicy;
   toolCallId: string;
   state: SessionToolState;
+  /**
+   * 启动 subagent 的入口闭包。仅在「parent prompt loop 调用本工具」时存在；
+   * 「subagent 内部调用本工具」时为 undefined（避免递归）。
+   *
+   * SubAgent 工具在自己的 execute() 中读取本字段；其它工具应忽略。
+   */
+  subAgentRunner?: SubAgentRunner;
 }
 
 /** 工具执行结果。 */

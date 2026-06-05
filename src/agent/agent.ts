@@ -812,6 +812,9 @@ export class InvoxAgent implements Agent {
       // Phase G：把"当前激活的 agent 模板"注入 prompt-loop，
       // 让它按 agent.tools / agent.mcp 过滤暴露给 LLM 的工具集。
       activeAgent: this.activeAgentFor(session),
+      // SubAgent 工具据此查 subagent_type → 模板。空 map 时 SubAgent
+      // 工具会拒绝启动并返回友好错误（agents 路径未启用的旧用户场景）。
+      agentRegistry: this.agentById,
     });
   }
 
