@@ -47,6 +47,7 @@ import { runOneIteration, type IterationDeps } from "./prompt-loop.js";
 import type { Session } from "./session-types.js";
 import { systemMessageWithMemoryAndSkills } from "./system-prompt.js";
 import { resolveAgentModel } from "./templates.js";
+import { humanizeTokens } from "./token-meter.js";
 import { emptyTurnUsage } from "./usage-meter.js";
 import { maxIterations as parentMaxIterations } from "./agent-helpers.js";
 
@@ -211,6 +212,10 @@ function ts(): string {
  *     in_progress 状态，直到父 prompt-loop 在 subagent 收尾后发末态 update
  *   - lines[0] 永远是 `Log: <path>` —— 用户能从 UI 卡片直接看到独立日志位置
  *
+ * **只更新工具卡 content，不发 thinking chunk**。Thinking 块留给 subagent
+ * 退出后的 banner（emitSubAgentBanner）显示 token/time 摘要，不应被进度行
+ * 淹没。父工具卡的 uiKind="other" 已经能渲染成可展开卡，进度行展开就能看到。
+ *
  * 节流：暂不做。tool_call 是稀疏事件（每秒至多几个），1:1 emit 可接受；
  * 真有抖动再加 200ms debounce。
  *
@@ -233,14 +238,17 @@ function makeProgressEmitter(
   if (logPath) lines.push(`Log: ${logPath}`);
   lines.push("▸ subagent started");
 
-  // 起手立刻发一帧，让用户立即看到日志路径 + "started" 行
-  void emit();
+  // 起手立刻发一帧 card update，让用户立即看到日志路径 + "started" 行
+  void emitCardUpdate();
 
-  function renderText(): string {
-    return lines.join("\n");
+  function renderCard(): string {
+    // 进度行用 markdown 强换行（行尾两空格 + \n）让 Zed 真的一行一行渲染。
+    // 单个 `\n` 在 markdown 里是 soft break（同段落空格），整段 ▸ 行会被挤
+    // 成一坨可读性极差。两空格 + \n 是 markdown 标准的"hard line break"。
+    return lines.join("  \n");
   }
 
-  async function emit(): Promise<void> {
+  async function emitCardUpdate(): Promise<void> {
     try {
       await conn.sessionUpdate({
         sessionId,
@@ -251,7 +259,7 @@ function makeProgressEmitter(
           content: [
             {
               type: "content",
-              content: { type: "text", text: renderText() },
+              content: { type: "text", text: renderCard() },
             },
           ],
         },
@@ -264,10 +272,68 @@ function makeProgressEmitter(
   return {
     recordInnerToolCall: (title: string) => {
       lines.push(`▸ ${title}`);
-      void emit();
+      void emitCardUpdate();
     },
     lines: () => lines.slice(),
   };
+}
+
+// ── 退出 banner（agent_thought_chunk 摘要）──────────────────────────────
+
+/**
+ * subagent 收尾后发一条 thinking-block 摘要到父对话面板。
+ *
+ * 为什么放 thinking 块而不是父工具卡 content：
+ *   - 父工具卡的末态 update 由父 prompt-loop 统一发（成功/失败两种 acpContent），
+ *     在那里塞 banner 会跟 finalText 抢空间且有 kind 切换风险
+ *   - thinking 块永远渲染在线程里，即便用户没展开卡也能看到完整账单
+ *
+ * 所有 stopReason 都发（包括 cancelled / refusal），对排查同样重要 —— 用户
+ * 想知道"那个 subagent 烧了我多少 token、跑了多久就被砍了"。
+ *
+ * 失败时吞错 —— banner 是 nice-to-have，不能挡住 subagent 主流程的清理。
+ */
+interface SubAgentBannerOpts {
+  subagentType: string;
+  stopReason: SubAgentRunResult["stopReason"];
+  iterations: number;
+  elapsedMs: number;
+  input: number;
+  output: number;
+  total: number;
+  logPath?: string;
+  error?: string;
+}
+
+async function emitSubAgentBanner(
+  conn: AgentSideConnection,
+  sessionId: string,
+  opts: SubAgentBannerOpts,
+): Promise<void> {
+  const elapsedSec = (opts.elapsedMs / 1000).toFixed(1);
+  const lines: string[] = [
+    `🤖 SubAgent ${opts.subagentType} · ${opts.iterations} iter · ${elapsedSec}s · stop=${opts.stopReason}`,
+    `🪙 in ${humanizeTokens(opts.input)} → out ${humanizeTokens(opts.output)} (${humanizeTokens(opts.total)} total)`,
+  ];
+  if (opts.error) {
+    lines.push(`❌ ${preview(opts.error, 200)}`);
+  }
+  if (opts.logPath) {
+    lines.push(`📁 ${opts.logPath}`);
+  }
+  try {
+    await conn.sessionUpdate({
+      sessionId,
+      update: {
+        sessionUpdate: "agent_thought_chunk",
+        // 两空格 + \n 强换行，与工具卡进度行同款；单 \n 在 markdown 里是
+        // soft break，会把整段 banner 挤成一行。
+        content: { type: "text", text: lines.join("  \n") },
+      },
+    });
+  } catch {
+    // banner 发送失败吞掉
+  }
 }
 
 // ── 主入口 ────────────────────────────────────────────────────────────
@@ -478,6 +544,24 @@ export async function runSubAgent(
     subOutput: sub.turnUsage.output,
     logPath: logFile.path || undefined,
   });
+
+  // 8. 退出 banner —— 仅当父侧有 SubAgent 工具卡（即调用方传了
+  //    parentToolCallId）时才向父 conn 发 thinking 块摘要。CLI 直接调用
+  //    runSubAgent（无父工具卡）的场景下保持纯静默，与 progress emitter 同
+  //    门槛 —— 否则会污染调用方未预期的 sessionUpdate 通知通道。
+  if (opts.parentToolCallId) {
+    await emitSubAgentBanner(parentDeps.conn, parent.id, {
+      subagentType: opts.subagentType,
+      stopReason,
+      iterations,
+      elapsedMs,
+      input: sub.turnUsage.input,
+      output: sub.turnUsage.output,
+      total: sub.turnUsage.total,
+      ...(logFile.path ? { logPath: logFile.path } : {}),
+      ...(runError ? { error: runError } : {}),
+    });
+  }
 
   return {
     ok: stopReason === "end_turn",

@@ -68,7 +68,7 @@ async function execute(
 ): Promise<ToolExecResult> {
   const rawCommand = String(args["command"] ?? "");
   if (!rawCommand) return errorResult("missing 'command'", "execute", "Bash");
-  log.info("tool: Bash", { command: rawCommand });
+  log.debug("tool: Bash", { command: rawCommand });
 
   // 尝试通过 `rtk rewrite` 改写命令；改写成功且非空则用改写后的，否则原样。
   let command = rawCommand;

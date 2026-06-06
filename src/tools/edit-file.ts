@@ -101,7 +101,7 @@ async function execute(
       `Edit: ${rel}`,
     );
   }
-  log.info("tool: Edit", {
+  log.debug("tool: Edit", {
     path,
     replaceAll,
     oldLen: oldString.length,

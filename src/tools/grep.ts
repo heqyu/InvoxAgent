@@ -133,7 +133,7 @@ async function execute(
   // 用 -- 终止参数解析，让以 '-' 开头的 pattern 也安全
   rgArgs.push("--", pattern, searchRoot);
 
-  log.info("tool: Grep", {
+  log.debug("tool: Grep", {
     pattern,
     searchRoot,
     outputMode,

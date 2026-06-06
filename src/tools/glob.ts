@@ -71,7 +71,7 @@ async function execute(
       ? Math.floor(args["limit"])
       : DEFAULT_LIMIT;
 
-  log.info("tool: Glob", { pattern, searchRoot, limit });
+  log.debug("tool: Glob", { pattern, searchRoot, limit });
 
   let entries: string[];
   try {

@@ -8,6 +8,10 @@
 //     为 undefined（递归屏障）
 //   - tier="execute"：subagent 可以触发任意工具，理应当作执行类（按权限策略
 //     的"writes/always"会要求一次许可；"never" 默认放行）
+//   - **uiKind="other"**：tier 决定安全策略，kind 决定 UI 渲染。execute 类
+//     在 Zed 里会被按 terminal 风格画成无展开按钮的 "Run Command" 头部 ——
+//     SubAgent 既没 terminal 流又有大段进度行 / 末态文本要展示，必须用
+//     "other" 让 Zed 渲染成通用可展开卡片
 //   - title 优先用 description，让 UI 卡片有可读标签
 
 import type { ToolSpec } from "../llm/types.js";
@@ -82,16 +86,16 @@ async function execute(
   if (!ctx.subAgentRunner) {
     return errorResult(
       "SubAgent is unavailable in this context (recursive subagent calls are forbidden).",
-      "execute",
+      "other",
       titleBase,
     );
   }
 
   if (!subagentType) {
-    return errorResult("missing 'subagent_type'", "execute", titleBase);
+    return errorResult("missing 'subagent_type'", "other", titleBase);
   }
   if (!prompt || !prompt.trim()) {
-    return errorResult("missing 'prompt'", "execute", titleBase);
+    return errorResult("missing 'prompt'", "other", titleBase);
   }
 
   // 实际跑 subagent —— runner 内部捕获所有异常，永不抛错
@@ -120,7 +124,7 @@ async function execute(
       : "";
     return errorResult(
       reason + logHint,
-      "execute",
+      "other",
       `${titleBase} (${subagentType})`,
     );
   }
@@ -130,8 +134,15 @@ async function execute(
   //   - resultText（喂给父 LLM 的工具结果）：紧凑 header + finalText。**不含**
   //     进度行 —— 否则 audit 列表会污染父 LLM 的 context，且每条进度都用
   //     token，浪费成本。
-  //   - acpContent（UI 渲染的工具卡内容）：进度审计轨迹（▸ ...）+ 分隔线 +
-  //     finalText。让用户在末态卡里仍能复盘 subagent 跑了哪些工具，无需翻日志
+  //   - acpContent（UI 渲染的末态工具卡）：**只保留日志路径**。运行过程中工具
+  //     卡 content 会被 progress emitter 实时更新成 ▸ 进度行，让用户看到正在跑
+  //     什么；subagent 收尾后由父 prompt-loop 用本 acpContent 覆盖中间状态，把
+  //     工具卡缩成一行日志路径指针。设计意图：
+  //       · finalText 已经在主对话流里给到父 LLM、UI 也会显示父 LLM 的下一条
+  //         回复（往往直接复述 subagent 结论），工具卡不必重复
+  //       · 进度审计轨迹真要回看 → 直接打开日志文件，不需要塞回工具卡
+  //       · 退出 banner（runner 发的 thinking 块）已经把 token / time / log
+  //         路径都摘要到线程里，工具卡只做"回到日志"的指针
   const headerLines: string[] = [
     `[subagent: ${subagentType}] (${runResult.iterations} iter, ${runResult.stopReason})`,
   ];
@@ -143,19 +154,16 @@ async function execute(
     runResult.finalText.trim() || "(subagent produced no final message)";
   const resultText = `${header}\n\n${body}`;
 
-  // UI 文本：审计轨迹 + finalText
-  const progressLines = runResult.progressLines ?? [];
-  const uiSections: string[] = [header];
-  if (progressLines.length > 0) {
-    uiSections.push(progressLines.join("\n"));
-  }
-  uiSections.push(body);
-  const uiText = uiSections.join("\n\n");
+  // UI 末态：只一行日志路径（带 markdown code 反引号便于点选复制）。
+  // 没拿到 logPath（fs 故障兜底）就退化为 header 一行让用户起码看到状态。
+  const uiText = runResult.logPath
+    ? `📁 \`${runResult.logPath}\``
+    : header;
 
   return {
     resultText,
     acpContent: [{ type: "content", content: { type: "text", text: uiText } }],
-    kind: "execute",
+    kind: "other",
     title: `${titleBase} (${subagentType})`,
     ok: true,
   };
@@ -164,6 +172,7 @@ async function execute(
 export const subAgentTool: Tool = {
   name: "SubAgent",
   tier: "execute",
+  uiKind: "other",
   spec,
   execute,
 };

@@ -333,7 +333,7 @@ async function runOneToolCall(
   const startKind = mcpTool
     ? ("execute" as const)
     : tool
-      ? kindFromTier(tool.tier)
+      ? (tool.uiKind ?? kindFromTier(tool.tier))
       : ("other" as const);
   const startTitle = startTitleFor(call);
   const startLocations = startLocationsFor(call);

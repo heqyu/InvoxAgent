@@ -132,8 +132,24 @@ export interface ToolExecResult {
 export interface Tool {
   /** 工具名（PascalCase），唯一；作为 function.name 给 LLM。 */
   readonly name: string;
-  /** 风险等级 —— router.ts 用来决定权限闸门。 */
+  /** 风险等级 —— router.ts 用来决定权限闸门 / 并发策略。 */
   readonly tier: RiskTier;
+  /**
+   * 可选：覆盖 tool_call.kind 的 UI 渲染等级。
+   *
+   * 默认值由 kindFromTier(tier) 推导（read→"read"、write→"edit"、execute→"execute"），
+   * 但 tier 是**安全维度**而 kind 是**UI 渲染维度**，两者并不总是 1:1：
+   *
+   *   - SubAgent：tier="execute"（可触发任意子工具，受 writes/always 策略约束），
+   *     但 UI 上是"思考型委派"。如果 kind="execute"，Zed 会按 terminal 风格渲染
+   *     —— 卡片不带展开按钮、只显示一个 "Run Command" 头部。设 uiKind="other"
+   *     让 Zed 用通用可展开卡，进度行 / 末态文本才能正常展示。
+   *
+   * 工具实现自行决定是否覆盖；prompt-loop 在初始 tool_call 通知中读取本字段。
+   * tool.execute() 返回的 ToolExecResult.kind 也应与本字段一致，否则末态
+   * tool_call_update 会"切换"卡片渲染模式，造成抖动。
+   */
+  readonly uiKind?: "read" | "edit" | "execute" | "other";
   /** 给 LLM 的 OpenAI 工具规范，function.name 必须和 name 一致。 */
   readonly spec: ToolSpec;
   /** 真正执行工具，产出可流回客户端的结果。 */
