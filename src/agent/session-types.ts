@@ -16,6 +16,7 @@ import type { SessionToolState } from "../tools/types.js";
 import type { HookRegistry } from "../plugins/hooks.js";
 import type { AgentTemplate } from "./templates.js";
 import type { TurnUsage } from "./usage-meter.js";
+import type { LogFile } from "../log.js";
 
 /**
  * 一个活动会话。每次 `session/new` 创建一份；`session/load` 从磁盘
@@ -69,6 +70,14 @@ export interface Session {
    * 仍能看到上一轮花了多少。
    */
   lastTurnUsage?: PersistedTurnUsage;
+  /**
+   * 本会话的独立日志文件，位于 `<cwd>/.invox/logs/<sessionId>.log`。
+   * 记录 session 生命周期内的关键事件（提示词、工具调用、token 消耗等），
+   * 与 subagent 日志同文件格式，方便统一排查。
+   *
+   * newSession / loadSession 时打开，session 销毁时关闭。
+   */
+  sessionLog?: LogFile;
 }
 
 /**

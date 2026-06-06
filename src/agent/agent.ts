@@ -40,7 +40,7 @@ import {
   type SetSessionModelRequest,
   type SetSessionModelResponse,
 } from "@agentclientprotocol/sdk";
-import { createLogger } from "../log.js";
+import { createLogger, formatTimestamp, openSessionLogFile, preview } from "../log.js";
 const log = createLogger("agent");
 import type { LLMProvider } from "../llm/types.js";
 import { contentToString } from "../llm/utils.js";
@@ -249,6 +249,19 @@ export class InvoxAgent implements Agent {
       hooks: loadHooks(params.cwd),
     };
     this.sessions.set(id, session);
+
+    // ── 开启会话独立日志 ────────────────────────────────────────────
+    const sessionLog = openSessionLogFile(params.cwd, id, "session");
+    session.sessionLog = sessionLog;
+    sessionLog.write(
+      `── session start @ ${formatTimestamp(new Date())} ───\n` +
+        `  id:     ${id}\n` +
+        `  cwd:    ${params.cwd}\n` +
+        `  agent:  ${initialConfigValues["agent"] ?? "(none)"}\n` +
+        `  model:  ${session.selectedModel ?? this.models.defaultModelId}\n` +
+        `  prompt: ${initialConfigValues["system_prompt"] ?? "(none)"}\n`,
+    );
+
     log.info("session created", {
       id,
       cwd: params.cwd,
@@ -365,6 +378,18 @@ export class InvoxAgent implements Agent {
     };
     this.sessions.set(session.id, session);
 
+    // ── 开启会话独立日志（loadSession 恢复后） ───────────────────────
+    const sessionLog = openSessionLogFile(params.cwd, snapshot.id, "session");
+    session.sessionLog = sessionLog;
+    sessionLog.write(
+      `── session load @ ${formatTimestamp(new Date())} ───\n` +
+        `  id:          ${snapshot.id}\n` +
+        `  cwd:         ${params.cwd}\n` +
+        `  historyLen:  ${snapshot.history.length}\n` +
+        `  agent:       ${restoredConfigValues["agent"] ?? "(none)"}\n` +
+        `  model:       ${session.selectedModel ?? "(restored)"}\n`,
+    );
+
     // 连接 MCP servers（同 newSession）
     await initMcpForSession(session);
 
@@ -439,6 +464,13 @@ export class InvoxAgent implements Agent {
     // 优先在内存中查找
     const session = this.sessions.get(params.sessionId);
     if (session) {
+      // ── 关闭会话日志 ────────────────────────────────────────────
+      session.sessionLog?.write(
+        `── session end @ ${formatTimestamp(new Date())} ──────\n`,
+      );
+      session.sessionLog?.close();
+      // ──────────────────────────────────────────────────────────────
+
       // abort 进行中的 prompt + 释放 MCP 池引用。
       // abort 多次调是 no-op，不会抛错。
       try {
@@ -614,12 +646,19 @@ export class InvoxAgent implements Agent {
     session.turnStartedAt = Date.now();
 
     const userContent = buildUserContent(params.prompt);
+    const userText = contentToString(userContent);
     log.info("prompt received", {
       sessionId: session.id,
-      userText: contentToString(userContent),
+      userText,
       historyLen: session.history.length,
       model: session.selectedModel ?? this.models.defaultModelId,
     });
+    session.sessionLog?.write(
+      `── turn start @ ${formatTimestamp(new Date())} ────\n` +
+        `  user:   ${preview(userText, 200)}\n` +
+        `  model:  ${session.selectedModel ?? this.models.defaultModelId}\n` +
+        `  hist:   ${session.history.length} msgs\n`,
+    );
 
     // 跑 UserPromptSubmit hook —— 插件可注入额外 context 或彻底拦下 prompt
     const submitResult = await runUserPromptSubmit(session.hooks, {
@@ -753,6 +792,22 @@ export class InvoxAgent implements Agent {
           err instanceof Error ? err.message : String(err),
         );
       }
+
+      // ── turn 收尾写日志 ──────────────────────────────────────────
+      const elapsedMs = Date.now() - session.turnStartedAt;
+      const elapsedSec = (elapsedMs / 1000).toFixed(1);
+      const tu = session.turnUsage;
+      session.sessionLog?.write(
+        `── turn end @ ${formatTimestamp(new Date())} ──────\n` +
+          `  stop=${stopReason}  iter=${tu.calls}  ` +
+          `elapsed=${elapsedSec}s  in=${tu.input}  out=${tu.output}\n`,
+      );
+      if (refusalInfo && session.sessionLog) {
+        session.sessionLog.write(
+          `  error: ${preview(refusalInfo.message, 500)}\n`,
+        );
+      }
+
       this.persist(session);
     }
     // 构造带可选 usage 字段的 PromptResponse。在 SDK 0.23 中 usage 是 PromptResponse

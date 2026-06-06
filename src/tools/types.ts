@@ -70,6 +70,14 @@ export interface SubAgentRunResult {
    * 这个文件，方便事后查"subagent 到底跑了什么"。日志写入失败时为空。
    */
   logPath?: string;
+  /** 本次运行耗时毫秒数。 */
+  elapsedMs: number;
+  /** subagent 的 LLM input tokens。 */
+  input: number;
+  /** subagent 的 LLM output tokens。 */
+  output: number;
+  /** subagent 的 LLM total tokens（input + output）。 */
+  total: number;
   /**
    * 进度轨迹：subagent 跑过程中累计的可读"操作清单"（每条形如
    * `▸ Glob **\/*.ts` —— 一行一个内部工具调用）。SubAgent 工具用它在最终

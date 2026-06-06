@@ -21,7 +21,7 @@ import type {
   AgentSideConnection,
   ClientCapabilities,
 } from "@agentclientprotocol/sdk";
-import { createLogger } from "../log.js";
+import { createLogger, preview } from "../log.js";
 const log = createLogger("prompt-loop");
 import type { LLMMessage, LLMProvider, ParsedToolCall } from "../llm/types.js";
 import { createMcpTool } from "../mcp/tool.js";
@@ -34,6 +34,7 @@ import { kindFromTier } from "../tools/permissions.js";
 import { getTool, TOOL_SPECS } from "../tools/registry.js";
 import { executeTool } from "../tools/router.js";
 import type { PermissionPolicy, SubAgentRunner } from "../tools/types.js";
+import { buildDynamicSubAgentSpec } from "../tools/sub-agent.js";
 import {
   classifyProviderError,
   formatProviderErrorForUser,
@@ -179,8 +180,20 @@ export async function runOneIteration(
     //   - 内置工具按 agent.tools 白名单 / 黑名单过滤
     //   - MCP 工具按 agent.mcp 开关全 on / 全 off
     // agent 未设（agents 为空，旧路径）→ 全部暴露。
+
+    // 动态生成 SubAgent 工具描述：将占位符替换为实际加载的 agent 类型列表。
+    // 这样项目级/用户级自定义的 agent 都能自动出现在提示词中，
+    // LLM 能看到真实可用的 subagent_type 选项。
+    let baseToolSpecs = TOOL_SPECS;
+    if (deps.agentRegistry && deps.agentRegistry.size > 0) {
+      const dynamicSubAgentSpec = buildDynamicSubAgentSpec(deps.agentRegistry);
+      baseToolSpecs = TOOL_SPECS.map((spec) =>
+        spec.function.name === "SubAgent" ? dynamicSubAgentSpec : spec,
+      );
+    }
+
     let builtinSpecs = filterToolSpecsByAgent(
-      TOOL_SPECS,
+      baseToolSpecs,
       deps.activeAgent?.tools,
     );
     // 递归屏障：subagent 内部强制剔除 SubAgent 工具，无视 agent.tools 是否
@@ -300,6 +313,9 @@ async function executeToolCallBatches(
         count: batch.calls.length,
         names: batch.calls.map((call) => call.name),
       });
+      session.sessionLog?.write(
+        `[parallel x${batch.calls.length}: ${batch.calls.map((c) => c.name).join(", ")}]\n`,
+      );
       const messages = await Promise.all(
         batch.calls.map((call) => runOneToolCall(call, session, deps)),
       );
@@ -356,6 +372,9 @@ async function runOneToolCall(
     toolCallId: call.id,
     argsPreview: previewArgs(call.arguments),
   });
+  session.sessionLog?.write(
+    `> ${call.name}: ${previewArgs(call.arguments)}\n`,
+  );
   const toolStartedAt = Date.now();
 
   // 工具参数解析（容错版）：旧实现用裸 JSON.parse(call.arguments)，
@@ -448,11 +467,12 @@ async function runOneToolCall(
       )
     : await executeTool(call.name, JSON.stringify(toolArgs), baseExecCtx);
 
+  const elapsedMs = Date.now() - toolStartedAt;
   log.info("tool end", {
     name: call.name,
     toolCallId: call.id,
     ok: r.ok,
-    elapsedMs: Date.now() - toolStartedAt,
+    elapsedMs,
     resultBytes: r.resultText.length,
     resultPreview:
       r.resultText.length > 200
@@ -460,6 +480,10 @@ async function runOneToolCall(
           ` …(+${r.resultText.length - 200} more bytes)`
         : r.resultText,
   });
+  session.sessionLog?.write(
+    `. ${call.name}: ${r.ok ? "ok" : "fail"}` +
+      `  (${elapsedMs}ms)  ${preview(r.resultText, 150)}\n`,
+  );
 
   // PostToolUse / PostToolUseFailure hook
   if (r.ok) {

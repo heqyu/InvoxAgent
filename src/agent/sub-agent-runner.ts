@@ -27,15 +27,10 @@
 //   - 持久化 —— subagent 的 history 不写盘，turn 结束就丢
 //   - 模板加载 —— 上游已经把 agentRegistry 准备好传进来
 
-import {
-  closeSync,
-  mkdirSync,
-  openSync,
-  writeSync,
-} from "node:fs";
-import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { createLogger } from "../log.js";
+import { closeSync, mkdirSync, openSync, writeSync } from "node:fs";
+import { join } from "node:path";
+import { createLogger, formatTimestamp, type LogFile } from "../log.js";
 const log = createLogger("sub-agent");
 import type {
   AgentSideConnection,
@@ -83,6 +78,14 @@ export interface SubAgentRunResult {
   iterations: number;
   /** 本次运行的独立日志文件绝对路径；写入失败时为 undefined。 */
   logPath?: string;
+  /** 本次运行耗时毫秒数；供 tools/sub-agent.ts 构建 banner 文本。 */
+  elapsedMs: number;
+  /** subagent 的 LLM input tokens。 */
+  input: number;
+  /** subagent 的 LLM output tokens。 */
+  output: number;
+  /** subagent 的 LLM total tokens（input + output）。 */
+  total: number;
   /** 进度轨迹累计行（runner 已发完最后一帧；调用方可作为 audit trail 渲染）。 */
   progressLines?: string[];
   error?: string;
@@ -112,12 +115,6 @@ function subAgentMaxIterations(): number {
 
 // ── 日志文件 ──────────────────────────────────────────────────────────
 
-interface SubAgentLogFile {
-  path: string;
-  write(line: string): void;
-  close(): void;
-}
-
 /**
  * 给 subagent 用的"封装日志文件"。
  *   - 路径：<cwd>/.invox/logs/subagent-<parent-id-prefix>-<runid>-<ts>.log
@@ -134,8 +131,8 @@ function openSubAgentLog(
   cwd: string,
   parentSessionId: string,
   runId: string,
-): SubAgentLogFile {
-  const noop: SubAgentLogFile = {
+): LogFile {
+  const noop: LogFile = {
     path: "",
     write: () => {},
     close: () => {},
@@ -152,7 +149,9 @@ function openSubAgentLog(
     return noop;
   }
 
-  const safeParent = parentSessionId.slice(0, 8).replace(/[^a-zA-Z0-9_-]/g, "_");
+  const safeParent = parentSessionId
+    .slice(0, 8)
+    .replace(/[^a-zA-Z0-9_-]/g, "_");
   const safeRun = runId.slice(0, 8);
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
   const filePath = join(dir, `subagent-${safeParent}-${safeRun}-${ts}.log`);
@@ -192,10 +191,10 @@ function openSubAgentLog(
   };
 }
 
-// 时间戳前缀（短而无歧义）—— 与 src/log.ts 对齐成本太高（那边是模块化），
-// 这里用 ISO 简化版即可，毕竟单文件单 subagent，分析时按行排序就行
+// 时间戳前缀（本地时间）—— 复用 log.ts 的 formatTimestamp，
+// 与主 session 日志格式统一。
 function ts(): string {
-  return new Date().toISOString();
+  return formatTimestamp(new Date());
 }
 
 // ── 进度回流（实时更新父 SubAgent 工具卡的 content）────────────────────
@@ -212,9 +211,9 @@ function ts(): string {
  *     in_progress 状态，直到父 prompt-loop 在 subagent 收尾后发末态 update
  *   - lines[0] 永远是 `Log: <path>` —— 用户能从 UI 卡片直接看到独立日志位置
  *
- * **只更新工具卡 content，不发 thinking chunk**。Thinking 块留给 subagent
- * 退出后的 banner（emitSubAgentBanner）显示 token/time 摘要，不应被进度行
- * 淹没。父工具卡的 uiKind="other" 已经能渲染成可展开卡，进度行展开就能看到。
+ * **只更新工具卡 content，不发 thinking chunk**。Banner 摘要（token/time/stop）
+ * 由 tools/sub-agent.ts 在 tool_call_update completed 时拼入 acpContent，
+ * 避免多个并行 SubAgent 的 banner 在 Zed "Thinking" 块里叠成一坨。
  *
  * 节流：暂不做。tool_call 是稀疏事件（每秒至多几个），1:1 emit 可接受；
  * 真有抖动再加 200ms debounce。
@@ -278,22 +277,16 @@ function makeProgressEmitter(
   };
 }
 
-// ── 退出 banner（agent_thought_chunk 摘要）──────────────────────────────
+// ── 退出 banner 文本（供 tools/sub-agent.ts 拼入工具卡 acpContent）────────
 
 /**
- * subagent 收尾后发一条 thinking-block 摘要到父对话面板。
+ * 构建 subagent 收尾 banner 纯文本。
  *
- * 为什么放 thinking 块而不是父工具卡 content：
- *   - 父工具卡的末态 update 由父 prompt-loop 统一发（成功/失败两种 acpContent），
- *     在那里塞 banner 会跟 finalText 抢空间且有 kind 切换风险
- *   - thinking 块永远渲染在线程里，即便用户没展开卡也能看到完整账单
- *
- * 所有 stopReason 都发（包括 cancelled / refusal），对排查同样重要 —— 用户
- * 想知道"那个 subagent 烧了我多少 token、跑了多久就被砍了"。
- *
- * 失败时吞错 —— banner 是 nice-to-have，不能挡住 subagent 主流程的清理。
+ * 从 agent_thought_chunk 迁移到工具卡 acpContent：当多个 SubAgent 并行完成
+ * 时，Zed 把所有 agent_thought_chunk 合并进同一个 "Thinking" 块，banner 互相
+ * 叠加不可读。放到各自工具卡的 completed content 里，天然分离且信息不丢。
  */
-interface SubAgentBannerOpts {
+export function buildSubAgentBanner(opts: {
   subagentType: string;
   stopReason: SubAgentRunResult["stopReason"];
   iterations: number;
@@ -303,13 +296,7 @@ interface SubAgentBannerOpts {
   total: number;
   logPath?: string;
   error?: string;
-}
-
-async function emitSubAgentBanner(
-  conn: AgentSideConnection,
-  sessionId: string,
-  opts: SubAgentBannerOpts,
-): Promise<void> {
+}): string {
   const elapsedSec = (opts.elapsedMs / 1000).toFixed(1);
   const lines: string[] = [
     `🤖 SubAgent ${opts.subagentType} · ${opts.iterations} iter · ${elapsedSec}s · stop=${opts.stopReason}`,
@@ -321,19 +308,8 @@ async function emitSubAgentBanner(
   if (opts.logPath) {
     lines.push(`📁 ${opts.logPath}`);
   }
-  try {
-    await conn.sessionUpdate({
-      sessionId,
-      update: {
-        sessionUpdate: "agent_thought_chunk",
-        // 两空格 + \n 强换行，与工具卡进度行同款；单 \n 在 markdown 里是
-        // soft break，会把整段 banner 挤成一行。
-        content: { type: "text", text: lines.join("  \n") },
-      },
-    });
-  } catch {
-    // banner 发送失败吞掉
-  }
+  // 两空格 + \n 强换行，让 Zed markdown 逐行渲染（单 \n 是 soft break）
+  return lines.join("  \n");
 }
 
 // ── 主入口 ────────────────────────────────────────────────────────────
@@ -470,7 +446,9 @@ export async function runSubAgent(
       iterations += 1;
       if (sub.abort.signal.aborted) {
         stopReason = "cancelled";
-        logFile.write(`${ts()}   iter ${iterations}: cancelled (abort signal)\n`);
+        logFile.write(
+          `${ts()}   iter ${iterations}: cancelled (abort signal)\n`,
+        );
         break;
       }
       logFile.write(`${ts()}   iter ${iterations}: start\n`);
@@ -496,7 +474,9 @@ export async function runSubAgent(
             `${ts()}   iter ${iterations}: stop refusal — ${runError}\n`,
           );
         } else {
-          logFile.write(`${ts()}   iter ${iterations}: stop ${result.reason}\n`);
+          logFile.write(
+            `${ts()}   iter ${iterations}: stop ${result.reason}\n`,
+          );
         }
         break;
       }
@@ -545,29 +525,19 @@ export async function runSubAgent(
     logPath: logFile.path || undefined,
   });
 
-  // 8. 退出 banner —— 仅当父侧有 SubAgent 工具卡（即调用方传了
-  //    parentToolCallId）时才向父 conn 发 thinking 块摘要。CLI 直接调用
-  //    runSubAgent（无父工具卡）的场景下保持纯静默，与 progress emitter 同
-  //    门槛 —— 否则会污染调用方未预期的 sessionUpdate 通知通道。
-  if (opts.parentToolCallId) {
-    await emitSubAgentBanner(parentDeps.conn, parent.id, {
-      subagentType: opts.subagentType,
-      stopReason,
-      iterations,
-      elapsedMs,
-      input: sub.turnUsage.input,
-      output: sub.turnUsage.output,
-      total: sub.turnUsage.total,
-      ...(logFile.path ? { logPath: logFile.path } : {}),
-      ...(runError ? { error: runError } : {}),
-    });
-  }
+  // 8. banner 文本由 tools/sub-agent.ts 在 tool_call_update completed 时拼入
+  //    acpContent —— 不再通过 agent_thought_chunk 发送，避免多个并行 SubAgent
+  //    的 banner 在 Zed "Thinking" 块里叠成一坨。
 
   return {
     ok: stopReason === "end_turn",
     finalText,
     stopReason,
     iterations,
+    elapsedMs,
+    input: sub.turnUsage.input,
+    output: sub.turnUsage.output,
+    total: sub.turnUsage.total,
     ...(logFile.path ? { logPath: logFile.path } : {}),
     ...(progress ? { progressLines: [...progress.lines()] } : {}),
     ...(runError ? { error: runError } : {}),
@@ -582,6 +552,10 @@ function badResult(msg: string): SubAgentRunResult {
     finalText: "",
     stopReason: "refusal",
     iterations: 0,
+    elapsedMs: 0,
+    input: 0,
+    output: 0,
+    total: 0,
     error: msg,
   };
 }
@@ -730,7 +704,7 @@ function shouldLogNotif(n: SessionNotification): boolean {
  */
 function wrapConnForSubAgent(
   conn: AgentSideConnection,
-  logFile: SubAgentLogFile,
+  logFile: LogFile,
   progress: ProgressEmitter | undefined,
 ): AgentSideConnection {
   return new Proxy(conn, {
