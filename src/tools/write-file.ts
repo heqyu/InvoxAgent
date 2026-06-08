@@ -11,6 +11,8 @@ import {
   readFileDirect,
   writeFileDirect,
   resolveToolPath,
+  detectFileEol,
+  toEol,
 } from "./fs-utils.js";
 import {
   errorResult,
@@ -129,18 +131,45 @@ async function execute(
         `For safety, prefer Read → Edit over Write when modifying existing files.\n`
       : "";
 
+  // 行尾保护：仅在「覆盖已有 CRLF 文件」时把 content 转回 CRLF。
+  // 动机与 Edit 一致 —— ACP / 编辑器读出的 oldText 通常已被归一化为 LF，
+  // LLM 也几乎只产出 LF，直接灌回去会让 git 看到整文件 EOL 翻转。
+  // 新建文件则不强制 EOL，让 content 自决（避免在纯 LF 仓库里突然写出
+  // CRLF 这种反向意外）。
+  let textToWrite = content;
+  if (fileExisted) {
+    const diskEol = await detectFileEol(path);
+    if (diskEol === "crlf") {
+      textToWrite = toEol(content, "crlf");
+      if (textToWrite !== content) {
+        log.debug("Write: preserving CRLF on overwrite", {
+          path,
+          lfBytes: content.length,
+          crlfBytes: textToWrite.length,
+        });
+      }
+    }
+  }
+
   try {
     if (inside) {
-      log.debug("Write: writing via ACP", { path, bytes: content.length });
-      await ctx.conn.writeTextFile({ sessionId: ctx.sessionId, path, content });
+      log.debug("Write: writing via ACP", {
+        path,
+        bytes: textToWrite.length,
+      });
+      await ctx.conn.writeTextFile({
+        sessionId: ctx.sessionId,
+        path,
+        content: textToWrite,
+      });
       log.debug("Write: ACP write succeeded", { path });
     } else {
       log.warn("tool: Write: writing OUTSIDE workspace", { path });
       log.debug("Write: writing via direct fs", {
         path,
-        bytes: content.length,
+        bytes: textToWrite.length,
       });
-      await writeFileDirect(path, content);
+      await writeFileDirect(path, textToWrite);
       log.debug("Write: direct fs write succeeded", { path });
     }
   } catch (e) {
@@ -155,18 +184,20 @@ async function execute(
     );
   }
 
-  // 写成功后缓存即等于磁盘内容，并标记已读
+  // 缓存与 Edit 同策略：存 LF 版（content），与 ACP 读回的归一化形式对齐，
+  // 避免下次 Edit 用 LF old_string 匹配 CRLF 缓存而失配。
+  // 我们准确知道磁盘上是 textToWrite，但缓存模拟"编辑器视角"的 LF。
   ctx.state.cache.set(path, content);
   ctx.state.readPaths.add(path);
   log.debug("Write: completed", {
     path,
-    bytes: content.length,
+    bytes: textToWrite.length,
     fileExisted,
     outsideWorkspace: !inside,
   });
 
   return {
-    resultText: `${advisory}wrote ${content.length} bytes to ${rel}`,
+    resultText: `${advisory}wrote ${textToWrite.length} bytes to ${rel}`,
     acpContent: [
       {
         type: "diff",

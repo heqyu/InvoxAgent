@@ -125,3 +125,52 @@ export async function fileExists(path: string): Promise<boolean> {
     return false;
   }
 }
+
+/** 文件行尾风格。`null` 表示文件不存在或不含任何换行。 */
+export type EolStyle = "lf" | "crlf" | "mixed";
+
+/**
+ * 直接读磁盘原始字节，统计 \r\n（CRLF）与孤立 \n（LF）的出现次数，
+ * 据此判断文件主导的行尾风格。
+ *
+ * 必须绕过任何 ACP / 缓存通道：编辑器（如 Zed）在 readTextFile 时通常会
+ * 把缓冲区行尾归一化成 LF，缓存里看到的内容已经丢失原始 EOL 信息，
+ * 唯一可靠来源是磁盘原始 bytes。
+ *
+ * 返回值：
+ *   - "crlf"：只出现 CRLF
+ *   - "lf"  ：只出现孤立 LF
+ *   - "mixed"：两者都有（少见，通常是手工拼接产物）
+ *   - null  ：文件不存在 / 不含任何换行
+ */
+export async function detectFileEol(path: string): Promise<EolStyle | null> {
+  try {
+    const buf = await readFile(path);
+    let crlf = 0;
+    let lonelyLf = 0;
+    for (let i = 0; i < buf.length; i++) {
+      if (buf[i] === 0x0a) {
+        if (i > 0 && buf[i - 1] === 0x0d) crlf++;
+        else lonelyLf++;
+      }
+    }
+    if (crlf === 0 && lonelyLf === 0) return null;
+    if (crlf > 0 && lonelyLf === 0) return "crlf";
+    if (lonelyLf > 0 && crlf === 0) return "lf";
+    return "mixed";
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 把任意行尾混合的文本规范化为目标 EOL 风格。
+ *
+ * 实现：先把所有 \r\n 收敛成 \n（拿到一份纯 LF 视图），再按需要转回。
+ * 这样无论传入文本是纯 LF、纯 CRLF 还是混合，结果都干净一致；对纯 LF 输入
+ * 转 LF、纯 CRLF 输入转 CRLF 都是幂等的，不会产生 \r\r\n 这种坏结果。
+ */
+export function toEol(text: string, eol: "lf" | "crlf"): string {
+  const lf = text.replace(/\r\n/g, "\n");
+  return eol === "crlf" ? lf.replace(/\n/g, "\r\n") : lf;
+}

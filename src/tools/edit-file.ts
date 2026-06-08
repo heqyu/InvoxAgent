@@ -11,6 +11,8 @@ import {
   readFileWithCache,
   writeFileDirect,
   resolveToolPath,
+  detectFileEol,
+  toEol,
 } from "./fs-utils.js";
 import {
   errorResult,
@@ -183,22 +185,39 @@ async function execute(
   }
 
   // 写回（工作区内走 ACP，工作区外走直接 fs）
+  //
+  // 行尾保护：探测磁盘原始 EOL，避免把 CRLF 文件整体写成 LF。
+  // 之所以必须看磁盘字节而不是 currentText：
+  //   - 工作区内 ACP readTextFile 通常已经把行尾归一化成 LF，
+  //     currentText 不再保留磁盘原貌；
+  //   - new_string 来自 LLM，几乎必然是 LF。
+  // 如果直接把 LF 的 newText 写回 CRLF 文件，git 会把每一行都判定为变更，
+  // 出现 +N -N 的假 diff，掩盖真实改动。
+  const diskEol = await detectFileEol(path);
+  const textToWrite = diskEol === "crlf" ? toEol(newText, "crlf") : newText;
+  if (diskEol === "crlf" && textToWrite !== newText) {
+    log.debug("Edit: preserving CRLF on write", {
+      path,
+      lfBytes: newText.length,
+      crlfBytes: textToWrite.length,
+    });
+  }
   try {
     if (inside) {
-      log.debug("Edit: writing via ACP", { path, bytes: newText.length });
+      log.debug("Edit: writing via ACP", { path, bytes: textToWrite.length });
       await ctx.conn.writeTextFile({
         sessionId: ctx.sessionId,
         path,
-        content: newText,
+        content: textToWrite,
       });
       log.debug("Edit: ACP write succeeded", { path });
     } else {
       log.warn("tool: Edit: writing OUTSIDE workspace", { path });
       log.debug("Edit: writing via direct fs", {
         path,
-        bytes: newText.length,
+        bytes: textToWrite.length,
       });
-      await writeFileDirect(path, newText);
+      await writeFileDirect(path, textToWrite);
       log.debug("Edit: direct fs write succeeded", { path });
     }
   } catch (e) {
@@ -210,7 +229,9 @@ async function execute(
     );
   }
 
-  // 缓存直接替换为新内容（不走 invalidate —— 我们准确知道磁盘上是什么）
+  // 缓存存 LF 版（newText），与 currentText 的行尾风格保持一致，
+  // 避免下次 Edit 用 LF old_string 来匹配 CRLF 缓存而失配。
+  // 我们对磁盘上是什么完全心里有数：磁盘上是 textToWrite。
   ctx.state.cache.set(path, newText);
   log.debug("Edit: completed", {
     path,
