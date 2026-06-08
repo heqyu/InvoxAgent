@@ -66,6 +66,7 @@ body{font-family:var(--sans);background:var(--bg-0);color:var(--t2);height:100vh
 .info-strip .tag .v{color:var(--t2);}
 .info-strip .tag .v.cyan{color:var(--cyan);}
 .info-strip .tag .v.green{color:var(--green);}
+.info-strip .tag .v.orange{color:var(--orange);}
 .info-strip .dot{width:1px;height:10px;background:var(--border);}
 
 /* ═══ Trace View — Langfuse-style ═══ */
@@ -276,7 +277,30 @@ function renderInfo(d){
   let h=`<span class="tag"><span class="v cyan">${esc(model)}</span></span><span class="dot"></span>`;
   h+=`<span class="tag">msgs <span class="v">${n}</span></span><span class="dot"></span>`;
   h+=`<span class="tag">${created}</span>`;
-  if(u){h+=`<span class="dot"></span><span class="tag">↑<span class="v green">${(u.input||0).toLocaleString()}</span></span><span class="tag">↓<span class="v green">${(u.output||0).toLocaleString()}</span></span><span class="tag">cache <span class="v">${(u.cached||0).toLocaleString()}</span></span>`;}
+  if(u){
+    const input=u.input||0,cached=u.cached||0;
+    const hitRate=input>0?Math.round(cached/input*100):0;
+    h+=`<span class="dot"></span>`;
+    h+=`<span class="tag">↑<span class="v green">${input.toLocaleString()}</span></span>`;
+    h+=`<span class="tag">↓<span class="v green">${(u.output||0).toLocaleString()}</span></span>`;
+    h+=`<span class="tag">cache <span class="v ${hitRate>=80?'green':''}">${cached.toLocaleString()}</span> <span class="v">${hitRate}%</span></span>`;
+    if(u.elapsedMs!=null)h+=`<span class="dot"></span><span class="tag">⏱ <span class="v orange">${fmtDur(u.elapsedMs)}</span></span>`;
+  }
+  // Tool call stats
+  let okCount=0,failCount=0;
+  d?.history?.forEach(m=>{
+    if(m.role==='assistant'&&m.tool_calls){
+      m.tool_calls.forEach(tc=>{
+        if(tc.ok!==undefined){tc.ok?okCount++:failCount++;}
+      });
+    }
+  });
+  if(okCount+failCount>0){
+    h+=`<span class="dot"></span>`;
+    h+=`<span class="tag">tools <span class="v green">${okCount} ok</span>`;
+    if(failCount)h+=` <span class="v" style="color:var(--red)">${failCount} fail</span>`;
+    h+=`</span>`;
+  }
   if(d?.configValues?.agent)h+=`<span class="dot"></span><span class="tag">agent <span class="v">${esc(d.configValues.agent)}</span></span>`;
   el.innerHTML=h;
 }
