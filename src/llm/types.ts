@@ -35,6 +35,10 @@ export interface ParsedToolCall {
   id: string;
   name: string;
   arguments: string;
+  /** 工具执行结果：成功 or 失败。执行后由 prompt-loop 回填。 */
+  ok?: boolean;
+  /** 工具执行耗时（毫秒）。执行后由 prompt-loop 回填。 */
+  elapsedMs?: number;
 }
 
 export type LLMDelta =
