@@ -92,7 +92,7 @@ export type {
   AgentModelConfig,
   SystemPromptDef,
 } from "./session-types.js";
-export type { AgentTemplate } from "./templates.js";
+export type { AgentTemplate, AgentSource } from "./templates.js";
 import { replayHistory } from "./replay-history.js";
 import { reportTurnUsage } from "./turn-usage-reporter.js";
 import { buildConfigOptions } from "./config-options.js";

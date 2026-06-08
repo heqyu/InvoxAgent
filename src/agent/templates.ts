@@ -53,6 +53,8 @@ import type { ToolSpec } from "../llm/types.js";
  * Memory / Skills 段不写入 prompt 本身 —— 它们由
  * systemMessageWithMemoryAndSkills 在每次 turn 自动追加。
  */
+export type AgentSource = "builtin" | "user" | "project";
+
 export interface AgentTemplate {
   id: string;
   name: string;
@@ -61,6 +63,8 @@ export interface AgentTemplate {
   tools?: string[];
   mcp?: boolean;
   model?: string;
+  /** 来源层级：builtin（内置兜底）、user（~/.invox/agents）、project（项目 .invox/agents）。 */
+  source?: AgentSource;
 }
 
 // ── 内置兜底 ─────────────────────────────────────────────────────────
@@ -230,28 +234,32 @@ const DEFAULT_USER_AGENTS: Array<Omit<AgentTemplate, "id"> & { id: string }> = [
   {
     id: "Ask",
     name: "Ask",
-    description: "纯问答：无任何工具，仅基于对话上下文与既有知识回答。",
+    description: "轻量问答：可用 Read 读文件，但不能编辑、搜索或执行命令。",
     prompt:
       `You are a knowledgeable assistant. You are in ASK MODE.\n` +
-      `You have NO tools available. You answer based on:\n` +
-      `1. The conversation history\n` +
-      `2. Files the user has explicitly attached or quoted in messages\n` +
-      `3. Your training knowledge\n\n` +
+      `You have one tool: Read — it lets you read file contents when\n` +
+      `the user points you at a specific file.\n\n` +
+      `# Workflow\n` +
+      `- If the user references a file or asks about code, use Read to examine it.\n` +
+      `- If the question can be answered from conversation history or attached\n` +
+      `  content alone, just answer — don't read unnecessarily.\n\n` +
       `# Hard constraints\n` +
-      `- If a question requires reading files NOT already in conversation,\n` +
-      `  searching the codebase, or running commands — refuse and reply:\n` +
-      `  "I can't see your codebase in Ask mode. Switch to Plan (read-only\n` +
-      `  investigation) or Worker (read+write). Or paste the relevant snippet."\n` +
-      `- Never speculate about file contents you haven't been shown.\n` +
+      `- Read is your ONLY tool. You cannot edit, search (Glob/Grep),\n` +
+      `  or run commands.\n` +
+      `- If a question requires searching the codebase, running commands,\n` +
+      `  or editing files — refuse and reply:\n` +
+      `  "I can only read specific files in Ask mode. Switch to Plan\n` +
+      `  (read-only investigation) or Worker (read+write)."\n` +
+      `- Never speculate about file contents you haven't read or been shown.\n` +
       `- Never write a one-shot answer longer than ~30 lines of code; for\n` +
       `  larger changes, recommend Worker mode.\n\n` +
       `# Communication\n` +
       `- Concise. Lead with the answer, then justification.\n` +
       `- Match the user's language.\n` +
       `- Use code fences for code only, never for prose.`,
-    tools: [],
+    tools: ["Read"],
     mcp: false,
-    // Ask 不设 model：无工具的纯问答，质量取决于用户当前选用的 model；
+    // Ask 不设 model：轻量问答，质量取决于用户当前选用的 model；
     // 让用户在 model 下拉里自由选择，agent 不强加偏好。
   },
   {
@@ -334,6 +342,23 @@ const DEFAULT_USER_AGENTS: Array<Omit<AgentTemplate, "id"> & { id: string }> = [
  * 用户已经手动改过 model 字段（甚至改成 null / "$MY_VAR"）就保留，
  * 不会被反复覆盖。
  */
+function isLegacyDefaultAskNoRead(
+  tpl: Omit<AgentTemplate, "id"> & { id: string },
+  parsed: Record<string, unknown>,
+): boolean {
+  if (tpl.id !== "Ask" || !tpl.tools?.includes("Read")) return false;
+  const tools = parsed["tools"];
+  // 已包含 Read → 非旧版，跳过
+  if (Array.isArray(tools) && tools.includes("Read")) return false;
+
+  const prompt = String(parsed["prompt"] ?? "");
+  // 匹配两种旧版 seed prompt 格式：
+  //   v1: "You are in ASK MODE.\nYou have NO tools available..."
+  //   v2: "You have NO tools available.\nAnswer questions..."
+  // 只要 prompt 明确说"没有工具"且 tools 确实为空 → 视为需要升级
+  return prompt.includes("NO tools available");
+}
+
 function isLegacyDefaultPlanMissingMakePlan(
   tpl: Omit<AgentTemplate, "id"> & { id: string },
   parsed: Record<string, unknown>,
@@ -374,6 +399,7 @@ function seedDefaultAgents(): void {
       | "create"
       | "upgrade-no-model"
       | "upgrade-plan-makeplan"
+      | "upgrade-ask-read"
       | "repair-broken" = "create";
     if (existsSync(filePath)) {
       try {
@@ -387,6 +413,10 @@ function seedDefaultAgents(): void {
           // （Ask 模板没 model 字段，遇到旧版也不强行写入）
           if (!hasModelKey && tpl.model) {
             action = "upgrade-no-model";
+          } else if (
+            isLegacyDefaultAskNoRead(tpl, parsed as Record<string, unknown>)
+          ) {
+            action = "upgrade-ask-read";
           } else if (
             isLegacyDefaultPlanMissingMakePlan(
               tpl,
@@ -573,21 +603,21 @@ export function loadAgentTemplates(cwd: string): AgentTemplate[] {
   for (const a of projectAgents) {
     if (!seen.has(a.id)) {
       seen.add(a.id);
-      out.push(a);
+      out.push({ ...a, source: "project" });
     }
   }
   // 用户级补漏
   for (const a of userAgents) {
     if (!seen.has(a.id)) {
       seen.add(a.id);
-      out.push(a);
+      out.push({ ...a, source: "user" });
     }
   }
   // 内置兜底
   for (const a of BUILTIN_AGENTS) {
     if (!seen.has(a.id)) {
       seen.add(a.id);
-      out.push(a);
+      out.push({ ...a, source: "builtin" });
     }
   }
 

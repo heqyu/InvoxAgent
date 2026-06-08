@@ -78,7 +78,7 @@ export function buildConfigOptions(
         currentValue: currentAgentId,
         options: configs.agents.map((a) => ({
           value: a.id,
-          name: a.name,
+          name: a.source ? `${a.name} [${a.source}]` : a.name,
           ...(a.description ? { description: a.description } : {}),
         })),
       });

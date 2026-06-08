@@ -116,11 +116,11 @@ describe("loadAgentTemplates", () => {
       }
     });
 
-    it("seed 后的 Ask 模板禁用全部工具且禁用 MCP", () => {
+    it("seed 后的 Ask 模板仅开放 Read 且禁用 MCP", () => {
       const r = loadAgentTemplates(env.cwd);
       const ask = r.find((a) => a.id === "Ask");
       expect(ask).toBeDefined();
-      expect(ask?.tools).toEqual([]);
+      expect(ask?.tools).toEqual(["Read"]);
       expect(ask?.mcp).toBe(false);
     });
 
@@ -187,6 +187,37 @@ describe("loadAgentTemplates", () => {
       // 用户自定义保留（DEFAULT.Ask 没 model 字段，所以不触发升级）
       expect(ask?.name).toBe("我的 Ask");
       expect(ask?.prompt).toBe("user custom ask");
+    });
+
+    it("旧版默认 Ask.json（prompt 含 NO tools available）会自动升级补 Read 工具", () => {
+      writeAgent(env.home, "Ask", {
+        name: "Ask",
+        prompt:
+          "You are a knowledgeable assistant. You are in ASK MODE.\n" +
+          "You have NO tools available. You answer based on:\n" +
+          "1. The conversation history",
+        tools: [],
+        mcp: false,
+      });
+      const r = loadAgentTemplates(env.cwd);
+      const ask = r.find((a) => a.id === "Ask");
+      expect(ask?.tools).toEqual(["Read"]);
+      expect(ask?.prompt).toContain("Read is your ONLY tool");
+    });
+
+    it("旧版 Ask.json v2 格式（无 ASK MODE 关键字）也会自动升级", () => {
+      writeAgent(env.home, "Ask", {
+        name: "Ask",
+        prompt:
+          "You are a knowledgeable assistant. You have NO tools available.\n" +
+          "Answer questions based purely on the conversation context.",
+        tools: [],
+        mcp: false,
+      });
+      const r = loadAgentTemplates(env.cwd);
+      const ask = r.find((a) => a.id === "Ask");
+      expect(ask?.tools).toEqual(["Read"]);
+      expect(ask?.prompt).toContain("Read is your ONLY tool");
     });
 
     it("损坏的 JSON 文件会被修复覆盖", () => {
