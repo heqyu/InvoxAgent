@@ -314,9 +314,8 @@ function renderTrace(d){
 }
 
 function buildTree(hist){
-  // Walk history and create structured nodes
-  // Each node: {type:'user'|'system'|'assistant-group'|'tool-result', ...}
   const nodes=[];
+  const consumed=new Set();
   let i=0;
   while(i<hist.length){
     const msg=hist[i];
@@ -327,20 +326,18 @@ function buildTree(hist){
       nodes.push({type:'user',msg,idx:i});
       i++;
     } else if(msg.role==='assistant'){
-      // Collect this assistant message + all following tool_calls + tool results
       const group={type:'assistant-group',msg,idx:i,children:[]};
-      // Find tool_calls in this assistant message
       if(msg.tool_calls?.length){
         for(const tc of msg.tool_calls){
           const tcNode={type:'tool-call',tc,msg,idx:i};
-          // Find matching tool result
-          const resultMsg=hist.find(m=>m.role==='tool'&&m.tool_call_id===tc.id);
-          if(resultMsg){
-            const rIdx=hist.indexOf(resultMsg);
+          const rIdx=hist.findIndex(m=>m.role==='tool'&&m.tool_call_id===tc.id);
+          if(rIdx>=0){
+            const resultMsg=hist[rIdx];
             tcNode.result=resultMsg;
             tcNode.resultIdx=rIdx;
-            // Check for errors
-            tcNode.isError=resultMsg.content?.startsWith('Error')||resultMsg.content?.includes('error')||resultMsg.content?.includes('failed');
+            const rc=contentText(resultMsg.content);
+            tcNode.isError=rc.startsWith('Error')||rc.includes('error')||rc.includes('failed');
+            consumed.add(rIdx);
           }
           group.children.push(tcNode);
         }
@@ -348,8 +345,9 @@ function buildTree(hist){
       nodes.push(group);
       i++;
     } else if(msg.role==='tool'){
-      // Orphan tool result (shouldn't happen in well-formed data, but handle it)
-      nodes.push({type:'tool-result',msg,idx:i});
+      if(!consumed.has(i)){
+        nodes.push({type:'tool-result',msg,idx:i});
+      }
       i++;
     } else {
       i++;
@@ -365,8 +363,8 @@ function renderNode(node,idx,total){
     return renderCompactNode({
       icon:'S',iconClass:'system',
       name:'System prompt',
-      preview:node.msg.content?.slice(0,80),
-      expandContent:node.msg.content,
+      preview:contentText(node.msg.content).slice(0,80),
+      expandContent:contentText(node.msg.content),
       idx:node.idx,
       expandable:true,
       collapsed:true
@@ -377,8 +375,8 @@ function renderNode(node,idx,total){
     return renderCompactNode({
       icon:'U',iconClass:'user',
       name:'user-prompt',
-      preview:node.msg.content?.slice(0,80),
-      expandContent:node.msg.content,
+      preview:contentText(node.msg.content).slice(0,80),
+      expandContent:contentText(node.msg.content),
       idx:node.idx,
       expandable:true,
       collapsed:true
@@ -388,17 +386,18 @@ function renderNode(node,idx,total){
   if(node.type==='assistant-group'){
     const msg=node.msg;
     const hasChildren=node.children.length>0;
-    const preview=msg.content?.slice(0,80)||null;
+    const msgText=contentText(msg.content);
+    const preview=msgText.slice(0,80)||null;
 
     let html='';
 
     // If assistant has content but no tool calls, show as single node
-    if(!hasChildren && msg.content){
+    if(!hasChildren && msgText){
       html+=renderCompactNode({
         icon:'A',iconClass:'assistant',
         name:'assistant-response',
-        preview:msg.content?.slice(0,100),
-        expandContent:msg.content,
+        preview:msgText.slice(0,100),
+        expandContent:msgText,
         idx:node.idx,
         expandable:true,
         collapsed:true
@@ -423,12 +422,12 @@ function renderNode(node,idx,total){
         html+=renderToolCall(child,isLastChild);
       });
       // If assistant also has content (response after tool calls), show it
-      if(msg.content){
+      if(msgText){
         html+=renderCompactNode({
           icon:'A',iconClass:'assistant',
           name:'assistant-response',
-          preview:msg.content?.slice(0,100),
-          expandContent:msg.content,
+          preview:msgText.slice(0,100),
+          expandContent:msgText,
           idx:node.idx,
           expandable:true,
           collapsed:true
@@ -441,15 +440,16 @@ function renderNode(node,idx,total){
   }
 
   if(node.type==='tool-result'){
+    const tc=contentText(node.msg.content);
     return renderCompactNode({
       icon:'T',iconClass:'tool',
       name:node.msg.name||'tool-result',
-      preview:node.msg.content?.slice(0,60),
-      expandContent:node.msg.content,
+      preview:tc.slice(0,60),
+      expandContent:tc,
       idx:node.idx,
       expandable:true,
       collapsed:true,
-      badge:node.msg.content?.startsWith('Error')?{text:'ERROR',cls:'error'}:null
+      badge:tc.startsWith('Error')?{text:'ERROR',cls:'error'}:null
     },isLast);
   }
 
@@ -467,7 +467,7 @@ function renderToolCall(child,isLast){
     <span class="tn-name"><span class="prefix">tool:</span>${esc(tc.name)}</span>
     ${isError?'<span class="tn-badge error">ERROR</span>':hasResult?'<span class="tn-badge ok">OK</span>':''}
     <span class="tn-spacer"></span>
-    ${hasResult?`<span class="tn-preview">${esc((child.result.content||'').slice(0,50))}</span>`:''}
+    ${hasResult?`<span class="tn-preview">${esc(contentText(child.result.content).slice(0,50))}</span>`:''}
   </div></div>`;
 
   // Detail panel (collapsed by default)
@@ -483,7 +483,7 @@ function renderToolCall(child,isLast){
       </div>
       ${hasResult?`<div class="tn-detail-section">
         <div class="tn-detail-label">Result</div>
-        <div class="tn-detail-content">${esc(child.result.content||'')}</div>
+        <div class="tn-detail-content">${esc(contentText(child.result.content))}</div>
       </div>`:''}
     </div>
   </div>`;
@@ -557,17 +557,18 @@ function renderChat(d){
   el.innerHTML=hist.map(msg=>{
     const r=msg.role;
     if(r==='tool'){
-      let c=msg.content||'';if(msg.name)c=`[${msg.name}] `+c;
+      let c=contentText(msg.content);if(msg.name)c=`[${msg.name}] `+c;
       return`<div class="ch tool"><div class="ch-av">T</div><div class="ch-bub" onclick="this.classList.toggle('expanded')">${esc(c)}</div></div>`;
     }
-    if(r==='system')return`<div class="ch system"><div class="ch-bub" onclick="this.classList.toggle('expanded')">${renderMd(msg.content||'')}</div></div>`;
+    if(r==='system')return`<div class="ch system"><div class="ch-bub" onclick="this.classList.toggle('expanded')">${renderMd(contentText(msg.content))}</div></div>`;
     if(r==='assistant'){
       let inner='';
-      if(msg.content)inner+=`<div>${renderMd(msg.content)}</div>`;
+      const aText=contentText(msg.content);
+      if(aText)inner+=`<div>${renderMd(aText)}</div>`;
       if(msg.tool_calls?.length)inner+=msg.tool_calls.map(tc=>`<div style="margin-top:6px;padding:6px 8px;background:var(--bg-1);border:1px solid var(--border);border-radius:4px;font-family:var(--mono);font-size:10px;"><div style="color:var(--purple);font-weight:600;margin-bottom:3px;">⚡ ${esc(tc.name)}</div><pre style="color:var(--t4);white-space:pre-wrap;word-break:break-all;margin:0;max-height:80px;overflow:auto;">${esc(formatArgs(tc.arguments))}</pre></div>`).join('');
       return`<div class="ch assistant"><div class="ch-av">A</div><div class="ch-bub">${inner}</div></div>`;
     }
-    if(r==='user')return`<div class="ch user"><div class="ch-av">U</div><div class="ch-bub">${renderMd(msg.content||'')}</div></div>`;
+    if(r==='user')return`<div class="ch user"><div class="ch-av">U</div><div class="ch-bub">${renderMd(contentText(msg.content))}</div></div>`;
     return'';
   }).join('');
   el.scrollTop=el.scrollHeight;
@@ -577,6 +578,7 @@ function renderChat(d){
 //  Markdown
 // ══════════════════════════════════════════════
 function renderMd(text){
+  text=contentText(text);
   if(!text)return'';
   const cbs=[],ics=[];
   let s=text.replace(/```(\w*)\n([\s\S]*?)```/g,(_,l,c)=>{const i=cbs.length;cbs.push(esc(c));return`\x00CB${i}\x00`;});
@@ -597,6 +599,7 @@ function renderMd(text){
 
 function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML;}
 function fmtDate(ts){return new Date(ts).toLocaleString('zh-CN',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});}
+function contentText(c){if(typeof c==='string')return c;if(Array.isArray(c))return c.filter(p=>p.type==='text').map(p=>p.text||'').join('\n');if(c&&typeof c==='object')return c.text||'';return'';}
 </script>
 </body>
 </html>
