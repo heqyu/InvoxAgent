@@ -6,7 +6,6 @@
 // **铁律**：本文件绝不写 stdout —— stdio transport 把 stdout 专用于 JSON-RPC 帧。
 
 import { AgentSideConnection } from "@agentclientprotocol/sdk";
-import type { ModelInfo } from "@agentclientprotocol/sdk";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -18,6 +17,7 @@ import {
   type AgentTemplate,
   type SystemPromptDef,
 } from "./agent/agent.js";
+import type { ModelInfo } from "./agent/session-types.js";
 import {
   loadAgentTemplates,
   readEnvModelLite,

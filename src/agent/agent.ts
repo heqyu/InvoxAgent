@@ -37,8 +37,6 @@ import {
   type PromptResponse,
   type SetSessionConfigOptionRequest,
   type SetSessionConfigOptionResponse,
-  type SetSessionModelRequest,
-  type SetSessionModelResponse,
 } from "@agentclientprotocol/sdk";
 import { createLogger, formatTimestamp, openSessionLogFile, preview } from "../log.js";
 const log = createLogger("agent");
@@ -97,7 +95,7 @@ export type {
 export type { AgentTemplate } from "./templates.js";
 import { replayHistory } from "./replay-history.js";
 import { reportTurnUsage } from "./turn-usage-reporter.js";
-import { buildConfigOptions, buildModelState } from "./config-options.js";
+import { buildConfigOptions } from "./config-options.js";
 import { initMcpForSession, releaseSessionMcp } from "./mcp-lifecycle.js";
 import {
   runOneIteration as runIteration,
@@ -305,7 +303,6 @@ export class InvoxAgent implements Agent {
 
     return {
       sessionId: id,
-      models: buildModelState(session, this.models),
       configOptions: buildConfigOptions(session, this.models, this.configs),
     };
   }
@@ -449,7 +446,6 @@ export class InvoxAgent implements Agent {
     }
 
     return {
-      models: buildModelState(session, this.models),
       configOptions: buildConfigOptions(session, this.models, this.configs),
     };
   }
@@ -503,31 +499,6 @@ export class InvoxAgent implements Agent {
         }
       }
     }
-    return {};
-  }
-
-  /**
-   * 处理 ACP `session/set_model`。在 SDK 0.23 中改名为 `unstable_setSessionModel`
-   * （wire 上的 method 名没变，仅 JS 处理器加 `unstable_` 前缀，因为 spec
-   * 仍把该能力放在 `unstable_session_model` 后面）。
-   */
-  async unstable_setSessionModel(
-    params: SetSessionModelRequest,
-  ): Promise<SetSessionModelResponse> {
-    const session = this.sessions.get(params.sessionId);
-    if (!session) throw new Error(`unknown sessionId: ${params.sessionId}`);
-    if (!this.availableModelIds.has(params.modelId)) {
-      throw new Error(
-        `unknown modelId: ${params.modelId} (available: ${[...this.availableModelIds].join(", ")})`,
-      );
-    }
-    session.selectedModel = params.modelId;
-    log.info("setSessionModel", {
-      sessionId: session.id,
-      modelId: params.modelId,
-    });
-    // 立即落盘，避免 next prompt() 之前崩溃丢失用户选择
-    this.persist(session);
     return {};
   }
 
@@ -920,7 +891,7 @@ export class InvoxAgent implements Agent {
    *   - agent.model 未设 → 不动 selectedModel，让用户原本的选择保留
    *   - agent.model = "$MODEL_PRO" / "$MODEL_LITE" / 具体 id → 解析后写入
    *   - 解析后的 id 不在 availableModelIds 里 → 动态加入（让 ACP model 下拉
-   *     也能展示新 id；防御性地避免 `unstable_setSessionModel` 路径被拒）
+   *     也能展示新 id；防御性地避免 setSessionConfigOption("model") 路径被拒）
    *   - 解析后与原 selectedModel 相同 → 不更新（避免无效 log 噪音）
    *
    * 永不抛错：env 未设时 resolveAgentModel 内部 warn + 回退 fallback；
@@ -1071,7 +1042,6 @@ export class InvoxAgent implements Agent {
    * turn 结束时的 usage 上报（双通道 + lastTurnUsage 写入）见
    * ./turn-usage-reporter.ts 的 reportTurnUsage。
    *
-   * SessionModelState / SessionConfigOption[] 构造见 ./config-options.ts 的
-   * buildModelState / buildConfigOptions。
+   * SessionConfigOption[] 构造见 ./config-options.ts 的 buildConfigOptions。
    */
 }

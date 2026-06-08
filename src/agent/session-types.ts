@@ -8,7 +8,6 @@
 //
 // 接口语义在搬家前后完全一致；任何字段变更应同步更新 PLAN.md §1。
 
-import type { ModelInfo } from "@agentclientprotocol/sdk";
 import type { LLMMessage } from "../llm/types.js";
 import type { McpClientManager } from "../mcp/client.js";
 import type { SessionStore } from "../persistence.js";
@@ -32,7 +31,7 @@ export interface Session {
   store?: SessionStore;
   createdAt: number;
   /**
-   * 通过 unstable_setSessionModel 选定的 model id。
+   * 通过 setSessionConfigOption(configId="model") 选定的 model id。
    * undefined 时回退到 agent 默认 model（availableModels[0]，源自 INVOX_MODEL）。
    */
   selectedModel?: string;
@@ -94,6 +93,20 @@ export interface PersistedTurnUsage {
   cached: number;
   elapsedMs: number;
   model: string;
+}
+
+/**
+ * model 列表条目的本地形状。
+ *
+ * 历史：SDK ≤ 0.22 导出过 `ModelInfo`，专供 NewSessionResponse.models 字段使用。
+ * SDK 0.23 起把 model 选择折叠进了通用的 SessionConfigOption(category:"model")，
+ * 顶层 ModelInfo 类型被删除。我们沿用相同字段名（modelId/name/description），
+ * 上层 buildConfigOptions 把它转成 SessionConfigSelectOption。
+ */
+export interface ModelInfo {
+  modelId: string;
+  name?: string;
+  description?: string;
 }
 
 /** 构造 InvoxAgent 时注入的 model 菜单配置。第一项是默认 model。 */
