@@ -336,7 +336,7 @@ function buildTree(hist){
             tcNode.result=resultMsg;
             tcNode.resultIdx=rIdx;
             const rc=contentText(resultMsg.content);
-            tcNode.isError=isToolError(tc.name,rc);
+            tcNode.isError=tc.ok!==undefined?!tc.ok:isToolError(tc.name,rc);
             consumed.add(rIdx);
           }
           group.children.push(tcNode);
@@ -459,13 +459,17 @@ function renderNode(node,idx,total){
 function renderToolCall(child,isLast){
   const tc=child.tc;
   const hasResult=!!child.result;
-  const isError=child.isError;
+  // Prefer tc.ok if present, fallback to content heuristic
+  const isError=tc.ok!==undefined?!tc.ok:child.isError;
+  // Prefer tc.elapsedMs if present
+  const dur=tc.elapsedMs!=null?fmtDur(tc.elapsedMs):null;
 
   let html=`<div class="tn"><div class="tn-line"></div><div class="tn-row">
     <div class="tn-expand" onclick="toggleDetail(this)">▶</div>
     <div class="tn-icon tool">T</div>
     <span class="tn-name"><span class="prefix">tool:</span>${esc(tc.name)}</span>
     ${isError?'<span class="tn-badge error">ERROR</span>':hasResult?'<span class="tn-badge ok">OK</span>':''}
+    ${dur?`<span class="tn-dur">${dur}</span>`:''}
     <span class="tn-spacer"></span>
     ${hasResult?`<span class="tn-preview">${esc(contentText(child.result.content).slice(0,50))}</span>`:''}
   </div></div>`;
@@ -599,6 +603,7 @@ function renderMd(text){
 
 function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML;}
 function fmtDate(ts){return new Date(ts).toLocaleString('zh-CN',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});}
+function fmtDur(ms){if(ms>=1000)return(ms/1000).toFixed(ms>=10000?0:1)+'s';return ms+'ms';}
 function contentText(c){if(typeof c==='string')return c;if(Array.isArray(c))return c.filter(p=>p.type==='text').map(p=>p.text||'').join('\n');if(c&&typeof c==='object')return c.text||'';return'';}
 function isToolError(name,content){
   if(!content)return false;
