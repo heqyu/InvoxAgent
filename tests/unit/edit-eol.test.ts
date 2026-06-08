@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   detectFileEol,
+  detectEolInfo,
   toEol,
 } from "../../src/tools/fs-utils.js";
 import { editFileTool } from "../../src/tools/edit-file.js";
@@ -62,6 +63,42 @@ describe("detectFileEol", () => {
     expect(await detectFileEol(join(tmpdir(), "definitely-missing-XYZ"))).toBe(
       null,
     );
+  });
+});
+
+describe("detectEolInfo (含主导风格)", () => {
+  it("CRLF 主导：mixed 文件中 CRLF 多 → dominant=crlf", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "invox-eol-"));
+    const p = join(dir, "f.txt");
+    // 5 行 CRLF + 1 行 LF
+    writeFileSync(p, "a\r\nb\r\nc\r\nd\r\ne\nf\r\n");
+    const info = await detectEolInfo(p);
+    expect(info).not.toBeNull();
+    expect(info!.style).toBe("mixed");
+    expect(info!.dominant).toBe("crlf");
+    expect(info!.crlfCount).toBe(5);
+    expect(info!.lfCount).toBe(1);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("LF 主导：mixed 文件中 LF 多 → dominant=lf", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "invox-eol-"));
+    const p = join(dir, "f.txt");
+    writeFileSync(p, "a\nb\nc\r\nd\ne\n");
+    const info = await detectEolInfo(p);
+    expect(info!.style).toBe("mixed");
+    expect(info!.dominant).toBe("lf");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("平手时偏向 CRLF（Windows 场景下 mixed 几乎都是 CRLF 受损）", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "invox-eol-"));
+    const p = join(dir, "f.txt");
+    writeFileSync(p, "a\r\nb\n");
+    const info = await detectEolInfo(p);
+    expect(info!.crlfCount).toBe(info!.lfCount);
+    expect(info!.dominant).toBe("crlf");
+    rmSync(dir, { recursive: true, force: true });
   });
 });
 
@@ -191,6 +228,101 @@ describe("editFileTool: CRLF 保留", () => {
     expect(onDisk).toBe("a\r\nB1\r\nB2\r\nc\r\n");
     // 全文不存在不带 \r 的孤立 \n
     expect(/[^\r]\n/.test(onDisk)).toBe(false);
+
+    rmSync(target, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
+  });
+
+  it("mixed 文件（CRLF 主导）被 Edit 后整文件归一化为 CRLF", async () => {
+    // 这是最关键的回归用例：
+    // 现实场景里，文件之前可能因为旧版 Edit/Write 的 bug 已经被弄成 mixed
+    // —— 例如 200 行 CRLF + 中间 6 行 LF。本次 Edit 必须把整文件复原为
+    // CRLF，否则 git diff 仍会显示那些"残留 LF 行"为变更。
+    const target = mkdtempSync(join(tmpdir(), "invox-edit-target-"));
+    const cwd = mkdtempSync(join(tmpdir(), "invox-edit-cwd-"));
+    const filePath = join(target, "scarred.txt");
+
+    // 大部分 CRLF + 中间几行孤立 LF（模拟旧 bug 留下的伤疤）
+    writeFileSync(
+      filePath,
+      "h1\r\nh2\r\nh3\r\nbroken1\nbroken2\nbroken3\nt1\r\nt2\r\n",
+    );
+    const before = await detectEolInfo(filePath);
+    expect(before!.style).toBe("mixed");
+    expect(before!.dominant).toBe("crlf");
+
+    const ctx = makeCtx(cwd);
+    const res = await editFileTool.execute(
+      {
+        path: filePath,
+        old_string: "h2",
+        new_string: "H2",
+      },
+      ctx,
+    );
+
+    expect(res.ok).toBe(true);
+    const onDisk = readFileSync(filePath, "utf-8");
+    // 全文 CRLF：包括原来"受损"的 broken1/2/3 行
+    expect(onDisk).toBe(
+      "h1\r\nH2\r\nh3\r\nbroken1\r\nbroken2\r\nbroken3\r\nt1\r\nt2\r\n",
+    );
+    expect(/[^\r]\n/.test(onDisk)).toBe(false);
+    expect((await detectEolInfo(filePath))!.style).toBe("crlf");
+
+    rmSync(target, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
+  });
+
+  it("以磁盘原文为基底：cache 被污染（如 buffer 被 autoformat）也不影响 git diff", async () => {
+    // 模拟真实事故：编辑器（Zed）的 ACP buffer 被 lua autoformatter 修改，
+    // 通过 readFileWithCache 读到的是被污染版（end 顶到行首、tab→spaces）；
+    // 但磁盘原文是干净的。Edit 必须以磁盘为替换基底，确保未触碰的行
+    // 字节级保持原样。
+    const target = mkdtempSync(join(tmpdir(), "invox-edit-target-"));
+    const cwd = mkdtempSync(join(tmpdir(), "invox-edit-cwd-"));
+    const filePath = join(target, "lua.lua");
+
+    // 磁盘原文：lua 风格，end 有 4 空格缩进，行末有 trailing spaces
+    const onDiskOriginal =
+      "function foo()\r\n" +
+      "    if x then   \r\n" + // trailing whitespace（Zed 容易剥）
+      "        bar()\r\n" +
+      "    end\r\n" + // 4 空格缩进
+      "end\r\n";
+    writeFileSync(filePath, onDiskOriginal);
+
+    const ctx = makeCtx(cwd);
+    // 主动往 cache 里塞一份「被 autoformat 污染过」的版本：
+    //   - end 顶到行首
+    //   - trailing whitespace 被剥
+    //   - 行尾归一化为 LF
+    const polluted =
+      "function foo()\n" +
+      "    if x then\n" + // 没了 trailing spaces
+      "        bar()\n" +
+      "end\n" + // end 缩进被吞掉
+      "end\n";
+    ctx.state.cache.set(filePath, polluted);
+    ctx.state.readPaths.add(filePath);
+
+    // LLM 想把 bar() 改成 baz()
+    const res = await editFileTool.execute(
+      {
+        path: filePath,
+        old_string: "bar()",
+        new_string: "baz()",
+      },
+      ctx,
+    );
+
+    expect(res.ok).toBe(true);
+
+    // 关键断言：磁盘上除了 bar→baz 这一处，其他每一个字节都和原文相同。
+    // 即 trailing spaces / end 缩进 / CRLF 全部保留，git diff 应只显示 1 行。
+    const onDisk = readFileSync(filePath, "utf-8");
+    const expected = onDiskOriginal.replace("bar()", "baz()");
+    expect(onDisk).toBe(expected);
 
     rmSync(target, { recursive: true, force: true });
     rmSync(cwd, { recursive: true, force: true });

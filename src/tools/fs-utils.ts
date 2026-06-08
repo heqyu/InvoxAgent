@@ -129,38 +129,59 @@ export async function fileExists(path: string): Promise<boolean> {
 /** 文件行尾风格。`null` 表示文件不存在或不含任何换行。 */
 export type EolStyle = "lf" | "crlf" | "mixed";
 
+export interface EolInfo {
+  /** 主导/唯一风格；mixed 时按多数派归类。 */
+  dominant: "lf" | "crlf";
+  /** 详细分类（含 mixed）。 */
+  style: EolStyle;
+  crlfCount: number;
+  lfCount: number;
+}
+
 /**
- * 直接读磁盘原始字节，统计 \r\n（CRLF）与孤立 \n（LF）的出现次数，
- * 据此判断文件主导的行尾风格。
+ * 直接读磁盘原始字节，统计 \r\n（CRLF）与孤立 \n（LF）的出现次数。
  *
  * 必须绕过任何 ACP / 缓存通道：编辑器（如 Zed）在 readTextFile 时通常会
  * 把缓冲区行尾归一化成 LF，缓存里看到的内容已经丢失原始 EOL 信息，
  * 唯一可靠来源是磁盘原始 bytes。
  *
- * 返回值：
- *   - "crlf"：只出现 CRLF
- *   - "lf"  ：只出现孤立 LF
- *   - "mixed"：两者都有（少见，通常是手工拼接产物）
- *   - null  ：文件不存在 / 不含任何换行
+ * 返回 null：文件不存在 / 不含任何换行（无法判定）。
+ *
+ * mixed 文件如何处理由调用方决定 —— 但通常应当按 `dominant` 归一化：
+ * 实际项目里 mixed 几乎全是「CRLF 文件被某个工具错误地局部改成了 LF」
+ * 留下的伤疤，按多数派复原是恢复 git diff 干净的最直接办法。
  */
-export async function detectFileEol(path: string): Promise<EolStyle | null> {
+export async function detectEolInfo(path: string): Promise<EolInfo | null> {
+  let buf: Buffer;
   try {
-    const buf = await readFile(path);
-    let crlf = 0;
-    let lonelyLf = 0;
-    for (let i = 0; i < buf.length; i++) {
-      if (buf[i] === 0x0a) {
-        if (i > 0 && buf[i - 1] === 0x0d) crlf++;
-        else lonelyLf++;
-      }
-    }
-    if (crlf === 0 && lonelyLf === 0) return null;
-    if (crlf > 0 && lonelyLf === 0) return "crlf";
-    if (lonelyLf > 0 && crlf === 0) return "lf";
-    return "mixed";
+    buf = await readFile(path);
   } catch {
     return null;
   }
+  let crlf = 0;
+  let lonelyLf = 0;
+  for (let i = 0; i < buf.length; i++) {
+    if (buf[i] === 0x0a) {
+      if (i > 0 && buf[i - 1] === 0x0d) crlf++;
+      else lonelyLf++;
+    }
+  }
+  if (crlf === 0 && lonelyLf === 0) return null;
+  let style: EolStyle;
+  if (crlf > 0 && lonelyLf === 0) style = "crlf";
+  else if (lonelyLf > 0 && crlf === 0) style = "lf";
+  else style = "mixed";
+  // 平手时偏向 CRLF：Windows 路径下 mixed 几乎总是「原 CRLF 被破坏」的产物。
+  const dominant: "lf" | "crlf" = crlf >= lonelyLf ? "crlf" : "lf";
+  return { dominant, style, crlfCount: crlf, lfCount: lonelyLf };
+}
+
+/**
+ * 旧 API：仅返回风格分类。新代码请用 `detectEolInfo` 拿主导风格做归一化。
+ */
+export async function detectFileEol(path: string): Promise<EolStyle | null> {
+  const info = await detectEolInfo(path);
+  return info ? info.style : null;
 }
 
 /**

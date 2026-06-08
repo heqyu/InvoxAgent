@@ -1,7 +1,13 @@
-// Write 工具：通过 ACP fs/write_text_file 整体创建或覆盖文件。
+// Write 工具：直接写磁盘整体创建或覆盖文件。
 //
 // 当文件存在但 LLM 还没 Read 过时，给一句"软提示" advisory 提醒 LLM
 // 优先 Read → Edit。写完更新缓存供后续 Read 命中。
+//
+// 关键决策：始终走 Node fs 直写，不调 ACP writeTextFile。
+// 历史事故：ACP writeTextFile 在 Zed 等编辑器实现里会经过 save 管线，
+// 触发 lua/ts/python 等语言服务器的 format-on-save，重排 end 缩进、剥
+// trailing whitespace、tab→spaces、强制末尾换行 …… 整文件被静默篡改，
+// git diff 一片飘红。直接 fs 写盘是唯一能保证字节级原样落盘的路径。
 
 import { createLogger } from "../log.js";
 const log = createLogger("tools");
@@ -11,7 +17,7 @@ import {
   readFileDirect,
   writeFileDirect,
   resolveToolPath,
-  detectFileEol,
+  detectEolInfo,
   toEol,
 } from "./fs-utils.js";
 import {
@@ -63,16 +69,9 @@ async function execute(
     insideWorkspace: inside,
   });
 
-  if (inside && !ctx.caps.fs?.writeTextFile) {
-    log.debug("Write: ACP fs.writeTextFile capability missing", { path });
-    return errorResult(
-      "client does not advertise fs.writeTextFile capability",
-      "edit",
-      `Write: ${rel}`,
-    );
-  }
-
-  // 取旧文本：优先缓存，再走 ACP / 直接 fs，找不到则视为新文件
+  // 取旧文本（仅用于 diff 卡显示 + 判断 fileExisted）：
+  // 优先缓存；否则直接 readFileDirect 读磁盘原文，绕开 ACP 的 buffer 视图，
+  // 避免拿到被语言服务器/格式化器在 buffer 里改过的版本（写入会被它污染过）。
   let oldText: string | null = null;
   const cached = ctx.state.cache.get(path);
   if (cached) {
@@ -83,32 +82,12 @@ async function execute(
     oldText = cached.content;
   } else {
     try {
-      if (inside) {
-        if (ctx.caps.fs?.readTextFile) {
-          log.debug("Write: reading old text via ACP", { path });
-          const r = await ctx.conn.readTextFile({
-            sessionId: ctx.sessionId,
-            path,
-          });
-          oldText = r.content;
-          log.debug("Write: ACP read for diff succeeded", {
-            path,
-            bytes: oldText.length,
-          });
-        } else {
-          log.debug(
-            "Write: skipping old-text read (no ACP readTextFile capability)",
-            { path },
-          );
-        }
-      } else {
-        log.debug("Write: reading old text via direct fs", { path });
-        oldText = await readFileDirect(path);
-        log.debug("Write: direct fs read for diff succeeded", {
-          path,
-          bytes: oldText.length,
-        });
-      }
+      log.debug("Write: reading old text via direct fs", { path });
+      oldText = await readFileDirect(path);
+      log.debug("Write: direct fs read for diff succeeded", {
+        path,
+        bytes: oldText.length,
+      });
     } catch {
       log.debug("Write: old-text read failed (treating as new file)", {
         path,
@@ -136,42 +115,35 @@ async function execute(
   // LLM 也几乎只产出 LF，直接灌回去会让 git 看到整文件 EOL 翻转。
   // 新建文件则不强制 EOL，让 content 自决（避免在纯 LF 仓库里突然写出
   // CRLF 这种反向意外）。
+  // mixed 文件按多数派 dominant 归一化（修复历史伤疤）。
   let textToWrite = content;
   if (fileExisted) {
-    const diskEol = await detectFileEol(path);
-    if (diskEol === "crlf") {
+    const eol = await detectEolInfo(path);
+    if (eol?.dominant === "crlf") {
       textToWrite = toEol(content, "crlf");
       if (textToWrite !== content) {
-        log.debug("Write: preserving CRLF on overwrite", {
+        log.debug("Write: normalizing to CRLF on overwrite", {
           path,
+          diskStyle: eol.style,
+          crlf: eol.crlfCount,
+          lf: eol.lfCount,
           lfBytes: content.length,
-          crlfBytes: textToWrite.length,
+          outBytes: textToWrite.length,
         });
       }
     }
   }
 
+  // 写盘：始终走 Node fs，绕开 ACP writeTextFile —— 防止编辑器 save
+  // 管线触发 autoformat / format-on-save 篡改 content。
   try {
-    if (inside) {
-      log.debug("Write: writing via ACP", {
-        path,
-        bytes: textToWrite.length,
-      });
-      await ctx.conn.writeTextFile({
-        sessionId: ctx.sessionId,
-        path,
-        content: textToWrite,
-      });
-      log.debug("Write: ACP write succeeded", { path });
-    } else {
-      log.warn("tool: Write: writing OUTSIDE workspace", { path });
-      log.debug("Write: writing via direct fs", {
-        path,
-        bytes: textToWrite.length,
-      });
-      await writeFileDirect(path, textToWrite);
-      log.debug("Write: direct fs write succeeded", { path });
-    }
+    log.debug("Write: writing via direct fs", {
+      path,
+      bytes: textToWrite.length,
+      insideWorkspace: inside,
+    });
+    await writeFileDirect(path, textToWrite);
+    log.debug("Write: direct fs write succeeded", { path });
   } catch (e) {
     log.debug("Write: write FAILED", {
       path,

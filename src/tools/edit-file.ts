@@ -9,9 +9,10 @@ import type { ToolSpec } from "../llm/types.js";
 import {
   isInsideWorkspace,
   readFileWithCache,
+  readFileDirect,
   writeFileDirect,
   resolveToolPath,
-  detectFileEol,
+  detectEolInfo,
   toEol,
 } from "./fs-utils.js";
 import {
@@ -91,14 +92,13 @@ async function execute(
     insideWorkspace: inside,
   });
 
-  if (inside && (!ctx.caps.fs?.readTextFile || !ctx.caps.fs?.writeTextFile)) {
-    log.debug("Edit: ACP fs capabilities missing", {
+  if (inside && !ctx.caps.fs?.readTextFile) {
+    log.debug("Edit: ACP fs.readTextFile capability missing", {
       path,
       hasReadTextFile: !!ctx.caps.fs?.readTextFile,
-      hasWriteTextFile: !!ctx.caps.fs?.writeTextFile,
     });
     return errorResult(
-      "client must advertise both fs.readTextFile and fs.writeTextFile for Edit",
+      "client must advertise fs.readTextFile capability for Edit",
       "edit",
       `Edit: ${rel}`,
     );
@@ -111,11 +111,11 @@ async function execute(
     outsideWorkspace: !inside,
   });
 
-  // auto-read（共享 helper：缓存 + 边界 + ACP/直接 fs）
+  // auto-read：保证 readPaths 标记 & cache 命中，但不再把它当成替换基底。
+  // 真正的替换基底见下方 readFileDirect —— 必须直读磁盘，不能用 ACP buffer。
   const hasBeenRead = ctx.state.readPaths.has(path);
-  let currentText: string;
   try {
-    currentText = await readFileWithCache(path, ctx);
+    await readFileWithCache(path, ctx);
   } catch (e) {
     log.debug("Edit: auto-read FAILED", {
       path,
@@ -132,26 +132,71 @@ async function execute(
     ctx.state.readPaths.add(path);
   }
 
-  // 严格语义计算新内容
-  let newText: string;
+  // ────────────────────────────────────────────────────────────────────
+  // 替换源 = 磁盘原文（不是 cache / ACP buffer）
+  //
+  // 之前发现的真实事故：编辑器（如 Zed）的 ACP writeTextFile 经过 save
+  // 管线，会触发语言服务器/格式化器对 buffer 做 autoformat（重排 lua end
+  // 缩进、tab→spaces、trailing whitespace 剥除、强制末尾换行 …）。如果
+  // 我们在 cache（来自 ACP 的 buffer 视图）上做替换、再写回 ACP，整文件
+  // 那些「LLM 没碰但被 autoformatter 改了」的行都会随之落盘 —— git diff
+  // 一片飘红，淹没真实改动。
+  //
+  // 根治：
+  //   1. 直接 readFileDirect 拿磁盘真实字节作为替换基底；
+  //   2. 用 writeFileDirect 直接落盘，绕开 ACP writeTextFile，避免任何
+  //      编辑器侧的 save-pipeline 改写内容；
+  //   3. cache 仍然按 ACP 视角更新（LF 版），让后续 Edit 的 old_string
+  //      匹配能继续走 LF / 编辑器视图风格。
+  //
+  // ACP readTextFile 还是要走（cache 命中能加速 Read 工具），只是不再当
+  // 替换基底。
+  let diskText: string;
+  try {
+    diskText = await readFileDirect(path);
+  } catch (e) {
+    log.debug("Edit: disk read FAILED", {
+      path,
+      error: (e as Error).message,
+    });
+    return errorResult(
+      `read for edit failed: ${(e as Error).message}`,
+      "edit",
+      `Edit: ${rel}`,
+    );
+  }
+
+  // 行尾归一化：LLM 的 old_string / new_string 几乎只用 LF。把磁盘文本
+  // 与 old/new 三方都转到同一个统一基线（LF）做替换，最后整体回写时按
+  // 主导风格（dominant，多半 CRLF）转回去 —— 这样：
+  //   - LLM 给的 LF old_string 能在磁盘 CRLF 文本里成功匹配；
+  //   - mixed 文件里残留的孤立 LF 会被主导风格统一收编，git 一次性归零。
+  const eol = await detectEolInfo(path);
+  const target = eol?.dominant ?? null;
+  const diskLf = toEol(diskText, "lf");
+  const oldLf = toEol(oldString, "lf");
+  const newLf = toEol(newString, "lf");
+
+  // 严格语义计算新内容（在 LF 基线上）
+  let newLfText: string;
   let occurrenceCount: number;
   if (replaceAll) {
-    if (!currentText.includes(oldString)) {
-      log.debug("Edit: old_string not found (replace_all)", { path });
+    if (!diskLf.includes(oldLf)) {
+      log.debug("Edit: old_string not found on disk (replace_all)", { path });
       return errorResult(
         `old_string not found in ${rel}`,
         "edit",
         `Edit: ${rel}`,
       );
     }
-    occurrenceCount = currentText.split(oldString).length - 1;
-    newText = currentText.split(oldString).join(newString);
+    occurrenceCount = diskLf.split(oldLf).length - 1;
+    newLfText = diskLf.split(oldLf).join(newLf);
     log.debug("Edit: replace_all matched", {
       path,
       occurrences: occurrenceCount,
     });
   } else {
-    const firstIdx = currentText.indexOf(oldString);
+    const firstIdx = diskLf.indexOf(oldLf);
     if (firstIdx < 0) {
       return errorResult(
         `old_string not found in ${rel}. Read the file again and copy the exact text including whitespace.`,
@@ -159,7 +204,7 @@ async function execute(
         `Edit: ${rel}`,
       );
     }
-    const secondIdx = currentText.indexOf(oldString, firstIdx + 1);
+    const secondIdx = diskLf.indexOf(oldLf, firstIdx + 1);
     if (secondIdx >= 0) {
       return errorResult(
         `old_string is not unique in ${rel} (found at offset ${firstIdx} and ${secondIdx} at least). ` +
@@ -170,13 +215,16 @@ async function execute(
       );
     }
     occurrenceCount = 1;
-    newText =
-      currentText.slice(0, firstIdx) +
-      newString +
-      currentText.slice(firstIdx + oldString.length);
+    newLfText =
+      diskLf.slice(0, firstIdx) + newLf + diskLf.slice(firstIdx + oldLf.length);
   }
 
-  if (newText === currentText) {
+  // 整体转回主导 EOL（CRLF / LF）。null（无换行的小文件）保持 LF 即可。
+  const textToWrite = target === "crlf" ? toEol(newLfText, "crlf") : newLfText;
+
+  // 没改动：拒绝写盘（即便 mixed → 归一化也算不上 LLM 想要的"实质修改"，
+  // 那种归一化应该作为附带效果发生在真实 Edit 上而不是空 Edit 上）
+  if (textToWrite === diskText) {
     return errorResult(
       `no change: old_string and new_string produce identical content`,
       "edit",
@@ -184,42 +232,25 @@ async function execute(
     );
   }
 
-  // 写回（工作区内走 ACP，工作区外走直接 fs）
-  //
-  // 行尾保护：探测磁盘原始 EOL，避免把 CRLF 文件整体写成 LF。
-  // 之所以必须看磁盘字节而不是 currentText：
-  //   - 工作区内 ACP readTextFile 通常已经把行尾归一化成 LF，
-  //     currentText 不再保留磁盘原貌；
-  //   - new_string 来自 LLM，几乎必然是 LF。
-  // 如果直接把 LF 的 newText 写回 CRLF 文件，git 会把每一行都判定为变更，
-  // 出现 +N -N 的假 diff，掩盖真实改动。
-  const diskEol = await detectFileEol(path);
-  const textToWrite = diskEol === "crlf" ? toEol(newText, "crlf") : newText;
-  if (diskEol === "crlf" && textToWrite !== newText) {
-    log.debug("Edit: preserving CRLF on write", {
+  if (eol && target === "crlf" && textToWrite !== newLfText) {
+    log.debug("Edit: normalized to CRLF on write", {
       path,
-      lfBytes: newText.length,
-      crlfBytes: textToWrite.length,
+      diskStyle: eol.style,
+      crlf: eol.crlfCount,
+      lf: eol.lfCount,
     });
   }
+
+  // 写盘：始终走 Node fs，绕开 ACP writeTextFile —— 防止编辑器 save 管线
+  // 触发 autoformat / format-on-save 篡改我们的 newText。
   try {
-    if (inside) {
-      log.debug("Edit: writing via ACP", { path, bytes: textToWrite.length });
-      await ctx.conn.writeTextFile({
-        sessionId: ctx.sessionId,
-        path,
-        content: textToWrite,
-      });
-      log.debug("Edit: ACP write succeeded", { path });
-    } else {
-      log.warn("tool: Edit: writing OUTSIDE workspace", { path });
-      log.debug("Edit: writing via direct fs", {
-        path,
-        bytes: textToWrite.length,
-      });
-      await writeFileDirect(path, textToWrite);
-      log.debug("Edit: direct fs write succeeded", { path });
-    }
+    log.debug("Edit: writing via direct fs", {
+      path,
+      bytes: textToWrite.length,
+      insideWorkspace: inside,
+    });
+    await writeFileDirect(path, textToWrite);
+    log.debug("Edit: direct fs write succeeded", { path });
   } catch (e) {
     log.debug("Edit: write FAILED", { path, error: (e as Error).message });
     return errorResult(
@@ -229,15 +260,15 @@ async function execute(
     );
   }
 
-  // 缓存存 LF 版（newText），与 currentText 的行尾风格保持一致，
-  // 避免下次 Edit 用 LF old_string 来匹配 CRLF 缓存而失配。
-  // 我们对磁盘上是什么完全心里有数：磁盘上是 textToWrite。
-  ctx.state.cache.set(path, newText);
+  // 缓存按 ACP 视角更新（LF 版本）—— 编辑器 buffer 在用户 reload 后会
+  // 再次读到磁盘的真实 EOL 版本，但 cache 命中前我们提供 LF 视图保证
+  // 后续 Edit 的 old_string 能成功匹配。
+  ctx.state.cache.set(path, newLfText);
   log.debug("Edit: completed", {
     path,
     occurrences: occurrenceCount,
-    oldBytes: currentText.length,
-    newBytes: newText.length,
+    diskBytes: diskText.length,
+    newBytes: textToWrite.length,
     outsideWorkspace: !inside,
   });
 
@@ -247,8 +278,9 @@ async function execute(
       {
         type: "diff",
         path,
-        oldText: currentText,
-        newText,
+        // diff 卡显示用 LF 视图，让 Zed 渲染干净；磁盘上是 textToWrite
+        oldText: toEol(diskText, "lf"),
+        newText: newLfText,
       },
     ],
     kind: "edit",
