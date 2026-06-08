@@ -1,0 +1,1008 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Invox Transcript Viewer</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap');
+
+  :root {
+    --bg-primary: #0a0e14;
+    --bg-secondary: #111820;
+    --bg-tertiary: #1a2230;
+    --bg-card: #141c28;
+    --bg-hover: #1e2a3a;
+    --border: #1e2d3d;
+    --border-accent: #2d4a5e;
+    --text-primary: #c5cdd8;
+    --text-secondary: #7a8a9e;
+    --text-muted: #4a5568;
+    --accent-cyan: #39c5bb;
+    --accent-green: #5af78e;
+    --accent-blue: #6cb6ff;
+    --accent-orange: #f9a825;
+    --accent-red: #ff6b6b;
+    --accent-purple: #c792ea;
+    --accent-yellow: #ffcb6b;
+    --role-user: #39c5bb;
+    --role-assistant: #6cb6ff;
+    --role-system: #7a8a9e;
+    --role-tool: #c792ea;
+    --scrollbar-bg: #111820;
+    --scrollbar-thumb: #2d4a5e;
+    --glow-cyan: 0 0 20px rgba(57, 197, 187, 0.15);
+    --glow-blue: 0 0 20px rgba(108, 182, 255, 0.15);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: var(--scrollbar-bg); }
+  ::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--border-accent); }
+
+  body {
+    font-family: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    min-height: 100vh;
+    overflow: hidden;
+  }
+
+  /* ── Top Bar ────────────────────────────── */
+  .topbar {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+    height: 56px;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 24px;
+    backdrop-filter: blur(12px);
+  }
+
+  .topbar-left {
+    display: flex; align-items: center; gap: 12px;
+  }
+
+  .logo {
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 700; font-size: 15px;
+    color: var(--accent-cyan);
+    letter-spacing: 0.5px;
+    display: flex; align-items: center; gap: 8px;
+  }
+
+  .logo svg { width: 20px; height: 20px; }
+
+  .session-title {
+    font-size: 13px; color: var(--text-secondary);
+    max-width: 400px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    padding-left: 12px; border-left: 1px solid var(--border);
+  }
+
+  .topbar-right { display: flex; align-items: center; gap: 10px; }
+
+  .btn {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px; font-weight: 500;
+    padding: 7px 14px; border-radius: 6px;
+    border: 1px solid var(--border-accent);
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    cursor: pointer;
+    transition: all 0.2s ease;
+    display: flex; align-items: center; gap: 6px;
+  }
+
+  .btn:hover {
+    background: var(--bg-hover);
+    border-color: var(--accent-cyan);
+    box-shadow: var(--glow-cyan);
+  }
+
+  .btn-primary {
+    background: linear-gradient(135deg, rgba(57,197,187,0.15), rgba(108,182,255,0.1));
+    border-color: var(--accent-cyan);
+    color: var(--accent-cyan);
+  }
+
+  .btn-primary:hover {
+    background: linear-gradient(135deg, rgba(57,197,187,0.25), rgba(108,182,255,0.2));
+  }
+
+  .btn svg { width: 14px; height: 14px; }
+
+  /* ── Main Layout ────────────────────────── */
+  .main {
+    margin-top: 56px;
+    height: calc(100vh - 56px);
+    display: flex;
+    overflow: hidden;
+  }
+
+  /* ── Sidebar ────────────────────────────── */
+  .sidebar {
+    width: 280px; min-width: 280px;
+    background: var(--bg-secondary);
+    border-right: 1px solid var(--border);
+    display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+
+  .sidebar-header {
+    padding: 16px 18px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .sidebar-header h3 {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 1.5px;
+    color: var(--text-muted);
+    margin-bottom: 10px;
+  }
+
+  .search-box {
+    width: 100%; padding: 8px 12px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+
+  .search-box::placeholder { color: var(--text-muted); }
+  .search-box:focus { border-color: var(--accent-cyan); }
+
+  .session-list {
+    flex: 1; overflow-y: auto; padding: 8px;
+  }
+
+  .session-item {
+    padding: 10px 12px; border-radius: 6px;
+    cursor: pointer; transition: all 0.15s;
+    margin-bottom: 2px;
+    border: 1px solid transparent;
+  }
+
+  .session-item:hover { background: var(--bg-hover); }
+  .session-item.active {
+    background: var(--bg-tertiary);
+    border-color: var(--border-accent);
+  }
+
+  .session-item-title {
+    font-size: 13px; font-weight: 500;
+    color: var(--text-primary);
+    margin-bottom: 4px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+
+  .session-item-meta {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px; color: var(--text-muted);
+    display: flex; gap: 8px;
+  }
+
+  .session-item-meta .model {
+    color: var(--accent-cyan);
+  }
+
+  /* ── Content ────────────────────────────── */
+  .content {
+    flex: 1; display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ── Info Bar ───────────────────────────── */
+  .info-bar {
+    padding: 14px 28px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-secondary);
+    display: flex; gap: 24px; flex-wrap: wrap;
+    align-items: center;
+  }
+
+  .info-item {
+    display: flex; align-items: center; gap: 6px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+  }
+
+  .info-label { color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
+  .info-value { color: var(--text-secondary); }
+  .info-value.model { color: var(--accent-cyan); font-weight: 600; }
+  .info-value.tokens { color: var(--accent-green); }
+
+  .info-divider {
+    width: 1px; height: 16px;
+    background: var(--border);
+  }
+
+  /* ── Messages ───────────────────────────── */
+  .messages-container {
+    flex: 1; overflow-y: auto;
+    padding: 20px 28px;
+  }
+
+  .message {
+    margin-bottom: 16px;
+    animation: fadeIn 0.3s ease;
+    border-radius: 8px;
+    border: 1px solid transparent;
+    transition: border-color 0.2s;
+  }
+
+  .message:hover { border-color: var(--border); }
+
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .message-header {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 16px 6px;
+  }
+
+  .role-badge {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.8px;
+    padding: 3px 8px; border-radius: 4px;
+    background: rgba(255,255,255,0.04);
+  }
+
+  .role-badge.user { color: var(--role-user); border: 1px solid rgba(57,197,187,0.2); }
+  .role-badge.assistant { color: var(--role-assistant); border: 1px solid rgba(108,182,255,0.2); }
+  .role-badge.system { color: var(--role-system); border: 1px solid rgba(122,138,158,0.2); }
+  .role-badge.tool { color: var(--role-tool); border: 1px solid rgba(199,146,234,0.2); }
+
+  .message-index {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px; color: var(--text-muted);
+  }
+
+  .message-content {
+    padding: 4px 16px 12px;
+    font-size: 13.5px; line-height: 1.7;
+    color: var(--text-primary);
+    overflow-wrap: break-word;
+  }
+
+  .message-content.system-content {
+    font-size: 12px; color: var(--text-muted);
+    max-height: 120px; overflow: hidden;
+    position: relative;
+    cursor: pointer;
+    transition: max-height 0.3s ease;
+  }
+
+  .message-content.system-content.expanded {
+    max-height: none;
+  }
+
+  .system-expand-hint {
+    position: absolute; bottom: 0; left: 0; right: 0;
+    height: 40px;
+    background: linear-gradient(transparent, var(--bg-primary));
+    display: flex; align-items: flex-end; justify-content: center;
+    padding-bottom: 4px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px; color: var(--accent-cyan);
+  }
+
+  /* ── Code blocks ────────────────────────── */
+  .message-content pre {
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px 16px;
+    margin: 8px 0;
+    overflow-x: auto;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px; line-height: 1.6;
+    color: var(--text-secondary);
+  }
+
+  .message-content code {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    background: rgba(57,197,187,0.08);
+    padding: 2px 6px; border-radius: 3px;
+    color: var(--accent-cyan);
+  }
+
+  .message-content pre code {
+    background: none; padding: 0; color: inherit;
+  }
+
+  /* ── Tool Calls ─────────────────────────── */
+  .tool-calls {
+    padding: 0 16px 12px;
+  }
+
+  .tool-call {
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    margin-bottom: 6px;
+    overflow: hidden;
+  }
+
+  .tool-call-header {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 12px;
+    cursor: pointer;
+    transition: background 0.15s;
+    user-select: none;
+  }
+
+  .tool-call-header:hover { background: var(--bg-hover); }
+
+  .tool-call-chevron {
+    color: var(--text-muted);
+    transition: transform 0.2s;
+    font-size: 10px;
+  }
+
+  .tool-call-chevron.open { transform: rotate(90deg); }
+
+  .tool-call-name {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px; font-weight: 600;
+    color: var(--accent-purple);
+  }
+
+  .tool-call-id {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px; color: var(--text-muted);
+    margin-left: auto;
+  }
+
+  .tool-call-body {
+    display: none;
+    padding: 8px 12px;
+    border-top: 1px solid var(--border);
+  }
+
+  .tool-call-body.open { display: block; }
+
+  .tool-call-args {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; line-height: 1.5;
+    color: var(--text-secondary);
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-height: 300px;
+    overflow-y: auto;
+  }
+
+  /* ── Tool Results ───────────────────────── */
+  .tool-result {
+    padding: 0 16px 12px;
+  }
+
+  .tool-result-content {
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent-purple);
+    border-radius: 0 6px 6px 0;
+    padding: 10px 14px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; line-height: 1.6;
+    color: var(--text-secondary);
+    max-height: 200px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+    cursor: pointer;
+    transition: max-height 0.3s ease;
+  }
+
+  .tool-result-content.expanded {
+    max-height: none;
+  }
+
+  /* ── Empty State ────────────────────────── */
+  .empty-state {
+    flex: 1;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    color: var(--text-muted);
+  }
+
+  .empty-state svg {
+    width: 64px; height: 64px;
+    margin-bottom: 20px;
+    opacity: 0.3;
+  }
+
+  .empty-state h2 {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 16px; font-weight: 500;
+    margin-bottom: 8px; color: var(--text-secondary);
+  }
+
+  .empty-state p {
+    font-size: 13px;
+    max-width: 360px; text-align: center; line-height: 1.6;
+  }
+
+  .drop-zone-overlay {
+    display: none;
+    position: fixed; inset: 0; z-index: 200;
+    background: rgba(10,14,20,0.92);
+    backdrop-filter: blur(8px);
+    align-items: center; justify-content: center;
+    flex-direction: column;
+  }
+
+  .drop-zone-overlay.active { display: flex; }
+
+  .drop-zone-box {
+    width: 400px; height: 240px;
+    border: 2px dashed var(--accent-cyan);
+    border-radius: 16px;
+    display: flex; align-items: center; justify-content: center;
+    flex-direction: column; gap: 12px;
+    animation: pulse-border 1.5s ease infinite;
+  }
+
+  @keyframes pulse-border {
+    0%, 100% { border-color: var(--accent-cyan); box-shadow: 0 0 30px rgba(57,197,187,0.1); }
+    50% { border-color: var(--accent-blue); box-shadow: 0 0 50px rgba(108,182,255,0.15); }
+  }
+
+  .drop-zone-box svg { width: 48px; height: 48px; color: var(--accent-cyan); opacity: 0.6; }
+  .drop-zone-box span {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 14px; color: var(--text-secondary);
+  }
+
+  /* ── Filter Bar ─────────────────────────── */
+  .filter-bar {
+    display: flex; gap: 6px; padding: 10px 28px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-secondary);
+    flex-wrap: wrap;
+  }
+
+  .filter-chip {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; font-weight: 500;
+    padding: 4px 10px; border-radius: 12px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .filter-chip:hover { border-color: var(--text-secondary); color: var(--text-secondary); }
+  .filter-chip.active {
+    border-color: var(--accent-cyan);
+    color: var(--accent-cyan);
+    background: rgba(57,197,187,0.08);
+  }
+
+  .filter-chip .count {
+    opacity: 0.6; margin-left: 4px;
+  }
+
+  /* ── Hidden file input ──────────────────── */
+  #fileInput { display: none; }
+
+  /* ── Responsive ─────────────────────────── */
+  @media (max-width: 768px) {
+    .sidebar { display: none; }
+    .messages-container { padding: 16px; }
+    .info-bar { padding: 10px 16px; gap: 12px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- Top Bar -->
+<div class="topbar">
+  <div class="topbar-left">
+    <div class="logo">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+      </svg>
+      INVOX
+    </div>
+    <div class="session-title" id="sessionTitle">No transcript loaded</div>
+  </div>
+  <div class="topbar-right">
+    <button class="btn" id="btnLoadFile" onclick="document.getElementById('fileInput').click()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+      Load File
+    </button>
+    <button class="btn btn-primary" id="btnLoadDir" onclick="loadSessionDir()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
+      Load Sessions
+    </button>
+  </div>
+</div>
+
+<input type="file" id="fileInput" accept=".json" onchange="handleFileSelect(event)" />
+
+<!-- Drop Zone Overlay -->
+<div class="drop-zone-overlay" id="dropOverlay">
+  <div class="drop-zone-box">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg>
+    <span>Drop transcript .json here</span>
+  </div>
+</div>
+
+<!-- Main -->
+<div class="main">
+  <!-- Sidebar -->
+  <div class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+      <h3>Sessions</h3>
+      <input class="search-box" placeholder="Search sessions..." id="searchBox" oninput="filterSessions()" />
+    </div>
+    <div class="session-list" id="sessionList">
+      <div style="padding:20px 12px;text-align:center;color:var(--text-muted);font-size:12px;">
+        Click "Load Sessions" to scan the<br>.invox/sessions/ directory, or<br>drop a .json file anywhere.
+      </div>
+    </div>
+  </div>
+
+  <!-- Content -->
+  <div class="content" id="content">
+    <div class="empty-state" id="emptyState">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/>
+      </svg>
+      <h2>No Transcript Loaded</h2>
+      <p>Load a transcript JSON file to view the conversation. You can click "Load File" to pick a file, or drag & drop a .json file anywhere on this page.</p>
+    </div>
+    <div id="infoBar" class="info-bar" style="display:none;"></div>
+    <div id="filterBar" class="filter-bar" style="display:none;"></div>
+    <div class="messages-container" id="messagesContainer" style="display:none;"></div>
+  </div>
+</div>
+
+<script>
+// ── State ──────────────────────────────────────
+let currentData = null;
+let sessionFiles = []; // {name, path, data?}
+let activeFilters = new Set(['system','user','assistant','tool']);
+
+// ── Drag & Drop ────────────────────────────────
+const dropOverlay = document.getElementById('dropOverlay');
+let dragCounter = 0;
+
+document.addEventListener('dragenter', e => {
+  e.preventDefault();
+  dragCounter++;
+  dropOverlay.classList.add('active');
+});
+
+document.addEventListener('dragleave', e => {
+  e.preventDefault();
+  dragCounter--;
+  if (dragCounter <= 0) { dragCounter = 0; dropOverlay.classList.remove('active'); }
+});
+
+document.addEventListener('dragover', e => e.preventDefault());
+
+document.addEventListener('drop', e => {
+  e.preventDefault();
+  dragCounter = 0;
+  dropOverlay.classList.remove('active');
+  const files = e.dataTransfer.files;
+  if (files.length > 0) {
+    const file = files[0];
+    if (file.name.endsWith('.json')) {
+      const reader = new FileReader();
+      reader.onload = ev => {
+        try {
+          const data = JSON.parse(ev.target.result);
+          loadTranscript(data, file.name);
+        } catch(err) {
+          alert('Invalid JSON: ' + err.message);
+        }
+      };
+      reader.readAsText(file);
+    }
+  }
+});
+
+// ── File Select ────────────────────────────────
+function handleFileSelect(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = ev => {
+    try {
+      const data = JSON.parse(ev.target.result);
+      loadTranscript(data, file.name);
+    } catch(err) {
+      alert('Invalid JSON: ' + err.message);
+    }
+  };
+  reader.readAsText(file);
+  e.target.value = '';
+}
+
+// ── Load Sessions from directory ───────────────
+async function loadSessionDir() {
+  // Try to load via fetch from relative path (works when served via local server)
+  // Fallback: prompt user to select directory
+  try {
+    // First try: use the known path pattern
+    const resp = await fetch('./sessions/', { method: 'LIST' }).catch(() => null);
+  } catch(e) {}
+
+  // Use File System Access API if available
+  if ('showDirectoryPicker' in window) {
+    try {
+      const dirHandle = await window.showDirectoryPicker({ mode: 'read' });
+      const sessions = [];
+      for await (const entry of dirHandle.values()) {
+        if (entry.kind === 'file' && entry.name.endsWith('.json')) {
+          const file = await entry.getFile();
+          const text = await file.text();
+          try {
+            const data = JSON.parse(text);
+            sessions.push({ name: entry.name, data });
+          } catch(e) {}
+        }
+      }
+      sessionFiles = sessions.sort((a, b) => {
+        const tA = a.data?.updatedAt || a.data?.createdAt || 0;
+        const tB = b.data?.updatedAt || b.data?.createdAt || 0;
+        return tB - tA;
+      });
+      renderSessionList();
+      return;
+    } catch(e) {
+      if (e.name === 'AbortError') return;
+    }
+  }
+
+  // Fallback: hidden input with webkitdirectory
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.setAttribute('webkitdirectory', '');
+  input.accept = '.json';
+  input.multiple = true;
+  input.onchange = async (e) => {
+    const files = Array.from(e.target.files).filter(f => f.name.endsWith('.json'));
+    const sessions = [];
+    for (const file of files) {
+      const text = await file.text();
+      try {
+        const data = JSON.parse(text);
+        sessions.push({ name: file.name, data });
+      } catch(err) {}
+    }
+    sessionFiles = sessions.sort((a, b) => {
+      const tA = a.data?.updatedAt || a.data?.createdAt || 0;
+      const tB = b.data?.updatedAt || b.data?.createdAt || 0;
+      return tB - tA;
+    });
+    renderSessionList();
+  };
+  input.click();
+}
+
+// ── Render Session List ────────────────────────
+function renderSessionList(filter = '') {
+  const list = document.getElementById('sessionList');
+  const filtered = filter
+    ? sessionFiles.filter(s => (s.data?.title || s.name).toLowerCase().includes(filter.toLowerCase()))
+    : sessionFiles;
+
+  if (filtered.length === 0) {
+    list.innerHTML = `<div style="padding:20px 12px;text-align:center;color:var(--text-muted);font-size:12px;">
+      ${sessionFiles.length === 0 ? 'No sessions loaded yet.' : 'No matches found.'}
+    </div>`;
+    return;
+  }
+
+  list.innerHTML = filtered.map((s, i) => {
+    const d = s.data;
+    const title = d?.title || s.name.replace('.json', '');
+    const model = d?.selectedModel || '—';
+    const msgCount = d?.history?.length || 0;
+    const date = d?.updatedAt ? new Date(d.updatedAt).toLocaleDateString('zh-CN') : '';
+    const isActive = currentData && d?.id === currentData.id;
+    return `<div class="session-item ${isActive ? 'active' : ''}" onclick="selectSession(${sessionFiles.indexOf(s)})">
+      <div class="session-item-title">${escHtml(title)}</div>
+      <div class="session-item-meta">
+        <span class="model">${escHtml(model)}</span>
+        <span>${msgCount} msgs</span>
+        <span>${date}</span>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function filterSessions() {
+  const q = document.getElementById('searchBox').value;
+  renderSessionList(q);
+}
+
+function selectSession(index) {
+  const s = sessionFiles[index];
+  if (s?.data) {
+    loadTranscript(s.data, s.name);
+    renderSessionList(document.getElementById('searchBox').value);
+  }
+}
+
+// ── Load Transcript ────────────────────────────
+function loadTranscript(data, filename) {
+  currentData = data;
+  document.getElementById('emptyState').style.display = 'none';
+  document.getElementById('sessionTitle').textContent = data?.title || filename;
+
+  renderInfoBar(data);
+  renderFilterBar(data);
+  renderMessages(data);
+
+  // Update sidebar highlight
+  renderSessionList(document.getElementById('searchBox').value);
+}
+
+// ── Info Bar ───────────────────────────────────
+function renderInfoBar(data) {
+  const bar = document.getElementById('infoBar');
+  bar.style.display = 'flex';
+
+  const created = data?.createdAt ? formatDate(data.createdAt) : '—';
+  const updated = data?.updatedAt ? formatDate(data.updatedAt) : '—';
+  const model = data?.selectedModel || '—';
+  const history = data?.history || [];
+  const usage = data?.lastTurnUsage;
+
+  let html = `
+    <div class="info-item"><span class="info-label">Created</span><span class="info-value">${created}</span></div>
+    <div class="info-divider"></div>
+    <div class="info-item"><span class="info-label">Updated</span><span class="info-value">${updated}</span></div>
+    <div class="info-divider"></div>
+    <div class="info-item"><span class="info-label">Model</span><span class="info-value model">${escHtml(model)}</span></div>
+    <div class="info-divider"></div>
+    <div class="info-item"><span class="info-label">Messages</span><span class="info-value">${history.length}</span></div>
+  `;
+
+  if (usage) {
+    html += `
+      <div class="info-divider"></div>
+      <div class="info-item"><span class="info-label">Tokens</span><span class="info-value tokens">↑${usage.input?.toLocaleString() || 0} ↓${usage.output?.toLocaleString() || 0}</span></div>
+      <div class="info-divider"></div>
+      <div class="info-item"><span class="info-label">Cached</span><span class="info-value">${usage.cached?.toLocaleString() || 0}</span></div>
+    `;
+  }
+
+  if (data?.id) {
+    html += `
+      <div class="info-divider"></div>
+      <div class="info-item"><span class="info-label">ID</span><span class="info-value" style="font-size:10px;">${escHtml(data.id)}</span></div>
+    `;
+  }
+
+  bar.innerHTML = html;
+}
+
+// ── Filter Bar ─────────────────────────────────
+function renderFilterBar(data) {
+  const bar = document.getElementById('filterBar');
+  bar.style.display = 'flex';
+
+  const history = data?.history || [];
+  const counts = { system: 0, user: 0, assistant: 0, tool: 0 };
+  history.forEach(m => { if (counts[m.role] !== undefined) counts[m.role]++; });
+
+  const labels = { system: 'System', user: 'User', assistant: 'Assistant', tool: 'Tool' };
+  const colors = { system: 'var(--role-system)', user: 'var(--role-user)', assistant: 'var(--role-assistant)', tool: 'var(--role-tool)' };
+
+  bar.innerHTML = Object.entries(counts).map(([role, count]) => {
+    const active = activeFilters.has(role);
+    return `<button class="filter-chip ${active ? 'active' : ''}"
+      style="${active ? 'border-color:' + colors[role] + ';color:' + colors[role] + ';' : ''}"
+      onclick="toggleFilter('${role}')">${labels[role]}<span class="count">${count}</span></button>`;
+  }).join('');
+}
+
+function toggleFilter(role) {
+  if (activeFilters.has(role)) activeFilters.delete(role);
+  else activeFilters.add(role);
+  renderFilterBar(currentData);
+  renderMessages(currentData);
+}
+
+// ── Render Messages ────────────────────────────
+function renderMessages(data) {
+  const container = document.getElementById('messagesContainer');
+  container.style.display = 'block';
+
+  const history = data?.history || [];
+  const filtered = history.filter(m => activeFilters.has(m.role));
+
+  if (filtered.length === 0) {
+    container.innerHTML = `<div style="text-align:center;padding:60px 0;color:var(--text-muted);font-size:13px;">
+      No messages match the current filters.</div>`;
+    return;
+  }
+
+  container.innerHTML = filtered.map((msg, i) => renderMessage(msg, i, history)).join('');
+
+  // Attach toggle listeners
+  container.querySelectorAll('.system-content').forEach(el => {
+    el.addEventListener('click', () => el.classList.toggle('expanded'));
+  });
+
+  container.querySelectorAll('.tool-call-header').forEach(el => {
+    el.addEventListener('click', () => {
+      const body = el.nextElementSibling;
+      const chevron = el.querySelector('.tool-call-chevron');
+      body.classList.toggle('open');
+      chevron.classList.toggle('open');
+    });
+  });
+
+  container.querySelectorAll('.tool-result-content').forEach(el => {
+    el.addEventListener('click', () => el.classList.toggle('expanded'));
+  });
+}
+
+function renderMessage(msg, displayIndex, fullHistory) {
+  const role = msg.role;
+  const isSystem = role === 'system';
+  const isTool = role === 'tool';
+  const isAssistant = role === 'assistant';
+
+  // Find the original index in full history
+  const origIndex = fullHistory.indexOf(msg);
+
+  let contentHtml = '';
+
+  // Content
+  if (msg.content) {
+    const rendered = renderMarkdown(msg.content);
+    if (isSystem) {
+      contentHtml = `<div class="message-content system-content">${rendered}
+        <div class="system-expand-hint">click to expand</div></div>`;
+    } else {
+      contentHtml = `<div class="message-content">${rendered}</div>`;
+    }
+  }
+
+  // Tool calls (assistant messages)
+  let toolCallsHtml = '';
+  if (isAssistant && msg.tool_calls?.length) {
+    toolCallsHtml = `<div class="tool-calls">${msg.tool_calls.map(tc => {
+      let argsStr = tc.arguments;
+      try { argsStr = JSON.stringify(JSON.parse(tc.arguments), null, 2); } catch(e) {}
+      return `<div class="tool-call">
+        <div class="tool-call-header">
+          <span class="tool-call-chevron">▶</span>
+          <span class="tool-call-name">${escHtml(tc.name)}</span>
+          <span class="tool-call-id">${escHtml(tc.id?.slice(0, 12) || '')}</span>
+        </div>
+        <div class="tool-call-body">
+          <div class="tool-call-args">${escHtml(argsStr)}</div>
+        </div>
+      </div>`;
+    }).join('')}</div>`;
+  }
+
+  // Tool result label
+  let toolLabel = '';
+  if (isTool && msg.name) {
+    toolLabel = `<span style="margin-left:8px;font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-muted);">${escHtml(msg.name)}</span>`;
+  }
+
+  return `<div class="message" style="animation-delay:${Math.min(displayIndex * 30, 500)}ms">
+    <div class="message-header">
+      <span class="role-badge ${role}">${role}</span>
+      <span class="message-index">#${origIndex}</span>
+      ${toolLabel}
+    </div>
+    ${contentHtml}
+    ${toolCallsHtml}
+  </div>`;
+}
+
+// ── Markdown → HTML ────────────────────────────
+function renderMarkdown(text) {
+  if (!text) return '';
+
+  // Extract code blocks first to protect them
+  const codeBlocks = [];
+  let html = text.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
+    const idx = codeBlocks.length;
+    codeBlocks.push(escHtml(code));
+    return `\x00CB${idx}\x00`;
+  });
+
+  // Extract inline code
+  const inlineCodes = [];
+  html = html.replace(/`([^`]+)`/g, (_, code) => {
+    const idx = inlineCodes.length;
+    inlineCodes.push(escHtml(code));
+    return `\x00IC${idx}\x00`;
+  });
+
+  // Escape HTML
+  html = escHtml(html);
+
+  // Restore inline code
+  html = html.replace(/\x00IC(\d+)\x00/g, (_, i) => `<code>${inlineCodes[i]}</code>`);
+
+  // Restore code blocks
+  html = html.replace(/\x00CB(\d+)\x00/g, (_, i) => `<pre><code>${codeBlocks[i]}</code></pre>`);
+
+  // Tables
+  html = html.replace(/((?:^\|.+\|$\n?)+)/gm, (block) => {
+    const rows = block.trim().split('\n');
+    if (rows.length < 2) return block;
+    const isSeparator = (r) => /^\|[\s\-:|]+\|$/.test(r);
+    let sepIdx = rows.findIndex(isSeparator);
+    if (sepIdx === -1) sepIdx = 1;
+
+    const parseCells = (r) => r.split('|').slice(1, -1).map(c => c.trim());
+    const headerCells = parseCells(rows[sepIdx > 0 ? 0 : 0]);
+    const bodyRows = rows.slice(sepIdx >= 0 ? Math.max(sepIdx + 1, 1) : 1);
+
+    let table = `<div style="overflow-x:auto;margin:8px 0;"><table style="border-collapse:collapse;font-family:'JetBrains Mono',monospace;font-size:11px;width:100%;">`;
+    table += `<thead><tr>${headerCells.map(c =>
+      `<th style="padding:6px 10px;border:1px solid var(--border);text-align:left;color:var(--accent-cyan);font-weight:600;background:var(--bg-tertiary);">${c}</th>`
+    ).join('')}</tr></thead>`;
+    table += `<tbody>`;
+    bodyRows.forEach(row => {
+      if (isSeparator(row)) return;
+      const cells = parseCells(row);
+      table += `<tr>${cells.map(c =>
+        `<td style="padding:5px 10px;border:1px solid var(--border);color:var(--text-secondary);">${c}</td>`
+      ).join('')}</tr>`;
+    });
+    table += `</tbody></table></div>`;
+    return table;
+  });
+
+  // Headers
+  html = html.replace(/^### (.+)$/gm, '<h4 style="color:var(--accent-cyan);margin:12px 0 6px;font-size:13px;">$1</h4>');
+  html = html.replace(/^## (.+)$/gm, '<h3 style="color:var(--accent-cyan);margin:14px 0 8px;font-size:14px;">$1</h3>');
+  html = html.replace(/^# (.+)$/gm, '<h2 style="color:var(--accent-cyan);margin:16px 0 8px;font-size:15px;">$1</h2>');
+
+  // Bold & italic
+  html = html.replace(/\*\*(.+?)\*\*/g, '<strong style="color:var(--text-primary);">$1</strong>');
+  html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
+
+  // Horizontal rules
+  html = html.replace(/^---$/gm, '<hr style="border:none;border-top:1px solid var(--border);margin:12px 0;">');
+
+  // Line breaks (but not inside pre)
+  html = html.replace(/\n/g, '<br>');
+
+  return html;
+}
+
+// ── Helpers ────────────────────────────────────
+function escHtml(s) {
+  const div = document.createElement('div');
+  div.textContent = s;
+  return div.innerHTML;
+}
+
+function formatDate(ts) {
+  const d = new Date(ts);
+  return d.toLocaleString('zh-CN', {
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit'
+  });
+}
+</script>
+</body>
+</html>
