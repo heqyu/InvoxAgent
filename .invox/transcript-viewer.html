@@ -408,10 +408,16 @@ function renderNode(node,idx,total){
     // If assistant has tool calls, show as expandable group
     if(hasChildren){
       const toolNames=node.children.map(c=>c.tc.name).join(', ');
+      // Aggregate timing + error from children
+      const totalMs=node.children.reduce((s,c)=>s+(c.tc.elapsedMs||0),0);
+      const anyError=node.children.some(c=>c.tc.ok!==undefined?!c.tc.ok:c.isError);
+      const dur=totalMs>0?fmtDur(totalMs):null;
       html+=`<div class="tn"><div class="tn-line"></div><div class="tn-row">
         <div class="tn-expand" onclick="toggleGroup(this)">▶</div>
         <div class="tn-icon assistant">A</div>
         <span class="tn-name" style="cursor:default;"><span class="prefix">assistant</span> → ${esc(toolNames)}</span>
+        ${anyError?'<span class="tn-badge error">ERROR</span>':'<span class="tn-badge ok">OK</span>'}
+        ${dur?`<span class="tn-dur">${dur}</span>`:''}
         ${preview?`<span class="tn-preview">"${esc(preview)}"</span>`:''}
       </div></div>`;
 
