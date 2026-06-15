@@ -23,10 +23,13 @@ import {
   readEnvModelLite,
   readEnvModelPro,
 } from "./agent/templates.js";
+import { discoverAllModels } from "./llm/discovery.js";
 import { EchoProvider } from "./llm/echo.js";
 import { FlakyProvider, type FlakyKind } from "./llm/flaky.js";
 import { BadJsonProvider, MockToolProvider } from "./llm/mock-tools.js";
+import { MultiProvider } from "./llm/multi-provider.js";
 import { OpenAIProvider } from "./llm/openai.js";
+import { loadProvidersJson } from "./llm/providers.js";
 import type { LLMProvider } from "./llm/types.js";
 import { createLogger } from "./log.js";
 import { loadProjectSettings } from "./settings.js";
@@ -134,6 +137,11 @@ ENVIRONMENT:
   INVOX_DEFAULT_AGENT             Default agent id when multiple are loaded
                                   (default: "Worker" if present, else first)
   INVOX_PLUGIN_DIR                Path to plugin marketplace root (.plugins-cache.json)
+
+MULTI-PROVIDER:
+  Place .invox/providers.json in your project root to configure multiple LLM
+  providers. Each provider needs a name, baseUrl, and apiKey. On startup, invox
+  pings each provider's /v1/models endpoint to discover available models.
 `,
   );
 }
@@ -152,9 +160,8 @@ async function main(): Promise<void> {
     return;
   }
 
-  const provider = pickProvider();
+  const { provider, models } = await buildProviderAndModels();
   const policy = pickPolicy();
-  const models = pickModels();
   const configs = pickConfigOptions();
   log.info("starting", {
     name,
@@ -236,17 +243,75 @@ async function main(): Promise<void> {
 }
 
 /**
- * provider 选择规则：
- *   - INVOX_MOCK=tools                     → MockToolProvider（离线 tool 测试）
- *   - INVOX_MOCK=bad-json                  → BadJsonProvider（验证畸形 JSON 自纠错）
- *   - INVOX_MOCK=flaky                     → FlakyProvider（注入 provider 故障）
- *   - INVOX_MOCK=1                         → EchoProvider（离线，无 tools）
- *   - INVOX_API_KEY + INVOX_BASE_URL 都有  → OpenAIProvider
- *   - 其他                                  → EchoProvider，并 warn 提示
+ * Provider + model 联合构建：三种路径按优先级尝试。
  *
- * INVOX_MODEL 未设置时默认 "gpt-4o-mini"（仅 OpenAIProvider 路径用得到）。
+ *   1. Mock provider（INVOX_MOCK）—— 离线测试，不改
+ *   2. Multi-provider（.invox/providers.json）—— ping /v1/models 发现模型
+ *   3. Legacy single-provider（INVOX_API_KEY + INVOX_BASE_URL）—— 向后兼容
+ *   4. EchoProvider 兜底
  */
-function pickProvider(): LLMProvider {
+async function buildProviderAndModels(): Promise<{
+  provider: LLMProvider;
+  models: AgentModelConfig;
+}> {
+  // ── 1. Mock providers（完全保留原有行为）────────────────────────
+  const mock = pickMockProvider();
+  if (mock) {
+    return { provider: mock, models: pickLegacyModels() };
+  }
+
+  // ── 2. Multi-provider 模式 ─────────────────────────────────────
+  const providersConfig = loadProvidersJson(process.cwd());
+  if (providersConfig) {
+    log.info("multi-provider: mode active", {
+      providerCount: providersConfig.providers.length,
+      names: providersConfig.providers.map((p) => p.name),
+    });
+
+    // 并行 ping 每个 provider 的 /v1/models
+    const results = await discoverAllModels(providersConfig.providers);
+
+    const multiProvider = new MultiProvider({
+      providers: providersConfig.providers.map((c, i) => ({
+        config: c,
+        discovery: results[i]!,
+      })),
+      defaultModel: providersConfig.defaultModel,
+    });
+
+    // 用发现的模型列表构造 AgentModelConfig
+    const modelList = multiProvider.modelList;
+    const proId = readEnvModelPro();
+    const liteId = readEnvModelLite();
+    const allIds = modelList.map((m) => m.modelId);
+    // 自动并入 PRO / LITE（如已设且不在列表里）
+    if (proId && !allIds.includes(proId)) {
+      modelList.push({ modelId: proId, name: proId, providerName: "env" });
+    }
+    if (liteId && !allIds.includes(liteId)) {
+      modelList.push({ modelId: liteId, name: liteId, providerName: "env" });
+    }
+
+    return {
+      provider: multiProvider,
+      models: {
+        available: modelList.map((m) => ({ modelId: m.modelId, name: m.name })),
+        defaultModelId: multiProvider.defaultModel,
+      },
+    };
+  }
+
+  // ── 3. Legacy single-provider ──────────────────────────────────
+  const provider = pickLegacyProvider();
+  const models = pickLegacyModels();
+  return { provider, models };
+}
+
+/**
+ * 从 INVOX_MOCK 环境变量选取离线 mock provider。
+ * 未设 INVOX_MOCK 或值不匹配时返回 null（调用方继续走正常路径）。
+ */
+function pickMockProvider(): LLMProvider | null {
   const mock = process.env["INVOX_MOCK"];
   if (mock === "tools") {
     log.info("provider: mock-tools (INVOX_MOCK=tools)");
@@ -257,7 +322,6 @@ function pickProvider(): LLMProvider {
     return new BadJsonProvider();
   }
   if (mock === "flaky") {
-    // 故障种类由 INVOX_FLAKY_KIND 控制：429 / 500 / auth / network / mid-stream
     const kind = (process.env["INVOX_FLAKY_KIND"] ?? "429") as FlakyKind;
     log.info("provider: mock-flaky", { kind });
     return new FlakyProvider(kind);
@@ -266,15 +330,26 @@ function pickProvider(): LLMProvider {
     log.info("provider: echo (INVOX_MOCK=1)");
     return new EchoProvider();
   }
+  return null;
+}
+
+/**
+ * Legacy single-provider 选择（保留向后兼容）。
+ *
+ * 规则：
+ *   - INVOX_API_KEY + INVOX_BASE_URL 都有 → OpenAIProvider
+ *   - 其他 → EchoProvider，并 warn 提示
+ */
+function pickLegacyProvider(): LLMProvider {
   const apiKey = process.env["INVOX_API_KEY"];
   const baseURL = process.env["INVOX_BASE_URL"];
   if (apiKey && baseURL) {
     const model = process.env["INVOX_MODEL"] ?? "gpt-4o-mini";
-    log.info("provider: openai", { baseURL, model });
+    log.info("provider: openai (legacy)", { baseURL, model });
     return new OpenAIProvider({ apiKey, baseURL, model });
   }
   log.warn(
-    "provider: echo (INVOX_API_KEY or INVOX_BASE_URL missing — set both for real LLM)",
+    "provider: echo (no providers.json and INVOX_API_KEY/INVOX_BASE_URL missing)",
   );
   return new EchoProvider();
 }
@@ -293,24 +368,17 @@ function pickPolicy(): PermissionPolicy {
 }
 
 /**
- * 构造对客户端公布的 model 菜单。
+ * Legacy model 菜单构造（仅在非 multi-provider 模式下使用）。
  *
  * 来源（优先级从高到低）：
  *   - INVOX_MODELS=id1,id2,id3  —— 用户自定义列表
  *   - INVOX_MODEL                —— 唯一 / 默认条目兜底
  *   - 写死 "gpt-4o-mini"          —— 终极兜底，保证菜单非空
  *
- * 规则：默认 model **永远**出现在菜单里（不在则被 unshift 到首位）。否则 Zed
- * 用户可能落到一个 currentModelId 不在 availableModels 的会话，UI 下拉框空白。
- *
- * Phase H：把 INVOX_MODEL_PRO / INVOX_MODEL_LITE 解析后的实际值自动并入
- * 菜单（如果它们已设置且不重复）。这样 agent.model="$MODEL_PRO" 切换时，
- * 解析出的 model id 一定能在下拉里找到，不会出现"切了但 UI 不显示"的别扭。
- *
- * name 字段默认就用 modelId —— OAI 兼容 provider 不会上报友好显示名；
- * 想要更好看的标签可以后续单独加配置。
+ * 规则：默认 model **永远**出现在菜单里（不在则被 unshift 到首位）。
+ * Phase H：INVOX_MODEL_PRO / INVOX_MODEL_LITE 解析后的实际值自动并入。
  */
-function pickModels(): AgentModelConfig {
+function pickLegacyModels(): AgentModelConfig {
   const fallback = process.env["INVOX_MODEL"] ?? "gpt-4o-mini";
   const raw = process.env["INVOX_MODELS"] ?? fallback;
   const ids = raw

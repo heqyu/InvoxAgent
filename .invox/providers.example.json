@@ -1,0 +1,29 @@
+{
+  "providers": [
+    {
+      "name": "Mimo",
+      "baseUrl": "https://token-plan-cn.xiaomimimo.com/v1",
+      "apiKey": "$MIMO_API_KEY"
+    },
+    {
+      "name": "DeepSeek",
+      "baseUrl": "https://api.deepseek.com",
+      "apiKey": "$DEEPSEEK_API_KEY"
+    },
+    {
+      "name": "OpenAI",
+      "baseUrl": "https://api.openai.com/v1",
+      "apiKey": "$OPENAI_API_KEY"
+    },
+    {
+      "name": "LocalLMStudio",
+      "baseUrl": "http://localhost:1234/v1",
+      "apiKey": "lm-studio",
+      "models": [
+        "qwen/qwen3-coder-30b",
+        "qwen/qwen3.5-35b-a3b"
+      ]
+    }
+  ],
+  "defaultModel": "mimo-v2.5"
+}

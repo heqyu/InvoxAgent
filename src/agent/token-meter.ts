@@ -1,5 +1,7 @@
 // Token 渲染与 context window 推断 —— reportTurnUsage 的纯渲染依赖。
 
+import { KNOWN_MODELS } from "../llm/model-knowledge.js";
+
 /**
  * 按 Zed token-meter 风格渲染整数：1234 → "1.2k"，1234567 → "1.2M"。
  * 比裸数字短，单行 thought chunk 里更易读。
@@ -20,10 +22,10 @@ export function humanizeTokens(n: number): string {
  *
  * 解析顺序：
  *   1. `INVOX_CONTEXT_WINDOW_<MODELID>` —— 大写化、非字母数字转下划线。
- *      例：模型 `qwen/qwen3-coder-30b` 对应 `INVOX_CONTEXT_WINDOW_QWEN_QWEN3_CODER_30B`
  *   2. `INVOX_CONTEXT_WINDOW_DEFAULT` —— 未匹配模型时的全局兜底
- *   3. 内置常见模型族表（gpt-4o / deepseek / qwen / claude / ...）
- *   4. 终极兜底 128_000 —— 现代 frontier 模型的常见容量，避免 Zed 渲染 "0/0"
+ *   3. model-knowledge.ts 内置知识库（KNOWN_MODELS）
+ *   4. 旧版子串启发式表（兜底，覆盖知识库未收录的模型）
+ *   5. 终极兜底 128_000
  */
 export function contextWindowFor(modelId: string): number {
   // 1. per-model env 覆盖
@@ -39,12 +41,15 @@ export function contextWindowFor(modelId: string): number {
     const n = Number.parseInt(defaultEnv, 10);
     if (Number.isFinite(n) && n > 0) return n;
   }
-  // 3. 内置启发式表 —— 顺序敏感，第一个 substring 命中即返回
+  // 3. 精确匹配知识库
+  const known = KNOWN_MODELS[modelId];
+  if (known && known.contextWindow > 0) return known.contextWindow;
+  // 4. 旧版子串启发式表 —— 覆盖知识库未收录的模型
   const id = modelId.toLowerCase();
   for (const [pattern, size] of CONTEXT_WINDOW_TABLE) {
     if (id.includes(pattern)) return size;
   }
-  // 4. 终极兜底
+  // 5. 终极兜底
   return 128_000;
 }
 

@@ -14,6 +14,7 @@ dist/
 # Machine-local state (sessions contain user conversations, invox.env has per-host config)
 .invox/sessions/
 .invox/invox.env
+.invox/providers.json
 
 # Stray scratch files from manual Zed sessions / sandbox tests
 sorting.txt
