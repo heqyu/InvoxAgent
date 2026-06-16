@@ -29,3 +29,6 @@ convert_time.py
 # 本机启动脚本（含本机 API Key 等敏感配置）
 start-server.bat
 start-server.ps1
+
+# Windows 误操作残留
+nul
