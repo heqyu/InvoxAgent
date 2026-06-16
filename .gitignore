@@ -25,3 +25,7 @@ convert_time.py
 
 # CodeBuddy IDE 本地元数据（每台机器自己生成，不入库）
 .codebuddy/
+
+# 本机启动脚本（含本机 API Key 等敏感配置）
+start-server.bat
+start-server.ps1
