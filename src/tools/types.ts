@@ -54,40 +54,10 @@ export interface SubAgentRunRequest {
   parentToolCallId?: string;
 }
 
-export interface SubAgentRunResult {
-  /** 仅当 stopReason === "end_turn" 才视为成功；其它都视为失败让 LLM 自我纠错。 */
-  ok: boolean;
-  /** subagent 最后一条 assistant 消息的纯文本；refusal 时可能为空。 */
-  finalText: string;
-  stopReason: "end_turn" | "max_turn_requests" | "refusal" | "cancelled";
-  /** 实际跑过的 LLM ↔ tool 往返次数。 */
-  iterations: number;
-  /**
-   * 本次 subagent 运行的独立日志文件路径。
-   *
-   * subagent 内部所有 sessionUpdate（tool_call / tool_call_update /
-   * agent_message_chunk / usage_update 等）都被父 UI 静默掉、按时间序写到
-   * 这个文件，方便事后查"subagent 到底跑了什么"。日志写入失败时为空。
-   */
-  logPath?: string;
-  /** 本次运行耗时毫秒数。 */
-  elapsedMs: number;
-  /** subagent 的 LLM input tokens。 */
-  input: number;
-  /** subagent 的 LLM output tokens。 */
-  output: number;
-  /** subagent 的 LLM total tokens（input + output）。 */
-  total: number;
-  /**
-   * 进度轨迹：subagent 跑过程中累计的可读"操作清单"（每条形如
-   * `▸ Glob **\/*.ts` —— 一行一个内部工具调用）。SubAgent 工具用它在最终
-   * acpContent 里渲染审计轨迹，这样末态卡片不光显示 finalText，也能复盘
-   * "subagent 跑了哪些工具"。缺省值（runner 没生成进度时）为空数组。
-   */
-  progressLines?: string[];
-  /** ok=false 时给出的人类可读原因。 */
-  error?: string;
-}
+// SubAgentRunResult 的权威定义在 src/agent/sub-agent-runner.ts。
+// re-export + local import 让工具子系统使用；用 import type 避免值循环依赖。
+import type { SubAgentRunResult } from "../agent/sub-agent-runner.js";
+export type { SubAgentRunResult } from "../agent/sub-agent-runner.js";
 
 export type SubAgentRunner = (
   req: SubAgentRunRequest,
