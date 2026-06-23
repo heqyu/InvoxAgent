@@ -31,7 +31,6 @@
 // async: true 则 fire-and-forget，结果忽略。
 // matcher 仅 PreToolUse / PostToolUse 生效，按 tool name 正则过滤。
 
-import { spawn } from "node:child_process";
 import { createLogger } from "../log.js";
 const log = createLogger("plugins");
 import { discoverDirs } from "../discovery/index.js";
@@ -243,6 +242,97 @@ function registryMap(
   };
 }
 
+// ── hook group 解析 & 合并（settings / plugin 共用）────────────────
+
+interface HookSource {
+  kind: "settings" | "plugin";
+  /** 日志标签： "user settings" / "project settings" / pluginName */
+  label: string;
+  /** plugin 的根目录；settings 来源无此项。 */
+  pluginRoot?: string;
+}
+
+/**
+ * 把单个 hook group 对象解析为已验证的 ResolvedHookGroup。
+ * 解析失败（缺少 hooks 数组 / 无有效命令）返回 null。
+ */
+function parseHookGroup(
+  group: unknown,
+  pluginRoot: string,
+  pluginName: string,
+): ResolvedHookGroup | null {
+  if (!group || typeof group !== "object") return null;
+  const g = group as Record<string, unknown>;
+  const hookCommands = g["hooks"];
+  if (!Array.isArray(hookCommands)) return null;
+
+  const commands: HookCommand[] = [];
+  for (const h of hookCommands) {
+    if (!h || typeof h !== "object") continue;
+    const cmd = h as Record<string, unknown>;
+    if (cmd["type"] !== "command") continue;
+    if (typeof cmd["command"] !== "string" || !cmd["command"]) continue;
+    commands.push({
+      type: "command",
+      command: cmd["command"] as string,
+      timeout:
+        typeof cmd["timeout"] === "number" ? cmd["timeout"] : undefined,
+      async: cmd["async"] === true,
+    });
+  }
+
+  if (commands.length === 0) return null;
+
+  return {
+    pluginRoot,
+    pluginName,
+    description:
+      typeof g["description"] === "string" ? g["description"] : undefined,
+    matcher: typeof g["matcher"] === "string" ? g["matcher"] : undefined,
+    hooks: commands,
+  };
+}
+
+/**
+ * 把一组 events → groups 映射合并进 registry。
+ * settings.json 和 plugin hooks.json 共用此逻辑，仅日志标签不同。
+ */
+function mergeHookGroupMap(
+  groups: Record<string, unknown>,
+  registry: HookRegistry,
+  source: HookSource,
+): void {
+  const map = registryMap(registry);
+  const pluginRoot = source.pluginRoot ?? "";
+  const pluginName = source.label;
+
+  for (const [eventName, groupList] of Object.entries(groups)) {
+    const target = map[eventName];
+    if (!target) {
+      log.warn(
+        source.kind === "settings"
+          ? "discovery: unknown hook event in settings.json"
+          : "plugins: unknown hook event in hooks.json",
+        {
+          eventName,
+          ...(source.kind === "plugin"
+            ? { path: source.pluginRoot }
+            : { source: source.label }),
+        },
+      );
+      continue;
+    }
+    if (!Array.isArray(groupList)) continue;
+
+    for (const group of groupList) {
+      const parsed = parseHookGroup(group, pluginRoot, pluginName);
+      if (parsed) target.push(parsed);
+    }
+  }
+}
+
+// ── settings.json 合并入口 ──────────────────────────────────────────
+
 /**
  * 把 settings.json 中的 hooks 字段合并进 registry。
  * settings.json 的 hooks 字段与 hooks.json 同 wire 格式：
@@ -257,52 +347,7 @@ function mergeSettingsHooks(
   registry: HookRegistry,
   source: string,
 ): void {
-  const map = registryMap(registry);
-
-  for (const [eventName, groups] of Object.entries(settingsHooks)) {
-    const target = map[eventName];
-    if (!target) {
-      log.warn("discovery: unknown hook event in settings.json", {
-        eventName,
-        source,
-      });
-      continue;
-    }
-    if (!Array.isArray(groups)) continue;
-
-    for (const group of groups) {
-      if (!group || typeof group !== "object") continue;
-      const g = group as Record<string, unknown>;
-      const hookCommands = g["hooks"];
-      if (!Array.isArray(hookCommands)) continue;
-
-      const commands: HookCommand[] = [];
-      for (const h of hookCommands) {
-        if (!h || typeof h !== "object") continue;
-        const cmd = h as Record<string, unknown>;
-        if (cmd["type"] !== "command") continue;
-        if (typeof cmd["command"] !== "string" || !cmd["command"]) continue;
-        commands.push({
-          type: "command",
-          command: cmd["command"] as string,
-          timeout:
-            typeof cmd["timeout"] === "number" ? cmd["timeout"] : undefined,
-          async: cmd["async"] === true,
-        });
-      }
-
-      if (commands.length === 0) continue;
-
-      target.push({
-        pluginRoot: "", // settings.json hooks 没有 plugin root
-        pluginName: source,
-        description:
-          typeof g["description"] === "string" ? g["description"] : undefined,
-        matcher: typeof g["matcher"] === "string" ? g["matcher"] : undefined,
-        hooks: commands,
-      });
-    }
-  }
+  mergeHookGroupMap(settingsHooks, registry, { kind: "settings", label: source });
 }
 
 // ── plugin hooks 加载 ───────────────────────────────────────────────
@@ -329,63 +374,11 @@ function loadHooksFromPlugin(pluginRoot: string, registry: HookRegistry): void {
 
   const pluginName = loadPluginName(pluginRoot);
 
-  // 事件名 → registry 数组
-  const registryMap: Record<string, ResolvedHookGroup[]> = {
-    SessionStart: registry.sessionStart,
-    UserPromptSubmit: registry.userPromptSubmit,
-    PreToolUse: registry.preToolUse,
-    PostToolUse: registry.postToolUse,
-    PostToolUseFailure: registry.postToolUseFailure,
-    Stop: registry.stop,
-  };
-
-  for (const [eventName, groups] of Object.entries(
-    hooks as Record<string, unknown>,
-  )) {
-    const target = registryMap[eventName];
-    if (!target) {
-      log.warn("plugins: unknown hook event in hooks.json", {
-        eventName,
-        path: hooksJsonPath,
-      });
-      continue;
-    }
-
-    if (!Array.isArray(groups)) continue;
-
-    for (const group of groups) {
-      if (!group || typeof group !== "object") continue;
-      const g = group as Record<string, unknown>;
-      const hookCommands = g["hooks"];
-      if (!Array.isArray(hookCommands)) continue;
-
-      const commands: HookCommand[] = [];
-      for (const h of hookCommands) {
-        if (!h || typeof h !== "object") continue;
-        const cmd = h as Record<string, unknown>;
-        if (cmd["type"] !== "command") continue;
-        if (typeof cmd["command"] !== "string" || !cmd["command"]) continue;
-        commands.push({
-          type: "command",
-          command: cmd["command"] as string,
-          timeout:
-            typeof cmd["timeout"] === "number" ? cmd["timeout"] : undefined,
-          async: cmd["async"] === true,
-        });
-      }
-
-      if (commands.length === 0) continue;
-
-      target.push({
-        pluginRoot,
-        pluginName,
-        description:
-          typeof g["description"] === "string" ? g["description"] : undefined,
-        matcher: typeof g["matcher"] === "string" ? g["matcher"] : undefined,
-        hooks: commands,
-      });
-    }
-  }
+  mergeHookGroupMap(hooks as Record<string, unknown>, registry, {
+    kind: "plugin",
+    label: pluginName,
+    pluginRoot,
+  });
 }
 
 function loadPluginName(pluginRoot: string): string {
@@ -427,272 +420,10 @@ export function matchesTool(
   }
 }
 
-// ── Hook 命令执行 ───────────────────────────────────────────────────
-
-/**
- * 执行单条 hook 命令：context 写入 stdin，从 stdout 解析 JSON 响应。
- * 返回：解析后的 HookResponse + 退出码 + stderr 文本。
- * 命令是 async（fire-and-forget）或失败时 response 为 null。
- */
-function runHookCommand(
-  cmd: HookCommand,
-  jsonCtx: string,
-  pluginRoot: string,
-  hookEvent: string,
-  timeoutMs?: number,
-): Promise<{
-  response: HookResponse | null;
-  exitCode: number | null;
-  stderr: string;
-}> {
-  return new Promise((resolve) => {
-    const child = spawn(cmd.command, {
-      shell: true,
-      cwd: pluginRoot,
-      env: {
-        ...process.env,
-        CLAUDE_PLUGIN_ROOT: pluginRoot,
-        CODEBUDDY_PLUGIN_ROOT: pluginRoot,
-      },
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-
-    let stdout = "";
-    let stderr = "";
-    let resolved = false;
-
-    const timer = timeoutMs
-      ? setTimeout(() => {
-          if (!resolved) {
-            resolved = true;
-            child.kill();
-            log.warn("plugins: hook command timed out", {
-              command: cmd.command.substring(0, 120),
-              hookEvent,
-              timeoutMs,
-            });
-            resolve({ response: null, exitCode: null, stderr: "timeout" });
-          }
-        }, timeoutMs)
-      : null;
-
-    child.stdout.on("data", (chunk: Buffer) => {
-      stdout += chunk.toString("utf8");
-    });
-
-    child.stderr.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString("utf8");
-    });
-
-    child.on("error", (err) => {
-      if (!resolved) {
-        resolved = true;
-        if (timer) clearTimeout(timer);
-        log.warn("plugins: hook command spawn failed", {
-          command: cmd.command.substring(0, 120),
-          hookEvent,
-          error: err.message,
-        });
-        resolve({ response: null, exitCode: null, stderr: err.message });
-      }
-    });
-
-    child.on("close", (code) => {
-      if (resolved) return;
-      resolved = true;
-      if (timer) clearTimeout(timer);
-
-      // Claude Code 规范：「退出码 2 表示阻塞错误。Claude Code 忽略 stdout，
-      // 任何 stdout 中的 JSON 都不解析；改用 stderr 文本作为错误说明。」
-      // 所以必须先看 exit code 再决定是否解析 stdout。
-      let response: HookResponse | null = null;
-
-      if (code === 2) {
-        // 退出码 2 = 阻塞信号，stdout 按规范忽略。stderr 是给人看的原因。
-        const errText = stderr.trim();
-        response = {
-          continue: false,
-          reason: errText || `blocked by ${hookEvent} hook`,
-          systemMessage: errText || `blocked by ${hookEvent} hook`,
-        };
-      } else if (stdout.trim()) {
-        // 退出码 0 或其他：尝试解析 stdout JSON 作为结构化指令
-        try {
-          response = JSON.parse(stdout.trim()) as HookResponse;
-          // 归一化 Claude Code 约定：decision → continue
-          if (
-            response &&
-            typeof (response as Record<string, unknown>).decision === "string"
-          ) {
-            const decision = (response as Record<string, unknown>)
-              .decision as string;
-            if (decision === "block" && response.continue === undefined) {
-              response.continue = false;
-              // reason 是注入回会话的指令文本，让 agent 知道接下来该做什么
-              if (response.reason && response.reason.length > 0) {
-                response.systemMessage = response.reason;
-              }
-            } else if (
-              decision === "allow" &&
-              response.continue === undefined
-            ) {
-              response.continue = true;
-            }
-          }
-        } catch {
-          // 非 JSON stdout 忽略（debug 输出等）
-        }
-      }
-
-      log.debug("hook stdout", {
-        hookEvent,
-        command: cmd.command.substring(0, 120),
-        exitCode: code,
-        stdout: stdout.trim().substring(0, 500),
-        stderr: stderr.trim().substring(0, 200),
-        parsedResponse: response,
-      });
-
-      resolve({ response, exitCode: code, stderr });
-    });
-
-    // 把 context JSON 写到 stdin 并关闭
-    log.debug("hook stdin", {
-      hookEvent,
-      command: cmd.command.substring(0, 120),
-      stdin: jsonCtx.trim(),
-    });
-    child.stdin.write(jsonCtx);
-    child.stdin.end();
-  });
-}
-
-/**
- * 把命令字符串里的 ${CLAUDE_PLUGIN_ROOT} / ${CODEBUDDY_PLUGIN_ROOT}
- * 替换成实际 plugin 根目录。
- */
-function resolveEnvInCommand(command: string, pluginRoot: string): string {
-  return command
-    .replace(/\$\{CLAUDE_PLUGIN_ROOT\}/g, pluginRoot)
-    .replace(/\$\{CODEBUDDY_PLUGIN_ROOT\}/g, pluginRoot);
-}
-
-// ── Hook runner（agent.ts 调用入口）─────────────────────────────────
-
-/** 收集事件下的 hook group 并按 toolName 过滤 matcher。 */
-function collectGroups(
-  registry: HookRegistry | undefined,
-  event: HookEventName,
-  toolName?: string,
-): ResolvedHookGroup[] {
-  if (!registry) return [];
-
-  const groups: ResolvedHookGroup[] =
-    (registry as Record<string, any>)[eventKey(event)] ?? [];
-
-  if (!toolName) return groups;
-
-  return groups.filter((g) => matchesTool(g.matcher, toolName));
-}
-
-function eventKey(event: HookEventName): string {
-  switch (event) {
-    case "SessionStart":
-      return "sessionStart";
-    case "UserPromptSubmit":
-      return "userPromptSubmit";
-    case "PreToolUse":
-      return "preToolUse";
-    case "PostToolUse":
-      return "postToolUse";
-    case "PostToolUseFailure":
-      return "postToolUseFailure";
-    case "Stop":
-      return "stop";
-  }
-}
-
-/**
- * 跑事件下匹配的所有 hook 命令：
- * - async 命令后台 spawn 不等
- * - 同步命令 await 后聚合结果；首个 continue=false 立即停下，返回带 reason 的聚合
- */
-async function runHooks(
-  registry: HookRegistry | undefined,
-  ctx: HookContext,
-  toolName?: string,
-): Promise<HookResponse> {
-  const groups = collectGroups(registry, ctx.hook_event_name, toolName);
-  if (groups.length === 0) return { continue: true };
-
-  const jsonCtx = JSON.stringify(ctx) + "\n";
-  const agg: HookResponse = { continue: true };
-  const systemMessages: string[] = [];
-
-  for (const group of groups) {
-    for (const cmd of group.hooks) {
-      const resolvedCmd = resolveEnvInCommand(cmd.command, group.pluginRoot);
-      const timeoutMs = cmd.timeout ? cmd.timeout * 1000 : undefined;
-
-      if (cmd.async) {
-        // fire-and-forget：spawn 但不 await
-        runHookCommand(
-          { ...cmd, command: resolvedCmd },
-          jsonCtx,
-          group.pluginRoot,
-          ctx.hook_event_name,
-          timeoutMs,
-        ).catch(() => {});
-        continue;
-      }
-
-      try {
-        const { response } = await runHookCommand(
-          { ...cmd, command: resolvedCmd },
-          jsonCtx,
-          group.pluginRoot,
-          ctx.hook_event_name,
-          timeoutMs,
-        );
-
-        if (response) {
-          if (response.continue === false) {
-            agg.continue = false;
-            // Claude Code 规范：一旦阻塞，立即停下后续 hook，第一个阻塞胜出
-            if (response.reason) agg.reason = response.reason;
-            if (response.systemMessage)
-              agg.systemMessage = response.systemMessage;
-            return agg;
-          }
-          if (response.systemMessage)
-            systemMessages.push(response.systemMessage);
-          // 传播 hookSpecificOutput.modifiedInput（PreToolUse 注入环境变量等场景）
-          if (response.hookSpecificOutput?.modifiedInput) {
-            agg.hookSpecificOutput = {
-              ...agg.hookSpecificOutput,
-              modifiedInput: response.hookSpecificOutput.modifiedInput,
-            };
-          }
-        }
-      } catch (e) {
-        log.warn("plugins: hook command failed", {
-          hookEvent: ctx.hook_event_name,
-          command: resolvedCmd.substring(0, 120),
-          error: e instanceof Error ? e.message : String(e),
-        });
-      }
-    }
-  }
-
-  if (systemMessages.length > 0) {
-    agg.systemMessage = systemMessages.join("\n\n");
-  }
-  agg.suppressOutput = systemMessages.length === 0;
-
-  return agg;
-}
-
 // ── 对外 hook 触发函数 ──────────────────────────────────────────────
+
+// runHooks 从 hooks-runner.ts 导入
+import { runHooks } from "./hooks-runner.js";
 
 export async function runSessionStart(
   registry: HookRegistry | undefined,
