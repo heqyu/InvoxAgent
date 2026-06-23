@@ -53,8 +53,6 @@ import {
   // system-prompt.ts 中定义的符号；agent.ts 这里 re-export 以保持
   // 外部 API（cli.ts 等）的稳定，避免破坏 import 路径。
   DEFAULT_SYSTEM_PROMPT,
-  systemMessageWithMemoryAndSkills,
-  THINKING_VALUES,
   buildUserContent,
 } from "./system-prompt.js";
 export { DEFAULT_SYSTEM_PROMPT } from "./system-prompt.js";
@@ -83,6 +81,7 @@ export type { AgentTemplate, AgentSource } from "./templates/index.js";
 import { replayHistory } from "./replay-history.js";
 import { reportTurnUsage } from "./turn-usage-reporter.js";
 import { buildConfigOptions } from "./config-options.js";
+import { ConfigRouter } from "./config-router.js";
 import { SessionLifecycle } from "./session-lifecycle.js";
 import {
   runOneIteration as runIteration,
@@ -102,6 +101,7 @@ export class InvoxAgent implements Agent {
   private systemPromptById: Map<string, SystemPromptDef>;
   /** agent id → 模板。Phase G：与 systemPromptById 互斥使用。 */
   private agentById: Map<string, AgentTemplate>;
+  private router: ConfigRouter;
   private lifecycle: SessionLifecycle;
 
   constructor(
@@ -166,6 +166,14 @@ export class InvoxAgent implements Agent {
       this.configs.defaultAgentId = this.configs.agents[0]!.id;
     }
 
+    this.router = new ConfigRouter(
+      this.configs,
+      this.models,
+      this.agentById,
+      this.systemPromptById,
+      this.availableModelIds,
+    );
+
     this.lifecycle = new SessionLifecycle({
       conn: this.conn,
       configs: this.configs,
@@ -175,6 +183,7 @@ export class InvoxAgent implements Agent {
       availableModelIds: this.availableModelIds,
       sessions: this.sessions,
       hookBase: (s) => this.hookBase(s),
+      router: this.router,
     });
   }
 
@@ -318,67 +327,7 @@ export class InvoxAgent implements Agent {
     }
     const value: string = params.value;
 
-    if (params.configId === "model") {
-      // 通过 config option 路径再暴露一次 model 切换：当 configOptions 被填充时
-      // Zed 的工具栏会用 config_options_view 替代原生 model_selector
-      // （二者互斥，见 thread_view.rs:3811）。我们把 model 重新作为
-      // 一等 SessionConfigOption(category:"model") 暴露，让用户不丢失换 model 的能力。
-      if (!this.availableModelIds.has(value)) {
-        throw new Error(
-          `unknown model value: ${value} (available: ${[...this.availableModelIds].join(", ")})`,
-        );
-      }
-      session.selectedModel = value;
-      // 同步到 configValues，让 configOptionsFor 返回新的 currentValue
-      session.configValues.model = value;
-    } else if (params.configId === "agent") {
-      if (this.configs.agents.length === 0) {
-        throw new Error(
-          `configId "agent" not enabled (no agent templates loaded)`,
-        );
-      }
-      const agent = this.agentById.get(value);
-      if (!agent) {
-        throw new Error(
-          `unknown agent value: ${value} (available: ${[...this.agentById.keys()].join(", ")})`,
-        );
-      }
-      session.configValues["agent"] = value;
-      // 就地替换 history[0]：newSession / loadSession 构造保证该位永远是 system message
-      session.history[0] = systemMessageWithMemoryAndSkills(
-        agent.prompt,
-        session.cwd,
-      );
-      // Phase H：同步切换 model —— agent.model 解析后写入 session.selectedModel
-      this.lifecycle.applyAgentModel(session, agent);
-    } else if (params.configId === "system_prompt") {
-      if (this.configs.agents.length > 0) {
-        throw new Error(
-          `configId "system_prompt" disabled when agent templates are active; use "agent" instead`,
-        );
-      }
-      const def = this.systemPromptById.get(value);
-      if (!def) {
-        throw new Error(
-          `unknown system_prompt value: ${value} (available: ${[...this.systemPromptById.keys()].join(", ")})`,
-        );
-      }
-      session.configValues.system_prompt = value;
-      // 就地替换 history[0]：newSession / loadSession 构造保证该位永远是 system message
-      session.history[0] = systemMessageWithMemoryAndSkills(
-        def.prompt,
-        session.cwd,
-      );
-    } else if (params.configId === "thinking") {
-      if (!THINKING_VALUES.has(value)) {
-        throw new Error(
-          `unknown thinking value: ${value} (allowed: ${[...THINKING_VALUES].join(", ")})`,
-        );
-      }
-      session.configValues.thinking = value;
-    } else {
-      throw new Error(`unknown configId: ${params.configId}`);
-    }
+    this.router.applyConfigChange(session, params.configId, value);
 
     log.info("setSessionConfigOption", {
       sessionId: session.id,
@@ -621,25 +570,11 @@ export class InvoxAgent implements Agent {
       buildHookBase: (s) => this.hookBase(s),
       // Phase G：把"当前激活的 agent 模板"注入 prompt-loop，
       // 让它按 agent.tools / agent.mcp 过滤暴露给 LLM 的工具集。
-      activeAgent: this.activeAgentFor(session),
+      activeAgent: this.router.activeAgentFor(session),
       // SubAgent 工具据此查 subagent_type → 模板。空 map 时 SubAgent
       // 工具会拒绝启动并返回友好错误（agents 路径未启用的旧用户场景）。
       agentRegistry: this.agentById,
     });
-  }
-
-  /**
-   * 当前会话激活的 agent 模板。
-   *
-   *   - agents 为空 → 返回 undefined（旧 system_prompt 路径）
-   *   - configValues.agent 不在最新菜单 → 回退到 defaultAgentId
-   */
-  private activeAgentFor(session: Session): AgentTemplate | undefined {
-    if (this.configs.agents.length === 0) return undefined;
-    const id = session.configValues["agent"] ?? this.configs.defaultAgentId!;
-    return (
-      this.agentById.get(id) ?? this.agentById.get(this.configs.defaultAgentId!)
-    );
   }
 
   /** 构造每次 hook 通用的 base 字段。返回 HookBase 给 prompt-loop / 各

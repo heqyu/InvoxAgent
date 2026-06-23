@@ -8,8 +8,7 @@
 //   - maybeSyncZedThreads（agent 生命周期内只跑一次）
 //   - sendAvailableCommands（ACP available_commands_update 通知）
 //
-// effectiveSystemPromptBody / applyAgentModel 暂时作为回调从 InvoxAgent 注入，
-// 等 J2.4b 抽出 ConfigRouter 后移入。
+// effectiveSystemPromptBody / applyAgentModel 由 ConfigRouter（J2.4b）提供。
 
 import type {
   AgentSideConnection,
@@ -45,7 +44,7 @@ import type {
 import type { AgentTemplate } from "./templates/index.js";
 import { initMcpForSession, releaseSessionMcp } from "./mcp-lifecycle.js";
 import { buildConfigOptions } from "./config-options.js";
-import { resolveAgentModel } from "./templates/index.js";
+import type { ConfigRouter } from "./config-router.js";
 
 /** SessionLifecycle 的依赖注入 bag。 */
 export interface SessionLifecycleDeps {
@@ -58,6 +57,8 @@ export interface SessionLifecycleDeps {
   sessions: Map<string, Session>;
   /** 从 InvoxAgent.hookBase 委托。J2.4b 后可能重构。 */
   hookBase: (session: Session) => HookBase;
+  /** ConfigRouter 提供 effectiveSystemPromptBody / applyAgentModel。 */
+  router: ConfigRouter;
 }
 
 export class SessionLifecycle {
@@ -85,7 +86,8 @@ export class SessionLifecycle {
       initialConfigValues["system_prompt"] =
         this.deps.configs.defaultSystemPromptId;
     }
-    const promptBody = this.effectiveSystemPromptBody(initialConfigValues);
+    const promptBody =
+      this.deps.router.effectiveSystemPromptBody(initialConfigValues);
 
     const session = buildSession({
       cwd,
@@ -137,7 +139,7 @@ export class SessionLifecycle {
       const defaultAgent = this.deps.agentById.get(
         this.deps.configs.defaultAgentId!,
       );
-      if (defaultAgent) this.applyAgentModel(session, defaultAgent);
+      if (defaultAgent) this.deps.router.applyAgentModel(session, defaultAgent);
     }
 
     // 连接 .claude/.mcp.json 中定义的 MCP servers。
@@ -268,7 +270,8 @@ export class SessionLifecycle {
     // 用当前 skill 列表 + 当前 agent/system_prompt 选中值刷新 system message
     // —— 持久化的 history[0] 可能是上一次会话留下的旧版本。
     {
-      const promptBody = this.effectiveSystemPromptBody(restoredConfigValues);
+      const promptBody =
+        this.deps.router.effectiveSystemPromptBody(restoredConfigValues);
       session.history[0] = systemMessageWithMemoryAndSkills(
         promptBody,
         session.cwd,
@@ -414,72 +417,4 @@ export class SessionLifecycle {
     }
   }
 
-  /**
-   * 给定 configValues，计算应注入 history[0] 的 system prompt 主体（不含
-   * memory / skills 段——那两段由 systemMessageWithMemoryAndSkills 自动追加）。
-   *
-   *   - agents 非空 → 取 configValues.agent 对应模板的 prompt
-   *   - agents 为空 → 走旧 system_prompt 模板路径
-   *
-   * 任何路径都保证能取到值；configValues 中的 id 不在表里时回退到默认 id。
-   *
-   * J2.4b 后移到 ConfigRouter。
-   */
-  effectiveSystemPromptBody(configValues: Record<string, string>): string {
-    if (this.deps.configs.agents.length > 0) {
-      const id = configValues["agent"] ?? this.deps.configs.defaultAgentId!;
-      const agent =
-        this.deps.agentById.get(id) ??
-        this.deps.agentById.get(this.deps.configs.defaultAgentId!)!;
-      return agent.prompt;
-    }
-    const id =
-      configValues["system_prompt"] ?? this.deps.configs.defaultSystemPromptId;
-    const def =
-      this.deps.systemPromptById.get(id) ??
-      this.deps.systemPromptById.get(this.deps.configs.defaultSystemPromptId)!;
-    return def.prompt;
-  }
-
-  /**
-   * Phase H：把 agent.model 应用到 session.selectedModel（+ configValues.model）。
-   *
-   *   - agent.model 未设 → 不动 selectedModel，让用户原本的选择保留
-   *   - agent.model = "$MODEL_PRO" / "$MODEL_LITE" / 具体 id → 解析后写入
-   *   - 解析后的 id 不在 availableModelIds 里 → 动态加入（让 ACP model 下拉
-   *     也能展示新 id；防御性地避免 setSessionConfigOption("model") 路径被拒）
-   *   - 解析后与原 selectedModel 相同 → 不更新（避免无效 log 噪音）
-   *
-   * 永不抛错：env 未设时 resolveAgentModel 内部 warn + 回退 fallback；
-   * 这里再判一次"resolved 是否就是 fallback" —— 是则视作"agent 没有覆盖
-   * 意图"，保留 selectedModel 现状。
-   *
-   * J2.4b 后移到 ConfigRouter。
-   */
-  applyAgentModel(session: Session, agent: AgentTemplate): void {
-    if (!agent.model) return;
-    const fallback = session.selectedModel ?? this.deps.models.defaultModelId;
-    const resolved = resolveAgentModel(agent.model, fallback);
-    if (resolved === fallback) return; // env 未设 / 等于当前 → no-op
-
-    if (!this.deps.availableModelIds.has(resolved)) {
-      // 把 PRO/LITE 解析出但不在原 INVOX_MODELS 列表里的 id 动态并入
-      this.deps.availableModelIds.add(resolved);
-      this.deps.models.available.push({ modelId: resolved, name: resolved });
-      log.info("agent model: added resolved id to availableModels", {
-        agentId: agent.id,
-        modelField: agent.model,
-        resolved,
-      });
-    }
-
-    session.selectedModel = resolved;
-    session.configValues["model"] = resolved;
-    log.info("agent model: applied", {
-      sessionId: session.id,
-      agentId: agent.id,
-      modelField: agent.model,
-      resolved,
-    });
-  }
 }
