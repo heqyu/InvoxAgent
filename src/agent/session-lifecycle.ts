@@ -30,10 +30,7 @@ import {
 } from "../persistence.js";
 import { listAvailableCommands } from "../tools/skill.js";
 import { loadHooks, runSessionStart } from "../plugins/hooks.js";
-import {
-  systemMessageWithMemoryAndSkills,
-  THINKING_VALUES,
-} from "./system-prompt.js";
+import { THINKING_VALUES } from "./system-prompt.js";
 import type {
   AgentConfigOptions,
   AgentModelConfig,
@@ -45,6 +42,7 @@ import type { AgentTemplate } from "./templates/index.js";
 import { initMcpForSession, releaseSessionMcp } from "./mcp-lifecycle.js";
 import { buildConfigOptions } from "./config-options.js";
 import type { ConfigRouter } from "./config-router.js";
+import type { SystemPromptComposer } from "./system-prompt-composer.js";
 
 /** SessionLifecycle 的依赖注入 bag。 */
 export interface SessionLifecycleDeps {
@@ -57,8 +55,10 @@ export interface SessionLifecycleDeps {
   sessions: Map<string, Session>;
   /** 从 InvoxAgent.hookBase 委托。J2.4b 后可能重构。 */
   hookBase: (session: Session) => HookBase;
-  /** ConfigRouter 提供 effectiveSystemPromptBody / applyAgentModel。 */
+  /** ConfigRouter 提供 applyAgentModel / activeAgentFor。 */
   router: ConfigRouter;
+  /** SystemPromptComposer 提供 history[0] 构造。 */
+  composer: SystemPromptComposer;
 }
 
 export class SessionLifecycle {
@@ -86,15 +86,13 @@ export class SessionLifecycle {
       initialConfigValues["system_prompt"] =
         this.deps.configs.defaultSystemPromptId;
     }
-    const promptBody =
-      this.deps.router.effectiveSystemPromptBody(initialConfigValues);
-
     const session = buildSession({
       cwd,
-      history: [systemMessageWithMemoryAndSkills(promptBody, cwd)],
+      history: [], // history[0] 由 composer.refresh 填充
       hooks: loadHooks(cwd),
       configValues: initialConfigValues,
     });
+    this.deps.composer.refresh(session);
     this.deps.sessions.set(session.id, session);
 
     // ── 开启会话独立日志 ────────────────────────────────────────────
@@ -269,14 +267,7 @@ export class SessionLifecycle {
 
     // 用当前 skill 列表 + 当前 agent/system_prompt 选中值刷新 system message
     // —— 持久化的 history[0] 可能是上一次会话留下的旧版本。
-    {
-      const promptBody =
-        this.deps.router.effectiveSystemPromptBody(restoredConfigValues);
-      session.history[0] = systemMessageWithMemoryAndSkills(
-        promptBody,
-        session.cwd,
-      );
-    }
+    this.deps.composer.refresh(session);
 
     // 同 newSession，延后一次宏任务发 available commands
     setTimeout(() => this.sendAvailableCommands(session).catch(() => {}), 0);

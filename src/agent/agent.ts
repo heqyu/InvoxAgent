@@ -72,6 +72,7 @@ import { buildConfigOptions } from "./config-options.js";
 import { ConfigRouter } from "./config-router.js";
 import { PromptOrchestrator } from "./prompt-orchestrator.js";
 import { SessionLifecycle } from "./session-lifecycle.js";
+import { SystemPromptComposer } from "./system-prompt-composer.js";
 
 export class InvoxAgent implements Agent {
   readonly conn: AgentSideConnection;
@@ -86,6 +87,7 @@ export class InvoxAgent implements Agent {
   private systemPromptById: Map<string, SystemPromptDef>;
   /** agent id → 模板。Phase G：与 systemPromptById 互斥使用。 */
   private agentById: Map<string, AgentTemplate>;
+  private composer: SystemPromptComposer;
   private router: ConfigRouter;
   private lifecycle: SessionLifecycle;
   private orchestrator: PromptOrchestrator;
@@ -152,12 +154,19 @@ export class InvoxAgent implements Agent {
       this.configs.defaultAgentId = this.configs.agents[0]!.id;
     }
 
+    this.composer = new SystemPromptComposer(
+      this.configs,
+      this.agentById,
+      this.systemPromptById,
+    );
+
     this.router = new ConfigRouter(
       this.configs,
       this.models,
       this.agentById,
       this.systemPromptById,
       this.availableModelIds,
+      this.composer,
     );
 
     this.lifecycle = new SessionLifecycle({
@@ -170,6 +179,7 @@ export class InvoxAgent implements Agent {
       sessions: this.sessions,
       hookBase: (s) => this.hookBase(s),
       router: this.router,
+      composer: this.composer,
     });
 
     this.orchestrator = new PromptOrchestrator(

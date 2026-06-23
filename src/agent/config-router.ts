@@ -1,16 +1,18 @@
 // ConfigRouter — 会话配置变更的单一入口。
 //
 // 从 InvoxAgent / SessionLifecycle 抽出（J2.4b），负责：
-//   - effectiveSystemPromptBody：根据 configValues 计算 system prompt 主体
 //   - applyAgentModel：把 agent.model 解析并应用到 session.selectedModel
 //   - activeAgentFor：查询当前会话激活的 agent 模板
 //   - applyConfigChange：处理 setSessionConfigOption 的 4 个分支
 //     （model / agent / system_prompt / thinking）
 //
+// system prompt 主体计算由 SystemPromptComposer（J3.2）负责。
+// ConfigRouter 在 agent/system_prompt 分支通过 composer.refresh() 刷新 history[0]。
+//
 // 设计：ConfigRouter 不持有 session 注册表或生命周期状态，只负责
 // "给定 session + config change → 应用到 session 上"的纯配置逻辑。
 
-import { systemMessageWithMemoryAndSkills, THINKING_VALUES } from "./system-prompt.js";
+import { THINKING_VALUES } from "./system-prompt.js";
 import type {
   AgentConfigOptions,
   AgentModelConfig,
@@ -19,6 +21,7 @@ import type {
 } from "./session-types.js";
 import type { AgentTemplate } from "./templates/index.js";
 import { resolveAgentModel } from "./templates/index.js";
+import type { SystemPromptComposer } from "./system-prompt-composer.js";
 import { createLogger } from "../log.js";
 
 const log = createLogger("agent");
@@ -30,32 +33,8 @@ export class ConfigRouter {
     private readonly agentById: ReadonlyMap<string, AgentTemplate>,
     private readonly systemPromptById: ReadonlyMap<string, SystemPromptDef>,
     private readonly availableModelIds: Set<string>,
+    private readonly composer: SystemPromptComposer,
   ) {}
-
-  /**
-   * 给定 configValues，计算应注入 history[0] 的 system prompt 主体（不含
-   * memory / skills 段——那两段由 systemMessageWithMemoryAndSkills 自动追加）。
-   *
-   *   - agents 非空 → 取 configValues.agent 对应模板的 prompt
-   *   - agents 为空 → 走旧 system_prompt 模板路径
-   *
-   * 任何路径都保证能取到值；configValues 中的 id 不在表里时回退到默认 id。
-   */
-  effectiveSystemPromptBody(configValues: Record<string, string>): string {
-    if (this.configs.agents.length > 0) {
-      const id = configValues["agent"] ?? this.configs.defaultAgentId!;
-      const agent =
-        this.agentById.get(id) ??
-        this.agentById.get(this.configs.defaultAgentId!)!;
-      return agent.prompt;
-    }
-    const id =
-      configValues["system_prompt"] ?? this.configs.defaultSystemPromptId;
-    const def =
-      this.systemPromptById.get(id) ??
-      this.systemPromptById.get(this.configs.defaultSystemPromptId)!;
-    return def.prompt;
-  }
 
   /**
    * Phase H：把 agent.model 应用到 session.selectedModel（+ configValues.model）。
@@ -151,11 +130,8 @@ export class ConfigRouter {
         );
       }
       session.configValues["agent"] = value;
-      // 就地替换 history[0]：newSession / loadSession 构造保证该位永远是 system message
-      session.history[0] = systemMessageWithMemoryAndSkills(
-        agent.prompt,
-        session.cwd,
-      );
+      // 就地替换 history[0]：通过 composer 统一构造 system message
+      this.composer.refresh(session);
       // Phase H：同步切换 model —— agent.model 解析后写入 session.selectedModel
       this.applyAgentModel(session, agent);
     } else if (configId === "system_prompt") {
@@ -171,11 +147,8 @@ export class ConfigRouter {
         );
       }
       session.configValues.system_prompt = value;
-      // 就地替换 history[0]：newSession / loadSession 构造保证该位永远是 system message
-      session.history[0] = systemMessageWithMemoryAndSkills(
-        def.prompt,
-        session.cwd,
-      );
+      // 就地替换 history[0]：通过 composer 统一构造 system message
+      this.composer.refresh(session);
     } else if (configId === "thinking") {
       if (!THINKING_VALUES.has(value)) {
         throw new Error(
