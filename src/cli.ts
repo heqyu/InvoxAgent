@@ -10,26 +10,15 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import {
-  DEFAULT_SYSTEM_PROMPT,
   InvoxAgent,
-  type AgentConfigOptions,
   type AgentModelConfig,
-  type AgentTemplate,
-  type SystemPromptDef,
 } from "./agent/agent.js";
-import type { ModelInfo } from "./agent/session-types.js";
 import {
-  loadAgentTemplates,
   readEnvModelLite,
   readEnvModelPro,
 } from "./agent/templates/index.js";
 import { discoverAllModels } from "./llm/discovery.js";
-import { EchoProvider } from "./llm/echo.js";
-import { FlakyProvider, type FlakyKind } from "./llm/flaky.js";
-import { BadJsonProvider, MockToolProvider } from "./llm/mock-tools.js";
 import { MultiProvider } from "./llm/multi-provider.js";
-import { OpenAIProvider } from "./llm/openai.js";
-import { loadProvidersJson } from "./llm/providers.js";
 import type { LLMProvider } from "./llm/types.js";
 import { createLogger } from "./log.js";
 import { loadProjectSettings } from "./settings.js";
@@ -39,6 +28,8 @@ import { StdioTransport } from "./transports/stdio.js";
 import type { Transport } from "./transports/types.js";
 import { WebSocketTransport } from "./transports/websocket.js";
 import type { PermissionPolicy } from "./tools/types.js";
+import { pickMockProvider, pickLegacyProvider, pickLegacyModels } from "./cli/provider-pick.js";
+import { pickConfigOptions } from "./cli/config-pick.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -82,11 +73,9 @@ function parseArgs(argv: string[]): Args {
         args.showHelp = true;
         break;
       default:
-        // 未知 flag：忽略以保留 forward-compat，仅 debug 级日志。
         log.debug("unknown arg ignored", { arg: a });
     }
   }
-  // 默认走 stdio —— Zed 启动 invox 时不带任何 flag，stdio 必须是默认。
   if (args.transports.size === 0) args.transports.add("stdio");
   return args;
 }
@@ -150,6 +139,80 @@ MULTI-PROVIDER:
   );
 }
 
+/**
+ * 权限策略选择：
+ *   - never  (默认)：不发起权限请求，agent 直接跑工具
+ *   - writes：write / execute 走 session/request_permission；read 直接通过
+ *   - always：每次工具调用都过权限闸门
+ */
+function pickPolicy(): PermissionPolicy {
+  const raw = (process.env["INVOX_PERMISSIONS"] ?? "never").toLowerCase();
+  if (raw === "writes" || raw === "always" || raw === "never") return raw;
+  log.warn(`unknown INVOX_PERMISSIONS=${raw}, defaulting to "never"`);
+  return "never";
+}
+
+/**
+ * Provider + model 联合构建：三种路径按优先级尝试。
+ *
+ *   1. Mock provider（INVOX_MOCK）—— 离线测试
+ *   2. Multi-provider（.invox/providers.json）—— ping /v1/models 发现模型
+ *   3. Legacy single-provider（INVOX_API_KEY + INVOX_BASE_URL）
+ *   4. EchoProvider 兜底
+ */
+async function buildProviderAndModels(): Promise<{
+  provider: LLMProvider;
+  models: AgentModelConfig;
+}> {
+  const mock = pickMockProvider();
+  if (mock) {
+    return { provider: mock, models: pickLegacyModels() };
+  }
+
+  const providersConfig = (await import("./llm/providers.js")).loadProvidersJson(
+    process.cwd(),
+  );
+  if (providersConfig) {
+    log.info("multi-provider: mode active", {
+      providerCount: providersConfig.providers.length,
+      names: providersConfig.providers.map((p) => p.name),
+    });
+
+    const results = await discoverAllModels(providersConfig.providers);
+
+    const multiProvider = new MultiProvider({
+      providers: providersConfig.providers.map((c, i) => ({
+        config: c,
+        discovery: results[i]!,
+      })),
+      defaultModel: providersConfig.defaultModel,
+    });
+
+    const modelList = multiProvider.modelList;
+    const proId = readEnvModelPro();
+    const liteId = readEnvModelLite();
+    const allIds = modelList.map((m) => m.modelId);
+    if (proId && !allIds.includes(proId)) {
+      modelList.push({ modelId: proId, name: proId, providerName: "env" });
+    }
+    if (liteId && !allIds.includes(liteId)) {
+      modelList.push({ modelId: liteId, name: liteId, providerName: "env" });
+    }
+
+    return {
+      provider: multiProvider,
+      models: {
+        available: modelList.map((m) => ({ modelId: m.modelId, name: m.name })),
+        defaultModelId: multiProvider.defaultModel,
+      },
+    };
+  }
+
+  const provider = pickLegacyProvider();
+  const models = pickLegacyModels();
+  return { provider, models };
+}
+
 async function main(): Promise<void> {
   loadProjectSettings(process.cwd());
   const args = parseArgs(process.argv.slice(2));
@@ -189,8 +252,6 @@ async function main(): Promise<void> {
     );
   }
 
-  // 给每个 transport 接线：每个对端通过工厂获得自己的 InvoxAgent 实例，
-  // 这是 PLAN.md §1 所讲的"per-connection 隔离"。
   await Promise.all(
     transports.map((t) =>
       t.start((peer) => {
@@ -198,23 +259,12 @@ async function main(): Promise<void> {
           (conn) => new InvoxAgent(conn, provider, policy, models, configs),
           peer,
         );
-        // AgentSideConnection 构造完成即自动开跑；ACP 包通过 stream readers
-        // 把它保活，无需在这里持引用。
       }),
     ),
   );
 
-  // stdin 关闭即 graceful shutdown（Zed 断开 = stdin EOF）。
-  if (args.transports.has("stdio")) {
-    process.stdin.on("end", () => {
-      log.info("stdin closed, shutting down");
-      void shutdownAndExit(0);
-    });
-  }
-
-  // 进程级信号处理：确保任何退出路径都不留 MCP 僵尸子进程。
-  //   SIGINT  : Ctrl+C
-  //   SIGTERM : kill / supervisord 触发
+  // ── shutdown 逻辑 ──────────────────────────────────────────────
+  // 定义在 stdin handler 之前，消除前向引用（J2.5 fix）。
   let shuttingDown = false;
   const shutdownAndExit = async (code: number): Promise<void> => {
     if (shuttingDown) return;
@@ -228,6 +278,14 @@ async function main(): Promise<void> {
     }
     process.exit(code);
   };
+
+  if (args.transports.has("stdio")) {
+    process.stdin.on("end", () => {
+      log.info("stdin closed, shutting down");
+      void shutdownAndExit(0);
+    });
+  }
+
   process.on("SIGINT", () => {
     log.info("SIGINT received");
     void shutdownAndExit(130);
@@ -237,314 +295,10 @@ async function main(): Promise<void> {
     void shutdownAndExit(143);
   });
 
-  // 在 transport 绑定期间保活 main()。stdio reader 和 WebSocketServer 都会
-  // 持有活动 handle，进程不会自然退出 —— 但显式 wait 让意图更清晰。
   if (transports.length > 0) {
     await new Promise<void>(() => {
       /* transports 通过 handle 保活进程 */
     });
-  }
-}
-
-/**
- * Provider + model 联合构建：三种路径按优先级尝试。
- *
- *   1. Mock provider（INVOX_MOCK）—— 离线测试，不改
- *   2. Multi-provider（.invox/providers.json）—— ping /v1/models 发现模型
- *   3. Legacy single-provider（INVOX_API_KEY + INVOX_BASE_URL）—— 向后兼容
- *   4. EchoProvider 兜底
- */
-async function buildProviderAndModels(): Promise<{
-  provider: LLMProvider;
-  models: AgentModelConfig;
-}> {
-  // ── 1. Mock providers（完全保留原有行为）────────────────────────
-  const mock = pickMockProvider();
-  if (mock) {
-    return { provider: mock, models: pickLegacyModels() };
-  }
-
-  // ── 2. Multi-provider 模式 ─────────────────────────────────────
-  const providersConfig = loadProvidersJson(process.cwd());
-  if (providersConfig) {
-    log.info("multi-provider: mode active", {
-      providerCount: providersConfig.providers.length,
-      names: providersConfig.providers.map((p) => p.name),
-    });
-
-    // 并行 ping 每个 provider 的 /v1/models
-    const results = await discoverAllModels(providersConfig.providers);
-
-    const multiProvider = new MultiProvider({
-      providers: providersConfig.providers.map((c, i) => ({
-        config: c,
-        discovery: results[i]!,
-      })),
-      defaultModel: providersConfig.defaultModel,
-    });
-
-    // 用发现的模型列表构造 AgentModelConfig
-    const modelList = multiProvider.modelList;
-    const proId = readEnvModelPro();
-    const liteId = readEnvModelLite();
-    const allIds = modelList.map((m) => m.modelId);
-    // 自动并入 PRO / LITE（如已设且不在列表里）
-    if (proId && !allIds.includes(proId)) {
-      modelList.push({ modelId: proId, name: proId, providerName: "env" });
-    }
-    if (liteId && !allIds.includes(liteId)) {
-      modelList.push({ modelId: liteId, name: liteId, providerName: "env" });
-    }
-
-    return {
-      provider: multiProvider,
-      models: {
-        available: modelList.map((m) => ({ modelId: m.modelId, name: m.name })),
-        defaultModelId: multiProvider.defaultModel,
-      },
-    };
-  }
-
-  // ── 3. Legacy single-provider ──────────────────────────────────
-  const provider = pickLegacyProvider();
-  const models = pickLegacyModels();
-  return { provider, models };
-}
-
-/**
- * 从 INVOX_MOCK 环境变量选取离线 mock provider。
- * 未设 INVOX_MOCK 或值不匹配时返回 null（调用方继续走正常路径）。
- */
-function pickMockProvider(): LLMProvider | null {
-  const mock = process.env["INVOX_MOCK"];
-  if (mock === "tools") {
-    log.info("provider: mock-tools (INVOX_MOCK=tools)");
-    return new MockToolProvider();
-  }
-  if (mock === "bad-json") {
-    log.info("provider: mock-bad-json (INVOX_MOCK=bad-json)");
-    return new BadJsonProvider();
-  }
-  if (mock === "flaky") {
-    const kind = (process.env["INVOX_FLAKY_KIND"] ?? "429") as FlakyKind;
-    log.info("provider: mock-flaky", { kind });
-    return new FlakyProvider(kind);
-  }
-  if (mock === "1") {
-    log.info("provider: echo (INVOX_MOCK=1)");
-    return new EchoProvider();
-  }
-  return null;
-}
-
-/**
- * Legacy single-provider 选择（保留向后兼容）。
- *
- * 规则：
- *   - INVOX_API_KEY + INVOX_BASE_URL 都有 → OpenAIProvider
- *   - 其他 → EchoProvider，并 warn 提示
- */
-function pickLegacyProvider(): LLMProvider {
-  const apiKey = process.env["INVOX_API_KEY"];
-  const baseURL = process.env["INVOX_BASE_URL"];
-  if (apiKey && baseURL) {
-    const model = process.env["INVOX_MODEL"] ?? "gpt-4o-mini";
-    log.info("provider: openai (legacy)", { baseURL, model });
-    return new OpenAIProvider({ apiKey, baseURL, model });
-  }
-  log.warn(
-    "provider: echo (no providers.json and INVOX_API_KEY/INVOX_BASE_URL missing)",
-  );
-  return new EchoProvider();
-}
-
-/**
- * 权限策略选择：
- *   - never  (默认)：不发起权限请求，agent 直接跑工具
- *   - writes：write / execute 走 session/request_permission；read 直接通过
- *   - always：每次工具调用都过权限闸门
- */
-function pickPolicy(): PermissionPolicy {
-  const raw = (process.env["INVOX_PERMISSIONS"] ?? "never").toLowerCase();
-  if (raw === "writes" || raw === "always" || raw === "never") return raw;
-  log.warn(`unknown INVOX_PERMISSIONS=${raw}, defaulting to "never"`);
-  return "never";
-}
-
-/**
- * Legacy model 菜单构造（仅在非 multi-provider 模式下使用）。
- *
- * 来源（优先级从高到低）：
- *   - INVOX_MODELS=id1,id2,id3  —— 用户自定义列表
- *   - INVOX_MODEL                —— 唯一 / 默认条目兜底
- *   - 写死 "gpt-4o-mini"          —— 终极兜底，保证菜单非空
- *
- * 规则：默认 model **永远**出现在菜单里（不在则被 unshift 到首位）。
- * Phase H：INVOX_MODEL_PRO / INVOX_MODEL_LITE 解析后的实际值自动并入。
- */
-function pickLegacyModels(): AgentModelConfig {
-  const fallback = process.env["INVOX_MODEL"] ?? "gpt-4o-mini";
-  const raw = process.env["INVOX_MODELS"] ?? fallback;
-  const ids = raw
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-  if (!ids.includes(fallback)) ids.unshift(fallback);
-
-  // INVOX_MODEL_PRO / INVOX_MODEL_LITE：作为 agent.model 占位符引用的目标，
-  // 把它们解析后的实际 id 也并入 menu。
-  const proId = readEnvModelPro();
-  if (proId && !ids.includes(proId)) ids.push(proId);
-  const liteId = readEnvModelLite();
-  if (liteId && !ids.includes(liteId)) ids.push(liteId);
-
-  const available: ModelInfo[] = ids.map((id) => ({ modelId: id, name: id }));
-  return { available, defaultModelId: fallback };
-}
-
-/**
- * 构造 ACP `setSessionConfigOption` 暴露的下拉项。
- *
- * Phase G 路径选择：
- *   - 检测到任何 agent 模板（项目级 / 用户级 / 内置兜底）→ 走 Agent 路径，
- *     `setSessionConfigOption` 暴露 "Agent" 下拉，每个 agent 自带 prompt +
- *     工具白名单 + MCP 开关。systemPrompts 仍存于配置内但不会被暴露。
- *   - 用户显式 `INVOX_AGENTS=disabled` → agents 数组为空，回退旧 system_prompt 路径
- *
- * Agent 模板加载源（高 → 低优先）：
- *   1. <agentScanCwd>/.invox/agents/*.json  —— 项目级
- *      其中 agentScanCwd = INVOX_AGENTS_DIR（若设）或 process.cwd()
- *      （Zed 启动 invox 时 cwd 通常即用户项目根）
- *   2. ~/.invox/agents/*.json                 —— 用户级
- *   3. BUILTIN_AGENTS                         —— Plan / Ask / Worker / CodeReviewer 4 套
- *
- * 失败模式（文件缺失 / JSON 损坏 / 空数组）一律 warn 并回退到内置模板，
- * 不让启动卡死。
- */
-function pickConfigOptions(): AgentConfigOptions {
-  const systemPrompts = loadPromptTemplates();
-  const defaultSystemPromptId = systemPrompts[0]!.id; // load() 总能返回 ≥ 1 条
-
-  // INVOX_AGENTS=disabled 用作"我就要用旧 system_prompt 下拉"的逃生阀
-  const agentsDisabled =
-    (process.env["INVOX_AGENTS"] ?? "").toLowerCase() === "disabled";
-
-  let agents: AgentTemplate[] = [];
-  let defaultAgentId: string | undefined;
-  if (!agentsDisabled) {
-    // 优先用 INVOX_AGENTS_DIR 覆盖扫描根 —— 测试 / 多项目场景下让用户显式
-    // 指向 .invox/agents/ 的父目录。未设则用进程 cwd（生产场景下 Zed 启动
-    // invox 时 cwd 通常是用户项目根）。
-    const scanRoot = process.env["INVOX_AGENTS_DIR"] ?? process.cwd();
-    agents = loadAgentTemplates(scanRoot);
-    if (agents.length > 0) {
-      // 选首项作为默认：项目级文件总在最前，用户期望"放在最上面的 agent
-      // 就是默认"。允许用 INVOX_DEFAULT_AGENT 显式覆盖。
-      const envDefault = process.env["INVOX_DEFAULT_AGENT"];
-      if (envDefault && agents.some((a) => a.id === envDefault)) {
-        defaultAgentId = envDefault;
-      } else {
-        // 内置 4 套时优先选 Worker（最通用），否则选首项
-        defaultAgentId =
-          agents.find((a) => a.id === "Worker")?.id ?? agents[0]!.id;
-      }
-    }
-  }
-
-  return {
-    systemPrompts,
-    defaultSystemPromptId,
-    agents,
-    ...(defaultAgentId ? { defaultAgentId } : {}),
-  };
-}
-
-const BUILTIN_SYSTEM_PROMPTS: SystemPromptDef[] = [
-  {
-    id: "default",
-    name: "Default",
-    description: "Helpful coding assistant — uses tools first, explains after.",
-    prompt: DEFAULT_SYSTEM_PROMPT,
-  },
-  {
-    id: "concise",
-    name: "Concise",
-    description: "Brief responses with minimal narration.",
-    prompt:
-      `You are a coding assistant in Zed. Be brief.\n` +
-      `Use tools first; explain only when asked. Reply in 1-3 sentences unless code is required.`,
-  },
-  {
-    id: "review",
-    name: "Strict Review",
-    description:
-      "Adversarial code reviewer — quotes file paths and flags risks.",
-    prompt:
-      `You are a senior code reviewer in Zed. Adopt a skeptical, evidence-first stance.\n` +
-      `Always quote file paths and line numbers. Flag risks before suggesting changes. ` +
-      `Read code with the Read tool before commenting on it.`,
-  },
-];
-
-function loadPromptTemplates(): SystemPromptDef[] {
-  const file = process.env["INVOX_PROMPT_TEMPLATES_FILE"];
-  if (!file) return BUILTIN_SYSTEM_PROMPTS;
-  try {
-    const raw = readFileSync(file, "utf8");
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed) || parsed.length === 0) {
-      log.warn(
-        `INVOX_PROMPT_TEMPLATES_FILE: parsed value is not a non-empty array; using built-in templates`,
-        { file },
-      );
-      return BUILTIN_SYSTEM_PROMPTS;
-    }
-    const out: SystemPromptDef[] = [];
-    for (const entry of parsed) {
-      if (
-        typeof entry !== "object" ||
-        entry === null ||
-        typeof (entry as { id?: unknown }).id !== "string" ||
-        typeof (entry as { name?: unknown }).name !== "string" ||
-        typeof (entry as { prompt?: unknown }).prompt !== "string"
-      ) {
-        log.warn("INVOX_PROMPT_TEMPLATES_FILE: skipping invalid entry", {
-          entry,
-        });
-        continue;
-      }
-      const e = entry as {
-        id: string;
-        name: string;
-        description?: string;
-        prompt: string;
-      };
-      out.push({
-        id: e.id,
-        name: e.name,
-        ...(typeof e.description === "string"
-          ? { description: e.description }
-          : {}),
-        prompt: e.prompt,
-      });
-    }
-    if (out.length === 0) {
-      log.warn(
-        "INVOX_PROMPT_TEMPLATES_FILE: no valid entries after filtering; using built-in templates",
-        { file },
-      );
-      return BUILTIN_SYSTEM_PROMPTS;
-    }
-    return out;
-  } catch (err) {
-    log.warn(
-      "INVOX_PROMPT_TEMPLATES_FILE: load failed; using built-in templates",
-      {
-        file,
-        err: err instanceof Error ? err.message : String(err),
-      },
-    );
-    return BUILTIN_SYSTEM_PROMPTS;
   }
 }
 
