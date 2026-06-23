@@ -105,6 +105,13 @@ export interface ToolExecContext {
   toolCallId: string;
   state: SessionToolState;
   /**
+   * 当前激活的 agent 模板 id（如 "BDD" / "Plan" / "Worker"）。
+   *
+   * 供工具按 agent 做差异化行为（如 MakePlan 在 BDD 模式下校验 Gherkin 段落）。
+   * undefined → 旧路径 / 无 agent 上下文。
+   */
+  activeAgentId?: string;
+  /**
    * 启动 subagent 的入口闭包。仅在「parent prompt loop 调用本工具」时存在；
    * 「subagent 内部调用本工具」时为 undefined（避免递归）。
    *

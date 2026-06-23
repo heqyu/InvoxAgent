@@ -455,6 +455,7 @@ async function runOneToolCall(
     policy: deps.policy,
     toolCallId: call.id,
     state: session.toolState,
+    activeAgentId: deps.activeAgent?.id,
     ...(deps.inSubAgent
       ? {}
       : { subAgentRunner: makeSubAgentRunner(session, deps) }),

@@ -251,13 +251,22 @@ export class InvoxAgent implements Agent {
     // ── 开启会话独立日志 ────────────────────────────────────────────
     const sessionLog = openSessionLogFile(params.cwd, id, "session");
     session.sessionLog = sessionLog;
+    const allOpts = buildConfigOptions(session, this.models, this.configs);
+    const modelOpt = allOpts.find((o) => o.id === "model" && o.type === "select") as
+      | { id: string; type: "select"; options: Array<{ value: string }> }
+      | undefined;
+    const modelNames = modelOpt
+      ? modelOpt.options.map((o) => o.value).join(", ")
+      : "(none)";
+    const modelCount = modelOpt ? modelOpt.options.length : 0;
     sessionLog.write(
       `── session start @ ${formatTimestamp(new Date())} ───\n` +
         `  id:     ${id}\n` +
         `  cwd:    ${params.cwd}\n` +
         `  agent:  ${initialConfigValues["agent"] ?? "(none)"}\n` +
         `  model:  ${session.selectedModel ?? this.models.defaultModelId}\n` +
-        `  prompt: ${initialConfigValues["system_prompt"] ?? "(none)"}\n`,
+        `  prompt: ${initialConfigValues["system_prompt"] ?? "(none)"}\n` +
+        `  models(${modelCount}): ${modelNames}\n`,
     );
 
     log.info("session created", {
