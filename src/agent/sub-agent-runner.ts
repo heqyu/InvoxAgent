@@ -28,9 +28,13 @@
 //   - 模板加载 —— 上游已经把 agentRegistry 准备好传进来
 
 import { randomUUID } from "node:crypto";
-import { closeSync, mkdirSync, openSync, writeSync } from "node:fs";
-import { join } from "node:path";
-import { createLogger, formatTimestamp, type LogFile } from "../log.js";
+import {
+  createLogger,
+  formatTimestamp,
+  openSessionLogFile,
+  preview,
+  type LogFile,
+} from "../log.js";
 const log = createLogger("sub-agent");
 import type {
   AgentSideConnection,
@@ -113,82 +117,8 @@ function subAgentMaxIterations(): number {
 }
 
 // ── 日志文件 ──────────────────────────────────────────────────────────
-
-/**
- * 给 subagent 用的"封装日志文件"。
- *   - 路径：<cwd>/.invox/logs/subagent-<parent-id-prefix>-<runid>-<ts>.log
- *   - 失败容错：mkdir / openSync 失败时返回 noop log（write/close 都为空），
- *     并 warn 一条主日志；不让日志故障拖崩 subagent 主流程
- *   - **同步写**（openSync / writeSync / closeSync）：subagent 的事件密度不高
- *     （每 turn 几十条），同步写换来"runSubAgent 返回时文件一定可见"的强保证，
- *     单测里能直接 readFileSync 验证；并发 subagent 各自持有独立 fd，不冲突
- *   - 文件名 sanitization：parent session id 取前 8 字符（足够区分），runid
- *     取 UUID 前 8 字符；时间戳用 ISO 但替换冒号/点为短横（Windows 文件名
- *     不允许冒号）
- */
-function openSubAgentLog(
-  cwd: string,
-  parentSessionId: string,
-  runId: string,
-): LogFile {
-  const noop: LogFile = {
-    path: "",
-    write: () => {},
-    close: () => {},
-  };
-
-  const dir = join(cwd, ".invox", "logs");
-  try {
-    mkdirSync(dir, { recursive: true });
-  } catch (e) {
-    log.warn("subagent log: cannot mkdir", {
-      dir,
-      error: e instanceof Error ? e.message : String(e),
-    });
-    return noop;
-  }
-
-  const safeParent = parentSessionId
-    .slice(0, 8)
-    .replace(/[^a-zA-Z0-9_-]/g, "_");
-  const safeRun = runId.slice(0, 8);
-  const ts = new Date().toISOString().replace(/[:.]/g, "-");
-  const filePath = join(dir, `subagent-${safeParent}-${safeRun}-${ts}.log`);
-
-  let fd: number;
-  try {
-    // "a" = append-only；多个 subagent 各自的文件名带 runId/ts，不会互相 append
-    fd = openSync(filePath, "a");
-  } catch (e) {
-    log.warn("subagent log: cannot open fd", {
-      filePath,
-      error: e instanceof Error ? e.message : String(e),
-    });
-    return noop;
-  }
-
-  let closed = false;
-  return {
-    path: filePath,
-    write: (line: string) => {
-      if (closed) return;
-      try {
-        writeSync(fd, line.endsWith("\n") ? line : line + "\n");
-      } catch {
-        // 写失败也不再回报；close() 时仍尝试 closeSync 释放 fd
-      }
-    },
-    close: () => {
-      if (closed) return;
-      closed = true;
-      try {
-        closeSync(fd);
-      } catch {
-        // 已经关掉 / 还没打开，都视为 no-op
-      }
-    },
-  };
-}
+// subagent 日志通过 openSessionLogFile + 自定义 fileNameFn 生成，
+// 不再自己 openSync/mkdirSync（J1.3 合并进 log.ts）。
 
 // 时间戳前缀（本地时间）—— 复用 log.ts 的 formatTimestamp，
 // 与主 session 日志格式统一。
@@ -351,7 +281,14 @@ export async function runSubAgent(
 
   // 3. 开日志文件 —— 每个 subagent 一个独立文件（按 runId 区分）
   const runId = randomUUID();
-  const logFile = openSubAgentLog(parent.cwd, parent.id, runId);
+  const logFile = openSessionLogFile(parent.cwd, parent.id, "subagent", {
+    fileNameFn: (base) => {
+      const safeParent = base.slice(0, 8).replace(/[^a-zA-Z0-9_-]/g, "_");
+      const safeRun = runId.slice(0, 8);
+      const tsFmt = new Date().toISOString().replace(/[:.]/g, "-");
+      return `subagent-${safeParent}-${safeRun}-${tsFmt}`;
+    },
+  });
   const startedAt = Date.now();
   logFile.write(
     `${ts()} ── subagent start ────────────────────────────────────────\n` +
@@ -591,16 +528,6 @@ function collectAssistantText(slice: readonly LLMMessage[]): string {
     }
   }
   return parts.join("\n");
-}
-
-/**
- * 把任意文本截到 max 字符内，溢出加省略号 + 长度提示。日志可读性优先，
- * 超过两行的内容也压成单行（替换换行为 \n 转义）—— 一行一个事件方便 grep。
- */
-function preview(s: string, max: number): string {
-  const oneLine = s.replace(/\r?\n/g, "\\n");
-  if (oneLine.length <= max) return oneLine;
-  return oneLine.slice(0, max) + `…(+${oneLine.length - max} chars)`;
 }
 
 /**

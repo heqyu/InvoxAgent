@@ -226,6 +226,18 @@ const noopLog: LogFile = {
   close: () => {},
 };
 
+export interface SessionLogOptions {
+  /** 子目录名（默认 "logs"）。 */
+  subdir?: string;
+  /**
+   * 文件名生成器。接收 sanitize 过的 base name（取特殊字符替换后），
+   * 返回完整文件名（不含 .log 后缀）。默认 `(base) => base`。
+   *
+   * 用例：subagent 日志需要带 parent-session + runId + 时间戳。
+   */
+  fileNameFn?: (sanitizedBase: string) => string;
+}
+
 /**
  * 打开一个按 session（或 subagent）隔离的日志文件。
  *
@@ -237,13 +249,16 @@ const noopLog: LogFile = {
  * @param cwd    工作区根目录
  * @param name   日志文件名的核心部分（不含路径和 .log 后缀），如 sessionId
  * @param label  日志中标记标签，如 "session" / "subagent"
+ * @param opts   可选：自定义子目录或文件名生成器
  */
 export function openSessionLogFile(
   cwd: string,
   name: string,
   label: string,
+  opts?: SessionLogOptions,
 ): LogFile {
-  const dir = join(cwd, ".invox", "logs");
+  const subdir = opts?.subdir ?? "logs";
+  const dir = join(cwd, ".invox", subdir);
   try {
     mkdirSync(dir, { recursive: true });
   } catch (e) {
@@ -256,7 +271,8 @@ export function openSessionLogFile(
 
   // sanitize：sessionId 或其它传入的 name 可能含特殊字符
   const safeName = name.replace(/[^a-zA-Z0-9_-]/g, "_");
-  const filePath = join(dir, `${safeName}.log`);
+  const fileName = opts?.fileNameFn ? opts.fileNameFn(safeName) : safeName;
+  const filePath = join(dir, `${fileName}.log`);
 
   let fd: number;
   try {
