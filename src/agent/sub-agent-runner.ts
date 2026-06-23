@@ -37,13 +37,12 @@ import type {
   SessionNotification,
 } from "@agentclientprotocol/sdk";
 import type { LLMMessage } from "../llm/types.js";
-import { FileCache } from "../tools/cache.js";
 import { runOneIteration, type IterationDeps } from "./prompt-loop.js";
+import { createSession } from "./session-factory.js";
 import type { Session } from "./session-types.js";
 import { systemMessageWithMemoryAndSkills } from "./system-prompt.js";
 import { resolveAgentModel } from "./templates.js";
 import { humanizeTokens } from "./token-meter.js";
-import { emptyTurnUsage } from "./usage-meter.js";
 import { maxIterations as parentMaxIterations } from "./agent-helpers.js";
 
 // ── 输入输出类型 ──────────────────────────────────────────────────────
@@ -386,10 +385,10 @@ export async function runSubAgent(
     signal.addEventListener("abort", onParentAbort, { once: true });
   }
 
-  const sub: Session = {
-    // 共享 parent.id —— hooks / requestPermission 等 ACP 路径需要拿到 sessionId，
-    // subagent 复用父的让客户端识别它们属于同一会话。但所有 sessionUpdate 通知
-    // 都被 wrapConnForSubAgent 静默掉，UI 不会被打扰。
+  // 共享 parent.id —— hooks / requestPermission 等 ACP 路径需要拿到 sessionId，
+  // subagent 复用父的让客户端识别它们属于同一会话。但所有 sessionUpdate 通知
+  // 都被 wrapConnForSubAgent 静默掉，UI 不会被打扰。
+  const sub = createSession({
     id: parent.id,
     cwd: parent.cwd,
     history: [
@@ -397,18 +396,14 @@ export async function runSubAgent(
       { role: "user", content: opts.prompt },
     ],
     abort: subAbort,
-    // 独立的 toolState —— subagent 的 readPaths / cache 不污染父
-    toolState: { readPaths: new Set(), cache: new FileCache() },
-    createdAt: Date.now(),
+    hooks: parent.hooks,
+    // 共享 MCP —— 同一 cwd 下进程池只有一份
+    mcpClient: parent.mcpClient,
     selectedModel: resolvedModel,
     // thinking 沿用父配置；不暴露 agent / system_prompt / model 等下拉态
     configValues: { thinking: parent.configValues["thinking"] ?? "off" },
-    turnUsage: emptyTurnUsage(),
-    turnStartedAt: Date.now(),
-    // 共享 MCP / hooks —— 同一 cwd 下进程池只有一份
-    ...(parent.mcpClient ? { mcpClient: parent.mcpClient } : {}),
-    hooks: parent.hooks,
-  };
+  });
+  sub.turnStartedAt = Date.now();
 
   // 5. 派生 sub IterationDeps：覆盖 conn / activeAgent / inSubAgent
   //

@@ -14,7 +14,7 @@
 //   超额 → max_turn_requests
 //
 // MAX_ITERATIONS 默认 50，可通过 INVOX_MAX_ITERATIONS env 覆盖。
-import { randomUUID } from "node:crypto";
+import { createSession } from "./session-factory.js";
 import { join } from "node:path";
 import {
   PROTOCOL_VERSION,
@@ -49,7 +49,6 @@ import {
   titleFromHistory,
   type PersistedSession,
 } from "../persistence.js";
-import { FileCache } from "../tools/cache.js";
 import { listAvailableCommands } from "../tools/skill.js";
 import type { PermissionPolicy } from "../tools/types.js";
 import {
@@ -220,7 +219,6 @@ export class InvoxAgent implements Agent {
 
   async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
     this.maybeSyncZedThreads(params.cwd);
-    const id = randomUUID();
 
     // configValues 初始值：根据 agents / system_prompt 路径择一填充
     const initialConfigValues: Record<string, string> = { thinking: "off" };
@@ -231,25 +229,16 @@ export class InvoxAgent implements Agent {
     }
     const promptBody = this.effectiveSystemPromptBody(initialConfigValues);
 
-    const session: Session = {
-      id,
+    const session = createSession({
       cwd: params.cwd,
       history: [systemMessageWithMemoryAndSkills(promptBody, params.cwd)],
-      abort: new AbortController(),
-      toolState: {
-        readPaths: new Set<string>(),
-        cache: new FileCache(),
-      },
-      createdAt: Date.now(),
-      configValues: initialConfigValues,
-      turnUsage: emptyTurnUsage(),
-      turnStartedAt: 0,
       hooks: loadHooks(params.cwd),
-    };
-    this.sessions.set(id, session);
+      configValues: initialConfigValues,
+    });
+    this.sessions.set(session.id, session);
 
     // ── 开启会话独立日志 ────────────────────────────────────────────
-    const sessionLog = openSessionLogFile(params.cwd, id, "session");
+    const sessionLog = openSessionLogFile(params.cwd, session.id, "session");
     session.sessionLog = sessionLog;
     const allOpts = buildConfigOptions(session, this.models, this.configs);
     const modelOpt = allOpts.find((o) => o.id === "model" && o.type === "select") as
@@ -261,7 +250,7 @@ export class InvoxAgent implements Agent {
     const modelCount = modelOpt ? modelOpt.options.length : 0;
     sessionLog.write(
       `── session start @ ${formatTimestamp(new Date())} ───\n` +
-        `  id:     ${id}\n` +
+        `  id:     ${session.id}\n` +
         `  cwd:    ${params.cwd}\n` +
         `  agent:  ${initialConfigValues["agent"] ?? "(none)"}\n` +
         `  model:  ${session.selectedModel ?? this.models.defaultModelId}\n` +
@@ -270,7 +259,7 @@ export class InvoxAgent implements Agent {
     );
 
     log.info("session created", {
-      id,
+      id: session.id,
       cwd: params.cwd,
       agent: initialConfigValues["agent"],
       systemPrompt: initialConfigValues["system_prompt"],
@@ -311,7 +300,7 @@ export class InvoxAgent implements Agent {
     setTimeout(() => this.sendAvailableCommands(session).catch(() => {}), 0);
 
     return {
-      sessionId: id,
+      sessionId: session.id,
       configOptions: buildConfigOptions(session, this.models, this.configs),
     };
   }
@@ -358,30 +347,23 @@ export class InvoxAgent implements Agent {
       }
     }
 
-    const session: Session = {
+    // 仅当磁盘上的 selectedModel 仍在当前菜单里才恢复；
+    // 用户后来收窄了 INVOX_MODELS 时回退默认，而非沿用不存在的 id。
+    const session = createSession({
       id: snapshot.id,
       cwd: params.cwd,
       history: snapshot.history.slice(),
-      abort: new AbortController(),
-      toolState: {
-        readPaths: new Set<string>(),
-        cache: new FileCache(),
-      },
+      hooks: loadHooks(params.cwd),
       store,
       createdAt: snapshot.createdAt,
-      // 仅当磁盘上的 selectedModel 仍在当前菜单里才恢复；
-      // 用户后来收窄了 INVOX_MODELS 时回退默认，而非沿用不存在的 id。
       selectedModel:
         snapshot.selectedModel &&
         this.availableModelIds.has(snapshot.selectedModel)
           ? snapshot.selectedModel
           : undefined,
       configValues: restoredConfigValues,
-      turnUsage: emptyTurnUsage(),
-      turnStartedAt: 0,
       lastTurnUsage: snapshot.lastTurnUsage,
-      hooks: loadHooks(params.cwd),
-    };
+    });
     this.sessions.set(session.id, session);
 
     // ── 开启会话独立日志（loadSession 恢复后） ───────────────────────
