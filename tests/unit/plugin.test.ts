@@ -90,7 +90,7 @@ function makeCtx(cwd: string): ToolExecContext {
 async function listSkills(cwd: string): Promise<string> {
   const r = await executeTool(
     "Skill",
-    JSON.stringify({ name: "list", description: "List" }),
+    { name: "list", description: "List" },
     makeCtx(cwd),
   );
   return r.resultText;
@@ -162,11 +162,11 @@ describe("plugin skills", () => {
     // 调用 greet — 应走 project 而非 plugin
     const greet = await executeTool(
       "Skill",
-      JSON.stringify({
+      {
         name: "greet",
         description: "Greet",
         params: { arguments: "World" },
-      }),
+      },
       makeCtx(env.cwd),
     );
     expect(greet.ok).toBe(true);
@@ -193,11 +193,11 @@ describe("plugin skills", () => {
 
     const result = await executeTool(
       "Skill",
-      JSON.stringify({
+      {
         name: "translate",
         description: "Translate",
         params: { arguments: "hello" },
-      }),
+      },
       makeCtx(env.cwd),
     );
     expect(result.ok).toBe(true);

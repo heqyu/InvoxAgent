@@ -44,7 +44,7 @@ async function main(): Promise<void> {
   // ── 1. Glob '**/*.ts' returns 3 ts files (excludes node_modules).
   let r = await executeTool(
     "Glob",
-    JSON.stringify({ pattern: "**/*.ts", description: "find ts" }),
+    { pattern: "**/*.ts", description: "find ts" },
     ctx,
   );
   assert(r.ok, `1. Glob should succeed`);
@@ -66,7 +66,7 @@ async function main(): Promise<void> {
   // ── 2. Glob with explicit path narrows the search.
   r = await executeTool(
     "Glob",
-    JSON.stringify({ pattern: "**/*.ts", path: "tests", description: "find tests" }),
+    { pattern: "**/*.ts", path: "tests", description: "find tests" },
     ctx,
   );
   assert(r.ok, `2. scoped Glob should succeed`);
@@ -84,11 +84,11 @@ async function main(): Promise<void> {
   //   README also has Foo. Let's expect 4 total file matches.
   r = await executeTool(
     "Grep",
-    JSON.stringify({
+    {
       pattern: "Foo",
       output_mode: "files_with_matches",
       description: "find Foo",
-    }),
+    },
     ctx,
   );
   assert(r.ok, `3. Grep -l should succeed`);
@@ -105,10 +105,10 @@ async function main(): Promise<void> {
   // ── 4. Grep content mode shows lineno:text.
   r = await executeTool(
     "Grep",
-    JSON.stringify({
+    {
       pattern: "export class Foo",
       description: "find class def",
-    }),
+    },
     ctx,
   );
   assert(r.ok, `4. Grep content should succeed`);
@@ -121,12 +121,12 @@ async function main(): Promise<void> {
   writeFileSync(join(dir, "src", "case.ts"), "TODO: handle this\ntodo: another\n");
   r = await executeTool(
     "Grep",
-    JSON.stringify({
+    {
       pattern: "todo:",
       case_insensitive: true,
       output_mode: "count",
       description: "count TODOs",
-    }),
+    },
     ctx,
   );
   assert(r.ok, `5. Grep -i -c should succeed`);
@@ -138,12 +138,12 @@ async function main(): Promise<void> {
   // ── 6. Grep with glob filter constrains files searched.
   r = await executeTool(
     "Grep",
-    JSON.stringify({
+    {
       pattern: "Foo",
       glob: "*.md",
       output_mode: "files_with_matches",
       description: "find Foo in docs",
-    }),
+    },
     ctx,
   );
   assert(r.ok, `6. Grep with glob should succeed`);

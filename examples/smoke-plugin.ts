@@ -41,7 +41,7 @@ async function main(): Promise<void> {
   mkdirSync(join(alpha, ".claude-plugin"), { recursive: true });
   writeFileSync(
     join(alpha, ".claude-plugin", "plugin.json"),
-    JSON.stringify({ name: "plugin-alpha", version: "1.0.0" }),
+    { name: "plugin-alpha", version: "1.0.0" },
     "utf8",
   );
   mkdirSync(join(alpha, "skills", "greet"), { recursive: true });
@@ -62,7 +62,7 @@ async function main(): Promise<void> {
   mkdirSync(join(beta, ".claude-plugin"), { recursive: true });
   writeFileSync(
     join(beta, ".claude-plugin", "plugin.json"),
-    JSON.stringify({ name: "plugin-beta", version: "2.0.0" }),
+    { name: "plugin-beta", version: "2.0.0" },
     "utf8",
   );
   mkdirSync(join(beta, "skills", "translate"), { recursive: true });
@@ -83,7 +83,7 @@ async function main(): Promise<void> {
   mkdirSync(join(gamma, ".claude-plugin"), { recursive: true });
   writeFileSync(
     join(gamma, ".claude-plugin", "plugin.json"),
-    JSON.stringify({ name: "plugin-gamma", version: "3.0.0" }),
+    { name: "plugin-gamma", version: "3.0.0" },
     "utf8",
   );
   mkdirSync(join(gamma, "skills", "hidden"), { recursive: true });
@@ -151,7 +151,7 @@ async function main(): Promise<void> {
     // ── List all skills ──────────────────────────────────────────────
     const list = await executeTool(
       "Skill",
-      JSON.stringify({ name: "list", description: "List" }),
+      { name: "list", description: "List" },
       ctx,
     );
     ASSERT(list.ok, "Skill('list') succeeds");
@@ -194,11 +194,11 @@ async function main(): Promise<void> {
     // ── Invoke "greet" — should use project-level, not plugin ────────
     const greet = await executeTool(
       "Skill",
-      JSON.stringify({
+      {
         name: "greet",
         description: "Greet",
         params: { arguments: "World" },
-      }),
+      },
       ctx,
     );
     ASSERT(greet.ok, "Skill('greet') succeeds");
@@ -210,11 +210,11 @@ async function main(): Promise<void> {
     // ── Invoke "translate" — from plugin-beta ─────────────────────────
     const translate = await executeTool(
       "Skill",
-      JSON.stringify({
+      {
         name: "translate",
         description: "Translate",
         params: { arguments: "hello" },
-      }),
+      },
       ctx,
     );
     ASSERT(translate.ok, "Skill('translate') from plugin-beta succeeds");
@@ -230,11 +230,11 @@ async function main(): Promise<void> {
     // ── Invoke "decode" — from plugin-beta ────────────────────────────
     const decode = await executeTool(
       "Skill",
-      JSON.stringify({
+      {
         name: "decode",
         description: "Decode",
         params: { encoded: "aGVsbG8=" },
-      }),
+      },
       ctx,
     );
     ASSERT(decode.ok, "Skill('decode') from plugin-beta succeeds");
@@ -246,11 +246,11 @@ async function main(): Promise<void> {
     // ── Invoke "analyze" — should fail (disabled in config) ───────────
     const analyze = await executeTool(
       "Skill",
-      JSON.stringify({
+      {
         name: "analyze",
         description: "Analyze",
         params: { file: "x.ts" },
-      }),
+      },
       ctx,
     );
     ASSERT(!analyze.ok, "Skill('analyze') is unknown (disabled by config)");
@@ -258,7 +258,7 @@ async function main(): Promise<void> {
     // ── Invoke "hidden" — should fail (entire plugin disabled) ────────
     const hidden = await executeTool(
       "Skill",
-      JSON.stringify({ name: "hidden", description: "Hidden" }),
+      { name: "hidden", description: "Hidden" },
       ctx,
     );
     ASSERT(!hidden.ok, "Skill('hidden') is unknown (plugin-gamma disabled)");

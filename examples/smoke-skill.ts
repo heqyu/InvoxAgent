@@ -83,7 +83,7 @@ async function main(): Promise<void> {
     // ── 3. Test Skill("list") ──────────────────────────────────────
     const listResult = await executeTool(
       "Skill",
-      JSON.stringify({ name: "list", description: "List skills" }),
+      { name: "list", description: "List skills" },
       ctx,
     );
     ASSERT(listResult.ok, "Skill('list') succeeds");
@@ -111,11 +111,11 @@ async function main(): Promise<void> {
     // ── 4. Test Skill("explain") with $ARGUMENTS ────────────────────
     const explainResult = await executeTool(
       "Skill",
-      JSON.stringify({
+      {
         name: "explain",
         description: "Explain some code",
         params: { arguments: "function add(a,b){return a+b}" },
-      }),
+      },
       ctx,
     );
     ASSERT(explainResult.ok, "Skill('explain') succeeds");
@@ -131,11 +131,11 @@ async function main(): Promise<void> {
     // ── 5. Test Skill("explain") $ARGUMENTS fallback ────────────────
     const explainFallback = await executeTool(
       "Skill",
-      JSON.stringify({
+      {
         name: "explain",
         description: "Explain fallback",
         params: { code: "x = 1" },
-      }),
+      },
       ctx,
     );
     ASSERT(explainFallback.ok, "Skill('explain') with no .arguments succeeds");
@@ -147,11 +147,11 @@ async function main(): Promise<void> {
     // ── 6. Test Skill("review") with {{path}} ──────────────────────
     const reviewResult = await executeTool(
       "Skill",
-      JSON.stringify({
+      {
         name: "review",
         description: "Review a file",
         params: { path: "src/main.ts" },
-      }),
+      },
       ctx,
     );
     ASSERT(reviewResult.ok, "Skill('review') succeeds");
@@ -167,11 +167,11 @@ async function main(): Promise<void> {
     // ── 7. Test Skill("commit-msg") ─────────────────────────────────
     const commitResult = await executeTool(
       "Skill",
-      JSON.stringify({
+      {
         name: "commit-msg",
         description: "Generate commit msg",
         params: { arguments: "+added new feature" },
-      }),
+      },
       ctx,
     );
     ASSERT(commitResult.ok, "Skill('commit-msg') succeeds");
@@ -183,7 +183,7 @@ async function main(): Promise<void> {
     // ── 8. Test unknown skill ───────────────────────────────────────
     const unknownResult = await executeTool(
       "Skill",
-      JSON.stringify({ name: "nonexistent", description: "Unknown" }),
+      { name: "nonexistent", description: "Unknown" },
       ctx,
     );
     ASSERT(!unknownResult.ok, "Skill('nonexistent') returns ok=false");
@@ -199,7 +199,7 @@ async function main(): Promise<void> {
     // ── 9. Test missing name ────────────────────────────────────────
     const noNameResult = await executeTool(
       "Skill",
-      JSON.stringify({ description: "No name" }),
+      { description: "No name" },
       ctx,
     );
     ASSERT(!noNameResult.ok, "Skill() with no name returns ok=false");
@@ -216,7 +216,7 @@ async function main(): Promise<void> {
     };
     const emptyResult = await executeTool(
       "Skill",
-      JSON.stringify({ name: "list", description: "List" }),
+      { name: "list", description: "List" },
       emptyCtx,
     );
     ASSERT(emptyResult.ok, "Skill('list') in empty-project cwd succeeds");

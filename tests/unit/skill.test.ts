@@ -90,7 +90,7 @@ describe("Skill tool", () => {
 
     const list = await executeTool(
       "Skill",
-      JSON.stringify({ name: "list", description: "List" }),
+      { name: "list", description: "List" },
       makeCtx(env.cwd),
     );
     expect(list.ok).toBe(true);
@@ -109,7 +109,7 @@ describe("Skill tool", () => {
 
     const list = await executeTool(
       "Skill",
-      JSON.stringify({ name: "list", description: "List" }),
+      { name: "list", description: "List" },
       makeCtx(env.cwd),
     );
     expect(list.ok).toBe(true);
@@ -123,11 +123,11 @@ describe("Skill tool", () => {
 
     const result = await executeTool(
       "Skill",
-      JSON.stringify({
+      {
         name: "explain",
         description: "Explain",
         params: { arguments: "const x = 1" },
-      }),
+      },
       makeCtx(env.cwd),
     );
     expect(result.ok).toBe(true);
@@ -140,11 +140,11 @@ describe("Skill tool", () => {
 
     const result = await executeTool(
       "Skill",
-      JSON.stringify({
+      {
         name: "explain",
         description: "Explain",
         params: { code: "x = 1" },
-      }),
+      },
       makeCtx(env.cwd),
     );
     expect(result.ok).toBe(true);
@@ -156,11 +156,11 @@ describe("Skill tool", () => {
 
     const result = await executeTool(
       "Skill",
-      JSON.stringify({
+      {
         name: "review",
         description: "Review",
         params: { path: "src/main.ts" },
-      }),
+      },
       makeCtx(env.cwd),
     );
     expect(result.ok).toBe(true);
@@ -173,7 +173,7 @@ describe("Skill tool", () => {
 
     const result = await executeTool(
       "Skill",
-      JSON.stringify({ name: "nonexistent", description: "?" }),
+      { name: "nonexistent", description: "?" },
       makeCtx(env.cwd),
     );
     expect(result.ok).toBe(false);
@@ -184,7 +184,7 @@ describe("Skill tool", () => {
   it("缺 name 字段返回 ok=false", async () => {
     const result = await executeTool(
       "Skill",
-      JSON.stringify({ description: "No name" }),
+      { description: "No name" },
       makeCtx(env.cwd),
     );
     expect(result.ok).toBe(false);
@@ -197,7 +197,7 @@ describe("Skill tool", () => {
     try {
       const result = await executeTool(
         "Skill",
-        JSON.stringify({ name: "list", description: "List" }),
+        { name: "list", description: "List" },
         makeCtx(bareCwd),
       );
       expect(result.ok).toBe(true);

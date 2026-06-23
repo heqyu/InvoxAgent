@@ -485,7 +485,7 @@ async function runOneToolCall(
         toolArgs,
         baseExecCtx,
       )
-    : await executeTool(call.name, JSON.stringify(toolArgs), baseExecCtx);
+    : await executeTool(call.name, toolArgs, baseExecCtx);
 
   const elapsedMs = Date.now() - toolStartedAt;
   // 回填到 call 对象（与 history 中 assistant.tool_calls 是同一引用）

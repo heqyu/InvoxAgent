@@ -86,7 +86,7 @@ async function main(): Promise<void> {
   // ── 1. Read produces line-numbered output and caches.
   let r = await executeTool(
     "Read",
-    JSON.stringify({ path: "hello.txt", description: "read file" }),
+    { path: "hello.txt", description: "read file" },
     ctx,
   );
   assert(r.ok, `1. Read should succeed: ${r.resultText}`);
@@ -104,7 +104,7 @@ async function main(): Promise<void> {
   const beforeMisses = state.cache.stats().misses;
   r = await executeTool(
     "Read",
-    JSON.stringify({ path: "hello.txt", description: "read again" }),
+    { path: "hello.txt", description: "read again" },
     ctx,
   );
   assert(r.ok, `2. second Read should succeed`);
@@ -118,12 +118,12 @@ async function main(): Promise<void> {
   // ── 3. Read with offset+limit returns correct line numbers.
   r = await executeTool(
     "Read",
-    JSON.stringify({
+    {
       path: "hello.txt",
       offset: 3,
       limit: 2,
       description: "page",
-    }),
+    },
     ctx,
   );
   assert(r.ok, `3. paginated read should succeed`);
@@ -146,12 +146,12 @@ async function main(): Promise<void> {
   writeFileSync(file2, "x\ny\nz\n", "utf8");
   r = await executeTool(
     "Edit",
-    JSON.stringify({
+    {
       path: "untouched.txt",
       old_string: "x",
       new_string: "X",
       description: "edit unread",
-    }),
+    },
     ctx,
   );
   assert(
@@ -165,12 +165,12 @@ async function main(): Promise<void> {
   state.cache.invalidate(join(dir, "untouched.txt"));
   r = await executeTool(
     "Edit",
-    JSON.stringify({
+    {
       path: "untouched.txt",
       old_string: "hello",
       new_string: "HELLO",
       description: "replace hello",
-    }),
+    },
     ctx,
   );
   assert(r.ok, `5. edit should succeed: ${r.resultText}`);
@@ -186,12 +186,12 @@ async function main(): Promise<void> {
   state.cache.invalidate(join(dir, "untouched.txt"));
   r = await executeTool(
     "Edit",
-    JSON.stringify({
+    {
       path: "untouched.txt",
       old_string: "a",
       new_string: "A",
       description: "unique fail",
-    }),
+    },
     ctx,
   );
   assert(!r.ok, `6. non-unique edit should fail`);
@@ -204,13 +204,13 @@ async function main(): Promise<void> {
   // ── 7. replace_all bypasses uniqueness check.
   r = await executeTool(
     "Edit",
-    JSON.stringify({
+    {
       path: "untouched.txt",
       old_string: "a",
       new_string: "A",
       replace_all: true,
       description: "all",
-    }),
+    },
     ctx,
   );
   assert(r.ok, `7. replace_all should succeed: ${r.resultText}`);
@@ -231,22 +231,22 @@ async function main(): Promise<void> {
   const file3 = join(dir, "new.txt");
   let r2 = await executeTool(
     "Write",
-    JSON.stringify({
+    {
       path: "new.txt",
       content: "one\ntwo\n",
       description: "create new",
-    }),
+    },
     ctx2,
   );
   assert(r2.ok, `8a. Write should succeed`);
   r2 = await executeTool(
     "Edit",
-    JSON.stringify({
+    {
       path: "new.txt",
       old_string: "one",
       new_string: "ONE",
       description: "edit just-written file",
-    }),
+    },
     ctx2,
   );
   assert(
@@ -259,11 +259,11 @@ async function main(): Promise<void> {
   const planContent = "# Demo Plan\n\n## Goal\nSave a plan.\n";
   r2 = await executeTool(
     "MakePlan",
-    JSON.stringify({
+    {
       theme: "demo-plan",
       content: planContent,
       description: "save plan",
-    }),
+    },
     ctx2,
   );
   assert(r2.ok, `9a. MakePlan should succeed: ${r2.resultText}`);
@@ -274,11 +274,11 @@ async function main(): Promise<void> {
   );
   r2 = await executeTool(
     "MakePlan",
-    JSON.stringify({
+    {
       theme: "../escape",
       content: planContent,
       description: "reject path traversal",
-    }),
+    },
     ctx2,
   );
   assert(!r2.ok, `9b. MakePlan should reject path-like themes`);
