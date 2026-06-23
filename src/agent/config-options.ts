@@ -18,10 +18,11 @@
 //   agents 为空 → 沿用旧 "System Prompt" 路径，保持向后兼容。
 
 import type { SessionConfigOption } from "@agentclientprotocol/sdk";
-import type {
-  AgentConfigOptions,
-  AgentModelConfig,
-  Session,
+import {
+  configMode,
+  type AgentConfigOptions,
+  type AgentModelConfig,
+  type Session,
 } from "./session-types.js";
 
 /**
@@ -61,7 +62,7 @@ export function buildConfigOptions(
   }
 
   // Agent / System Prompt 二选一 —— Phase G 引入 Agent 后取代 System Prompt
-  if (configs.agents.length > 0) {
+  if (configMode(configs) === "agent") {
     // Agent 路径（默认）：仅当 ≥ 2 才渲染下拉，单条无切换意义
     if (configs.agents.length >= 2) {
       const currentAgentId =

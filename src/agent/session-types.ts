@@ -167,6 +167,13 @@ export interface AgentConfigOptions {
   defaultAgentId?: string;
 }
 
+export type SessionConfigMode = "agent" | "system_prompt";
+
+/** 决定本进程走哪条配置路径。agents 非空 → agent mode；否则旧 system_prompt mode。 */
+export function configMode(configs: AgentConfigOptions): SessionConfigMode {
+  return configs.agents.length > 0 ? "agent" : "system_prompt";
+}
+
 /**
  * 各 hook 通用的 base 字段集合。`InvoxAgent.hookBase()` 构造，传给
  * 散落的 free function（prompt-loop 等），避免那些函数依赖 InvoxAgent 实例。

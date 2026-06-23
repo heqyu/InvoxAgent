@@ -13,11 +13,12 @@
 // "给定 session + config change → 应用到 session 上"的纯配置逻辑。
 
 import { THINKING_VALUES } from "./system-prompt.js";
-import type {
-  AgentConfigOptions,
-  AgentModelConfig,
-  Session,
-  SystemPromptDef,
+import {
+  configMode,
+  type AgentConfigOptions,
+  type AgentModelConfig,
+  type Session,
+  type SystemPromptDef,
 } from "./session-types.js";
 import type { AgentTemplate } from "./templates/index.js";
 import { resolveAgentModel } from "./templates/index.js";
@@ -83,7 +84,7 @@ export class ConfigRouter {
    *   - configValues.agent 不在最新菜单 → 回退到 defaultAgentId
    */
   activeAgentFor(session: Session): AgentTemplate | undefined {
-    if (this.configs.agents.length === 0) return undefined;
+    if (configMode(this.configs) !== "agent") return undefined;
     const id = session.configValues["agent"] ?? this.configs.defaultAgentId!;
     return (
       this.agentById.get(id) ??
@@ -118,7 +119,7 @@ export class ConfigRouter {
       // 同步到 configValues，让 configOptionsFor 返回新的 currentValue
       session.configValues.model = value;
     } else if (configId === "agent") {
-      if (this.configs.agents.length === 0) {
+      if (configMode(this.configs) !== "agent") {
         throw new Error(
           `configId "agent" not enabled (no agent templates loaded)`,
         );
@@ -135,7 +136,7 @@ export class ConfigRouter {
       // Phase H：同步切换 model —— agent.model 解析后写入 session.selectedModel
       this.applyAgentModel(session, agent);
     } else if (configId === "system_prompt") {
-      if (this.configs.agents.length > 0) {
+      if (configMode(this.configs) === "agent") {
         throw new Error(
           `configId "system_prompt" disabled when agent templates are active; use "agent" instead`,
         );

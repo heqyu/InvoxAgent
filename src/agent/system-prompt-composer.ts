@@ -10,10 +10,11 @@
 
 import type { LLMMessage } from "../llm/types.js";
 import { systemMessageWithMemoryAndSkills } from "./system-prompt.js";
-import type {
-  AgentConfigOptions,
-  Session,
-  SystemPromptDef,
+import {
+  configMode,
+  type AgentConfigOptions,
+  type Session,
+  type SystemPromptDef,
 } from "./session-types.js";
 import type { AgentTemplate } from "./templates/index.js";
 
@@ -45,7 +46,7 @@ export class SystemPromptComposer {
    * 任何路径都保证能取到值；configValues 中的 id 不在表里时回退到默认 id。
    */
   effectiveBody(configValues: Record<string, string>): string {
-    if (this.configs.agents.length > 0) {
+    if (configMode(this.configs) === "agent") {
       const id = configValues["agent"] ?? this.configs.defaultAgentId!;
       const agent =
         this.agentById.get(id) ??

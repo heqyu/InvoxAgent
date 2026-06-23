@@ -31,12 +31,13 @@ import {
 import { listAvailableCommands } from "../tools/skill.js";
 import { loadHooks, runSessionStart } from "../plugins/hooks.js";
 import { THINKING_VALUES } from "./system-prompt.js";
-import type {
-  AgentConfigOptions,
-  AgentModelConfig,
-  HookBase,
-  Session,
-  SystemPromptDef,
+import {
+  configMode,
+  type AgentConfigOptions,
+  type AgentModelConfig,
+  type HookBase,
+  type Session,
+  type SystemPromptDef,
 } from "./session-types.js";
 import type { AgentTemplate } from "./templates/index.js";
 import { initMcpForSession, releaseSessionMcp } from "./mcp-lifecycle.js";
@@ -80,7 +81,7 @@ export class SessionLifecycle {
 
     // configValues 初始值：根据 agents / system_prompt 路径择一填充
     const initialConfigValues: Record<string, string> = { thinking: "off" };
-    if (this.deps.configs.agents.length > 0) {
+    if (configMode(this.deps.configs) === "agent") {
       initialConfigValues["agent"] = this.deps.configs.defaultAgentId!;
     } else {
       initialConfigValues["system_prompt"] =
@@ -133,7 +134,7 @@ export class SessionLifecycle {
     // 在 session 一开始就同步到 selectedModel + configValues.model，让用户
     // 第一次发 prompt 就用对模型。env 未设时静默回退到 default model（在
     // applyAgentModel 内 warn）。
-    if (this.deps.configs.agents.length > 0) {
+    if (configMode(this.deps.configs) === "agent") {
       const defaultAgent = this.deps.agentById.get(
         this.deps.configs.defaultAgentId!,
       );
@@ -206,7 +207,7 @@ export class SessionLifecycle {
     // 恢复 configValues，丢掉本版本不再合法的 key（例如用户上次保存后
     // 把 INVOX_PROMPT_TEMPLATES_FILE 收窄了，或换了 agents 列表）。
     const restoredConfigValues: Record<string, string> = { thinking: "off" };
-    if (this.deps.configs.agents.length > 0) {
+    if (configMode(this.deps.configs) === "agent") {
       restoredConfigValues["agent"] = this.deps.configs.defaultAgentId!;
     } else {
       restoredConfigValues["system_prompt"] =
@@ -222,7 +223,7 @@ export class SessionLifecycle {
         ) {
           // 仅当本版本走旧路径时才接受 system_prompt 持久值；
           // 否则会让 history[0] 与下拉状态不一致
-          if (this.deps.configs.agents.length === 0)
+          if (configMode(this.deps.configs) !== "agent")
             restoredConfigValues[k] = v;
         } else if (k === "thinking" && THINKING_VALUES.has(v)) {
           restoredConfigValues[k] = v;
@@ -268,6 +269,14 @@ export class SessionLifecycle {
     // 用当前 skill 列表 + 当前 agent/system_prompt 选中值刷新 system message
     // —— 持久化的 history[0] 可能是上一次会话留下的旧版本。
     this.deps.composer.refresh(session);
+
+    // 与 createSession 对称：如果当前 agent mode 已启用，确保 session.selectedModel
+    // 反映当前活跃 agent 的 model 字段（PRO/LITE env 解析后的实际值）。这覆盖了
+    // 用户上次保存的 selectedModel 已不在 availableModelIds 里的回退情况。
+    if (configMode(this.deps.configs) === "agent") {
+      const activeAgent = this.deps.router.activeAgentFor(session);
+      if (activeAgent) this.deps.router.applyAgentModel(session, activeAgent);
+    }
 
     // 同 newSession，延后一次宏任务发 available commands
     setTimeout(() => this.sendAvailableCommands(session).catch(() => {}), 0);

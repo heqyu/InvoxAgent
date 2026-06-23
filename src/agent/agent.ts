@@ -50,12 +50,13 @@ import {
 } from "./system-prompt.js";
 export { DEFAULT_SYSTEM_PROMPT } from "./system-prompt.js";
 
-import type {
-  AgentConfigOptions,
-  AgentModelConfig,
-  HookBase,
-  Session,
-  SystemPromptDef,
+import {
+  configMode,
+  type AgentConfigOptions,
+  type AgentModelConfig,
+  type HookBase,
+  type Session,
+  type SystemPromptDef,
 } from "./session-types.js";
 import type { AgentTemplate } from "./templates/index.js";
 // 把 session-types 中给 cli.ts 用的 3 个公共类型继续从 agent.ts 导出，
@@ -122,7 +123,7 @@ export class InvoxAgent implements Agent {
     // 配置兜底：原 SYSTEM_PROMPT 作为单条 "default"。CLI 总会传更丰富的配置，
     // 单测可省略。
     this.configs =
-      configs && (configs.systemPrompts.length > 0 || configs.agents.length > 0)
+      configs && (configs.systemPrompts.length > 0 || configMode(configs) === "agent")
         ? configs
         : {
             systemPrompts: [
@@ -146,7 +147,7 @@ export class InvoxAgent implements Agent {
     // Phase G：agent 模板索引。agents 为空时走旧 system_prompt 路径，本 map 也为空。
     this.agentById = new Map(this.configs.agents.map((a) => [a.id, a]));
     if (
-      this.configs.agents.length > 0 &&
+      configMode(this.configs) === "agent" &&
       (!this.configs.defaultAgentId ||
         !this.agentById.has(this.configs.defaultAgentId))
     ) {
