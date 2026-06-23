@@ -18,7 +18,7 @@
 //     用户级自定义的 agent 都能自动出现在提示词中。
 
 import type { ToolSpec } from "../llm/types.js";
-import type { AgentTemplate } from "../agent/templates.js";
+import type { AgentTemplate } from "../agent/templates/index.js";
 
 /**
  * 根据 agent 注册表动态生成 SubAgent 工具描述中的 agent 类型列表段落。

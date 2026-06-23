@@ -45,7 +45,7 @@ import { runOneIteration, type IterationDeps } from "./prompt-loop.js";
 import { createSession } from "./session-factory.js";
 import type { Session } from "./session-types.js";
 import { systemMessageWithMemoryAndSkills } from "./system-prompt.js";
-import { resolveAgentModel } from "./templates.js";
+import { resolveAgentModel } from "./templates/index.js";
 import { humanizeTokens } from "./token-meter.js";
 import { maxIterations as parentMaxIterations } from "./agent-helpers.js";
 

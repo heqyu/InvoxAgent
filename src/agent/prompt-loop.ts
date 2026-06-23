@@ -47,7 +47,7 @@ import {
   agentAllowsMcp,
   filterToolSpecsByAgent,
   type AgentTemplate,
-} from "./templates.js";
+} from "./templates/index.js";
 import {
   previewArgs,
   startLocationsFor,

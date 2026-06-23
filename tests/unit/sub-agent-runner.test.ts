@@ -26,7 +26,7 @@ import { join } from "node:path";
 import { runSubAgent } from "../../src/agent/sub-agent-runner.js";
 import type { IterationDeps } from "../../src/agent/prompt-loop.js";
 import type { Session } from "../../src/agent/session-types.js";
-import type { AgentTemplate } from "../../src/agent/templates.js";
+import type { AgentTemplate } from "../../src/agent/templates/index.js";
 import { emptyTurnUsage } from "../../src/agent/usage-meter.js";
 import type {
   LLMDelta,

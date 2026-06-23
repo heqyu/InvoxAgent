@@ -27,7 +27,7 @@ import {
   readEnvModelPro,
   resolveAgentModel,
   type AgentTemplate,
-} from "../../src/agent/templates.js";
+} from "../../src/agent/templates/index.js";
 
 // ── 临时目录 helper ──────────────────────────────────────────────────
 

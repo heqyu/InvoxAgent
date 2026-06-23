@@ -13,7 +13,7 @@ import type { McpClientManager } from "../mcp/client.js";
 import type { SessionStore } from "../persistence.js";
 import type { SessionToolState } from "../tools/types.js";
 import type { HookRegistry } from "../plugins/hooks.js";
-import type { AgentTemplate } from "./templates.js";
+import type { AgentTemplate } from "./templates/index.js";
 import type { TurnUsage } from "./usage-meter.js";
 import type { LogFile } from "../log.js";
 

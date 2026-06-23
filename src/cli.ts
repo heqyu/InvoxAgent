@@ -22,7 +22,7 @@ import {
   loadAgentTemplates,
   readEnvModelLite,
   readEnvModelPro,
-} from "./agent/templates.js";
+} from "./agent/templates/index.js";
 import { discoverAllModels } from "./llm/discovery.js";
 import { EchoProvider } from "./llm/echo.js";
 import { FlakyProvider, type FlakyKind } from "./llm/flaky.js";

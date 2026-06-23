@@ -81,8 +81,8 @@ import type {
   Session,
   SystemPromptDef,
 } from "./session-types.js";
-import type { AgentTemplate } from "./templates.js";
-import { resolveAgentModel } from "./templates.js";
+import type { AgentTemplate } from "./templates/index.js";
+import { resolveAgentModel } from "./templates/index.js";
 // 把 session-types 中给 cli.ts 用的 3 个公共类型继续从 agent.ts 导出，
 // 避免破坏 `import { type AgentModelConfig } from "./agent/agent.js"` 这条
 // 既有路径。Session / HookBase 是内部细节，不再对外暴露。
@@ -91,7 +91,7 @@ export type {
   AgentModelConfig,
   SystemPromptDef,
 } from "./session-types.js";
-export type { AgentTemplate, AgentSource } from "./templates.js";
+export type { AgentTemplate, AgentSource } from "./templates/index.js";
 import { replayHistory } from "./replay-history.js";
 import { reportTurnUsage } from "./turn-usage-reporter.js";
 import { buildConfigOptions } from "./config-options.js";
