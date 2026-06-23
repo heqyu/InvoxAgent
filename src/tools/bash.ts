@@ -68,7 +68,14 @@ async function execute(
 ): Promise<ToolExecResult> {
   const rawCommand = String(args["command"] ?? "");
   if (!rawCommand) return errorResult("missing 'command'", "execute", "Bash");
-  log.debug("tool: Bash", { command: rawCommand });
+  // 当 PreToolUse hook 通过 modifiedInput 改写了 command（如注入 env export），
+  // 原始命令保存在 ctx.originalInput.command 里。用它做 UI 展示（标题、终端头、
+  // resultText），让用户看到的是自己写的命令而非 hook 拼接的 export 堆叠。
+  const displayCommand =
+    ctx.originalInput && typeof ctx.originalInput["command"] === "string"
+      ? ctx.originalInput["command"]
+      : rawCommand;
+  log.debug("tool: Bash", { command: rawCommand, displayCommand });
 
   // 尝试通过 `rtk rewrite` 改写命令；改写成功且非空则用改写后的，否则原样。
   let command = rawCommand;
@@ -94,9 +101,9 @@ async function execute(
   }
 
   if (ctx.caps.terminal === true) {
-    return runViaAcpTerminal(command, args, ctx);
+    return runViaAcpTerminal(command, displayCommand, args, ctx);
   }
-  return runViaLocalSpawn(command, args, ctx);
+  return runViaLocalSpawn(command, displayCommand, args, ctx);
 }
 
 // ── rtk rewrite ─────────────────────────────────────────────────────
@@ -186,6 +193,7 @@ async function runRtkRewrite(command: string, cwd: string): Promise<string> {
 
 async function runViaAcpTerminal(
   command: string,
+  displayCommand: string,
   args: Record<string, unknown>,
   ctx: ToolExecContext,
 ): Promise<ToolExecResult> {
@@ -207,7 +215,7 @@ async function runViaAcpTerminal(
   };
   ctx.signal.addEventListener("abort", onAbort, { once: true });
 
-  const title = titleFor(args, command);
+  const title = titleFor(args, displayCommand);
 
   // **重要**：在 waitForExit() 阻塞之前把嵌入终端立即挂到工具卡片上。
   // Zed 仅在看到 in_progress 状态下的 `{type:"terminal", terminalId}` 时
@@ -238,7 +246,7 @@ async function runViaAcpTerminal(
     const signal = exit.signal ?? null;
 
     const display =
-      `$ ${command}\n` +
+      `$ ${displayCommand}\n` +
       `exit=${exitCode ?? "?"}${signal ? ` signal=${signal}` : ""}\n` +
       (out.output.length > 0 ? out.output : "(no output)") +
       (out.truncated ? "\n[output truncated by client]" : "");
@@ -252,7 +260,7 @@ async function runViaAcpTerminal(
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    const display = `$ ${command}\nerror: ${message}\n`;
+    const display = `$ ${displayCommand}\nerror: ${message}\n`;
     return {
       resultText: display,
       acpContent: [{ type: "terminal", terminalId: terminal.id }],
@@ -362,6 +370,7 @@ function findGitBash(): string | null {
 
 async function runViaLocalSpawn(
   command: string,
+  displayCommand: string,
   args: Record<string, unknown>,
   ctx: ToolExecContext,
 ): Promise<ToolExecResult> {
@@ -399,14 +408,14 @@ async function runViaLocalSpawn(
       if (settled) return;
       settled = true;
       ctx.signal.removeEventListener("abort", onAbort);
-      const display = `$ ${command}\nerror: ${err.message}\n`;
+      const display = `$ ${displayCommand}\nerror: ${err.message}\n`;
       resolveResult({
         resultText: display,
         acpContent: [
           { type: "content", content: { type: "text", text: display } },
         ],
         kind: "execute",
-        title: titleFor(args, command),
+        title: titleFor(args, displayCommand),
         ok: false,
       });
     });
@@ -418,7 +427,7 @@ async function runViaLocalSpawn(
 
       const combined = stdout + (stderr ? (stdout ? "\n" : "") + stderr : "");
       const display =
-        `$ ${command}\n` +
+        `$ ${displayCommand}\n` +
         `exit=${exitCode ?? "?"}${signal ? ` signal=${signal}` : ""}\n` +
         (combined.length > 0 ? combined : "(no output)");
 
@@ -428,7 +437,7 @@ async function runViaLocalSpawn(
           { type: "content", content: { type: "text", text: display } },
         ],
         kind: "execute",
-        title: titleFor(args, command),
+        title: titleFor(args, displayCommand),
         ok: exitCode === 0,
       });
     });

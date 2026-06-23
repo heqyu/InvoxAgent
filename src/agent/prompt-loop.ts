@@ -443,6 +443,24 @@ async function runOneToolCall(
     };
   }
 
+  // hook 返回了 modifiedInput —— 合并到 toolArgs（如 PreToolUse inject-env
+  // 在 Bash 命令前注入 export 环境变量）。采用浅合并：hook 返回的字段覆盖
+  // 原始参数中同名字段，其余保持不变。
+  // 同时保存修改前的快照到 originalInput，让工具（如 Bash）在 UI 展示
+  // 中使用用户原始命令，而非被 hook 改写后的冗长 export 前缀。
+  let originalInput: Record<string, unknown> | undefined;
+  if (preResult.modifiedInput) {
+    // 仅当有实际变更时才保存快照，避免无意义的对象分配
+    originalInput = { ...toolArgs };
+    for (const [k, v] of Object.entries(preResult.modifiedInput)) {
+      toolArgs[k] = v;
+    }
+    log.info("PreToolUse: applied modifiedInput", {
+      tool: call.name,
+      keys: Object.keys(preResult.modifiedInput),
+    });
+  }
+
   // ToolExecContext 共用部分 —— 两条分支（MCP / 内置）都用同一份。
   // SubAgent 工具会读 ctx.subAgentRunner；其它工具应忽略。
   // 递归屏障：subagent 内部不注入 runner，让 SubAgent 工具直接 fail-fast。
@@ -456,6 +474,7 @@ async function runOneToolCall(
     toolCallId: call.id,
     state: session.toolState,
     activeAgentId: deps.activeAgent?.id,
+    ...(originalInput ? { originalInput } : {}),
     ...(deps.inSubAgent
       ? {}
       : { subAgentRunner: makeSubAgentRunner(session, deps) }),

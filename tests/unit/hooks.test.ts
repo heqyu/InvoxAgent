@@ -477,6 +477,42 @@ describe("hook 命令执行", () => {
     expect(result.allow).toBe(true);
   });
 
+  it("runPreToolUse Bash hook 返回 modifiedInput 时合并到结果", async () => {
+    // 模拟 inject-env hook：返回 hookSpecificOutput.modifiedInput.command
+    // 注意：nodeJson 内层用单引号避免与外层 shell 双引号冲突
+    const p = createPlugin(env, "test-modified-input", {
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: "Bash",
+            hooks: [
+              {
+                type: "command",
+                command: nodeJson(
+                  `{continue:true,hookSpecificOutput:{hookEventName:'PreToolUse',permissionDecision:'allow',modifiedInput:{command:'export FOO=bar; echo hello'}}}`,
+                ),
+              },
+            ],
+          },
+        ],
+      },
+    });
+    writePluginsJson(env, [{ path: p, enabled: true }]);
+    clearHookCache();
+    const registry = loadHooks(env.cwd);
+
+    const result = await runPreToolUse(registry, {
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "echo hello" },
+      session_id: "sess-1",
+      cwd: env.cwd,
+    });
+    expect(result.allow).toBe(true);
+    expect(result.modifiedInput).toBeDefined();
+    expect(result.modifiedInput!.command).toBe("export FOO=bar; echo hello");
+  });
+
   it("空 HookRegistry 各路 runner 返回合理默认值", async () => {
     const empty = new HookRegistry();
     const submit = await runUserPromptSubmit(empty, {

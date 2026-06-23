@@ -118,6 +118,17 @@ export interface ToolExecContext {
    * SubAgent 工具在自己的 execute() 中读取本字段；其它工具应忽略。
    */
   subAgentRunner?: SubAgentRunner;
+  /**
+   * PreToolUse hook 通过 modifiedInput 修改工具参数前的原始参数快照。
+   *
+   * 典型场景：inject-env hook 在 Bash 命令前注入 `export FOO=bar;`，
+   * toolArgs.command 变成 `"export FOO=bar; real_cmd"`，但原始的
+   * `"real_cmd"` 保存在 originalInput.command 里。
+   *
+   * 工具可用此字段在 UI 展示（标题、终端头）中显示用户原始意图，
+   * 同时仍用修改后的参数执行。
+   */
+  originalInput?: Record<string, unknown>;
 }
 
 /** 工具执行结果。 */

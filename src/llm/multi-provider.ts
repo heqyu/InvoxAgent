@@ -55,13 +55,13 @@ export class MultiProvider implements LLMProvider {
     const allModelIds: string[] = [];
 
     for (const { config, discovery } of setup.providers) {
-      // Merge: discovery results + explicitly configured models (config takes precedence)
+      // When config.models is explicitly set, treat it as a whitelist;
+      // otherwise fall back to discovered models.
       const discoveredIds = discovery.models.map((m) => m.id);
-      const explicitIds = config.models ?? [];
-      // Union: explicitly listed models are always included
-      const modelIds = [
-        ...new Set([...explicitIds, ...discoveredIds]),
-      ];
+      const explicitIds = config.models;
+      const modelIds = explicitIds && explicitIds.length > 0
+        ? [...new Set(explicitIds)]
+        : [...new Set(discoveredIds)];
 
       if (modelIds.length === 0) {
         log.warn("multi-provider: provider has no models, skipping", {

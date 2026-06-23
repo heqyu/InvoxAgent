@@ -142,6 +142,10 @@ MULTI-PROVIDER:
   Place .invox/providers.json in your project root to configure multiple LLM
   providers. Each provider needs a name, baseUrl, and apiKey. On startup, invox
   pings each provider's /v1/models endpoint to discover available models.
+
+  Two-level lookup (project → user):
+    1. <cwd>/.invox/providers.json  — project-level (full precedence)
+    2. ~/.invox/providers.json      — user-level default
 `,
   );
 }

@@ -136,6 +136,21 @@ export interface HookResponse {
    * 透明拿到。
    */
   reason?: string;
+  /**
+   * Claude Code / CodeBuddy 约定：PreToolUse hook 可通过
+   * hookSpecificOutput.modifiedInput 修改工具参数。
+   *
+   * 例如 inject-env hook 会在 Bash 命令前注入环境变量 export：
+   *   modifiedInput: { command: "export ...; original_cmd" }
+   *
+   * Invox 在 runPreToolUse 返回后、工具执行前，将 modifiedInput 合并
+   * 到 toolArgs 中，让 Bash 工具拿到改写后的命令。
+   */
+  hookSpecificOutput?: {
+    hookEventName?: string;
+    permissionDecision?: string;
+    modifiedInput?: Record<string, unknown>;
+  };
 }
 
 // ── 已解析的 hook 组（含归属 plugin）─────────────────────────────────
@@ -651,6 +666,13 @@ async function runHooks(
           }
           if (response.systemMessage)
             systemMessages.push(response.systemMessage);
+          // 传播 hookSpecificOutput.modifiedInput（PreToolUse 注入环境变量等场景）
+          if (response.hookSpecificOutput?.modifiedInput) {
+            agg.hookSpecificOutput = {
+              ...agg.hookSpecificOutput,
+              modifiedInput: response.hookSpecificOutput.modifiedInput,
+            };
+          }
         }
       } catch (e) {
         log.warn("plugins: hook command failed", {
@@ -695,12 +717,21 @@ export async function runUserPromptSubmit(
 export async function runPreToolUse(
   registry: HookRegistry | undefined,
   ctx: PreToolUseCtx,
-): Promise<{ allow: boolean; reason?: string }> {
+): Promise<{
+  allow: boolean;
+  reason?: string;
+  modifiedInput?: Record<string, unknown>;
+}> {
   const result = await runHooks(registry, ctx, ctx.tool_name);
   if (result.continue === false) {
     return { allow: false, reason: result.systemMessage ?? "blocked by hook" };
   }
-  return { allow: true };
+  return {
+    allow: true,
+    ...(result.hookSpecificOutput?.modifiedInput
+      ? { modifiedInput: result.hookSpecificOutput.modifiedInput }
+      : {}),
+  };
 }
 
 export async function runPostToolUse(

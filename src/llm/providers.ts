@@ -8,6 +8,7 @@
 // apiKey supports $ENV_VAR syntax: value starting with "$" is resolved from process.env.
 
 import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { createLogger } from "../log.js";
 
@@ -27,6 +28,8 @@ export interface ProviderConfig {
    * Useful when the provider doesn't support the models endpoint.
    */
   models?: string[];
+  /** Whether this provider is enabled. Defaults to true. Set to false to skip. */
+  enabled?: boolean;
 }
 
 export interface ProvidersFileConfig {
@@ -35,25 +38,38 @@ export interface ProvidersFileConfig {
   defaultModel?: string;
 }
 
-// ── JSON config loading ───────────────────────────────────────────────
+// ── JSON config loading ───────────────────────────────────────
 
 /**
- * Load multi-provider config from .invox/providers.json.
- * Returns null if the file doesn't exist or is invalid.
+ * Load multi-provider config with two-level lookup (project → user).
  *
- * Schema:
- * {
- *   "providers": [
- *     { "name": "Mimo", "baseUrl": "...", "apiKey": "..." },
- *     { "name": "DeepSeek", "baseUrl": "...", "apiKey": "$DEEPSEEK_KEY" }
- *   ],
- *   "defaultModel": "mimo-v2.5"
- * }
+ *   1. `<cwd>/.invox/providers.json` — project-level (full precedence)
+ *   2. `~/.invox/providers.json`     — user-level default
+ *   3. null                           — neither found → legacy env-var path
+ *
+ * apiKey supports $ENV_VAR syntax: value starting with "$" is resolved from process.env.
  */
 export function loadProvidersJson(cwd: string): ProvidersFileConfig | null {
-  const file = join(cwd, ".invox", "providers.json");
-  if (!existsSync(file)) return null;
+  const projectFile = join(cwd, ".invox", "providers.json");
+  if (existsSync(projectFile)) {
+    const result = parseProvidersFile(projectFile);
+    if (result) return result;
+  }
 
+  // User-level fallback: ~/.invox/providers.json
+  const userFile = join(homedir(), ".invox", "providers.json");
+  if (existsSync(userFile)) {
+    const result = parseProvidersFile(userFile);
+    if (result) return result;
+  }
+
+  return null;
+}
+
+/**
+ * Parse a single providers.json file. Returns null on any read/parse error.
+ */
+function parseProvidersFile(file: string): ProvidersFileConfig | null {
   let raw: string;
   try {
     raw = readFileSync(file, "utf-8");
@@ -90,6 +106,12 @@ export function loadProvidersJson(cwd: string): ProvidersFileConfig | null {
     if (typeof pr["baseUrl"] !== "string" || !pr["baseUrl"]) continue;
     if (typeof pr["apiKey"] !== "string" || !pr["apiKey"]) continue;
 
+    // Skip disabled providers
+    if (pr["enabled"] === false) {
+      log.info("providers.json: skipping disabled provider", { name: pr["name"] as string });
+      continue;
+    }
+
     providers.push({
       name: pr["name"] as string,
       baseUrl: (pr["baseUrl"] as string).replace(/\/+$/, ""),
@@ -97,6 +119,7 @@ export function loadProvidersJson(cwd: string): ProvidersFileConfig | null {
       ...(Array.isArray(pr["models"]) && (pr["models"] as unknown[]).length > 0
         ? { models: (pr["models"] as unknown[]).filter((m): m is string => typeof m === "string" && m.length > 0) }
         : {}),
+      ...(typeof pr["enabled"] === "boolean" ? { enabled: pr["enabled"] as boolean } : {}),
     });
   }
 
