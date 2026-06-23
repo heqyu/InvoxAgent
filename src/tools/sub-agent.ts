@@ -135,7 +135,7 @@ import {
   type ToolExecContext,
   type ToolExecResult,
 } from "./types.js";
-import { buildSubAgentBanner } from "../agent/sub-agent-runner.js";
+import { buildSubAgentBanner } from "../agent/sub-agent/banner.js";
 
 const spec: ToolSpec = {
   type: "function",

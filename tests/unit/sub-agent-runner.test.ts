@@ -23,7 +23,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runSubAgent } from "../../src/agent/sub-agent-runner.js";
+import { runSubAgent } from "../../src/agent/sub-agent/index.js";
 import type { IterationDeps } from "../../src/agent/prompt-loop.js";
 import type { Session } from "../../src/agent/session-types.js";
 import type { AgentTemplate } from "../../src/agent/templates/index.js";
@@ -655,7 +655,7 @@ describe("runSubAgent", () => {
     // 直接构造 wrappedConn 的等价路径不容易（需要走 runOneIteration 内部的
     // 工具执行）。改为直接验证 shouldLogNotif 的语义 —— 它是过滤的唯一入口。
     const { shouldLogNotif } = await import(
-      "../../src/agent/sub-agent-runner.js"
+      "../../src/agent/sub-agent/conn-wrapper.js"
     ).then(
       // 内部函数未导出，故走"行为级"断言：跑完整 subagent 后日志含
       // 终态 tool_call_update 但不含 in_progress

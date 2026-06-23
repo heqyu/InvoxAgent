@@ -56,8 +56,8 @@ export interface SubAgentRunRequest {
 
 // SubAgentRunResult 的权威定义在 src/agent/sub-agent-runner.ts。
 // re-export + local import 让工具子系统使用；用 import type 避免值循环依赖。
-import type { SubAgentRunResult } from "../agent/sub-agent-runner.js";
-export type { SubAgentRunResult } from "../agent/sub-agent-runner.js";
+import type { SubAgentRunResult } from "../agent/sub-agent/index.js";
+export type { SubAgentRunResult } from "../agent/sub-agent/index.js";
 
 export type SubAgentRunner = (
   req: SubAgentRunRequest,

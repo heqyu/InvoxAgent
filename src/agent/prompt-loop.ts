@@ -594,7 +594,7 @@ function makeSubAgentRunner(
 ): SubAgentRunner {
   return async (req, signal) => {
     // 延迟到调用时再 import，规避静态分析层面的潜在循环依赖（v1 防御性写法）
-    const { runSubAgent } = await import("./sub-agent-runner.js");
+    const { runSubAgent } = await import("./sub-agent/index.js");
     return runSubAgent({ parentDeps, parent }, req, signal);
   };
 }
