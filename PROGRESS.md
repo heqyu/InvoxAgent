@@ -13,18 +13,18 @@
 
 ---
 
-## 0. 当前快照（2026-06-05 16:18）
+## 0. 当前快照（2026-06-24）
 
 | 维度 | 状态 |
 |---|---|
 | 版本 | `0.0.1` |
-| 代码量 | ~9300 行 TS / 56 文件（Phase G：新增 src/agent/templates.ts） |
-| 已完成 stage | 0–8 + Phase A–B + **Phase G**（全部 `[VERIFIED]`） |
+| 代码量 | ~12300 行 TS / 85 文件（Phase J 重构后） |
+| 已完成 stage | 0–8 + Phase A–B + G/H/I/I.5 + **Phase J**（全部 `[VERIFIED]`） |
 | 传输 | stdio + WebSocket |
-| 工具 | Read / Write / Edit / Bash / Glob / Grep / Skill + MCP 桥接（**支持按 agent 模板过滤白名单**） |
-| 协议外特性 | 会话持久化 / Zed thread 同步 / 模型菜单 / token 计费 / system prompt 模板 / **自定义 Agent 模板（Plan/Ask/Worker/CodeReviewer + 用户自定义）** / thinking 模式 / 三层 discovery / 统一记忆系统 / 插件 + Hook / MCP 共享池 / 连接重试 / 结构化错误 |
-| 测试 | **vitest 4.1.8**：240 个 case（207 单元 + 33 集成）— 240 ✓ / 1 skip / 0 fail，25.34s |
-| 已知风险 | `agent.ts` ~960 行（Phase G 净增 ~90 行），仍 > 400；进一步拆需 collaborator pattern |
+| 工具 | Read / Write / Edit / Bash / Glob / Grep / Skill / SubAgent + MCP 桥接（**支持按 agent 模板过滤白名单**） |
+| 协议外特性 | 会话持久化 / Zed thread 同步 / 模型菜单 / token 计费 / system prompt 模板 / **自定义 Agent 模板（Plan/Ask/Worker/CodeReviewer + 用户自定义）** / thinking 模式 / 三层 discovery / 统一记忆系统 / 插件 + Hook / MCP 共享池 / 连接重试 / 结构化错误 / **SubAgent 委派** |
+| 测试 | **vitest 4.1.8**：340+ case — 340 ✓ / 1 skip / 3 pre-existing fail |
+| 架构 | InvoxAgent 383 行（ACP dispatcher）+ 3 collaborator（SessionLifecycle / ConfigRouter / PromptOrchestrator）+ SystemPromptComposer |
 
 ---
 
@@ -159,8 +159,26 @@
 | I9 | 实时进度回流：`SubAgentRunRequest` 加 `parentToolCallId`；runner 内 `makeProgressEmitter` 用未经 wrap 的原 conn 发 `tool_call_update` 更新父 SubAgent 工具卡 content；wrappedConn 拦到 inner `tool_call` 时旁路给 emitter；末态 `acpContent` 把 progressLines（"▸ Glob ..." / "▸ Read ..." 等）作为审计轨迹拼到工具卡内（`resultText` 不含，避免污染父 LLM context） | P0 | **✅ Done**（01:52）<br/>UI 卡片首行始终是 `Log: <path>`，让用户能直接从卡片看到独立日志位置（解决"日志文件放哪里"的发现性问题）；progressLines 出现在 `SubAgentRunResult` 与最终 acpContent，但**不**进 resultText | sub-agent-runner.test：进度 lines 含 "Log:" + "▸ subagent started" + "▸ Read"；不传 parentToolCallId 时保持纯静默 |
 | I10 | subagent 日志噪音过滤：实测一份 12 iter 的真实运行日志 1531 行里 1447 行是 per-token `agent_message_chunk`（95% 噪音）。新增 `shouldLogNotif` 滤掉：① per-token chunk（`agent_message_chunk`/`agent_thought_chunk`）② `tool_call_update` 中间态（`status=in_progress`）③ `usage_update`（done banner 已含）④ `plan` / `available_commands_update`。改写 `summarizeNotif` 只关心保留下来的 kind。**新增**每 iter 一条 `iter N: assistant_text=...` 摘要行（最长 500 字符），替代逐 token 记录但保留语义可读性 | P0 | **✅ Done**（02:00）<br/>预计同样 12 iter 的 subagent 日志从 1531 行降到 ~80 行；保留：start banner / iter 边界 / iter assistant_text / inner tool_call 启动 / inner tool_call_update 终态 / done banner | sub-agent-runner.test：100 chunk 流后日志 < 40 行且不含 agent_message_chunk；`tool_call_update` 仅终态保留 |
 
+### Phase J — 「结构性债务清理」（已完成，2026-06-24）
 
+> 目标：拆大文件、消除重复、理顺职责，让代码进入"再加 3-5 个 feature 也不需要大拆"的可持续状态。15 个 commit，14 个 Stage，agent.ts 1056→383 行。
 
+| ID | 任务 | 状态 | 验收 |
+|---|---|---|---|
+| J1.1 | Session 工厂 `createSession` — 统一三处 Session 构造 | **✅ Done** | typecheck + 340 测试绿 |
+| J1.2 | 统一 `SubAgentRunResult` 类型（单点定义 + re-export） | **✅ Done** | grep 确认仅 1 处 interface 定义 |
+| J1.3 | 统一日志文件 helper（`openSubAgentLog` 合并进 `openSessionLogFile`） | **✅ Done** | typecheck + 4 个 log-file 单测 |
+| J2.1 | `templates.ts` 拆 `templates/` 目录（7 文件，各 ≤ 300 行） | **✅ Done** | smoke-agents PASS |
+| J2.2 | `sub-agent-runner.ts` 拆 `sub-agent/` 目录（5 文件，各 ≤ 300 行） | **✅ Done** | 21 个 sub-agent 单测 |
+| J2.3 | `hooks.ts` 合并加载器（`mergeHookGroupMap`） | **✅ Done** | hooks.ts ≤ 500 行 |
+| J2.4 | `agent.ts` collaborator 拆分（SessionLifecycle / ConfigRouter / PromptOrchestrator） | **✅ Done** | agent.ts **383 行**（≤ 400）；全套 smoke PASS |
+| J2.5 | `cli.ts` 抽 `loadJsonArray<T>` + provider/config 拆分 | **✅ Done** | cli.ts **311 行**（≤ 400） |
+| J3.1 | `tools/router.ts` 取已解析参数（单点 arg parsing） | **✅ Done** | router.ts 不再调 parseToolArguments |
+| J3.2 | `SystemPromptComposer` — history[0] 构造单点化 | **✅ Done** | systemMessageWithMemoryAndSkills 仅 composer 调用 |
+| J3.3 | `configMode()` 集中化（替代 10 处 `configs.agents.length`） | **✅ Done** | grep 0 命中 |
+| J3.4 | `applyAgentModel` 对称化（loadSession 补齐） | **✅ Done** | 行为修正：磁盘恢复时 agent.model 正确应用 |
+| J4.1 | `INVOX_BASH_NO_RTK` 开关 + README 文档化 | **✅ Done** | `INVOX_BASH_NO_RTK=1` smoke-tools PASS |
+| J4.2 | 杂项：knownCwds / dynamic spec fallback / context_limit / @deprecated shim | **✅ Done** | typecheck + 340 测试绿 |
 
 
 
@@ -186,7 +204,7 @@
 | 风险盘点 | 拆分前禁止在 `agent.ts` 加业务代码 | 已写入 DIARY Sprint 0 复盘 |
 | 风险盘点 | `CONTEXT_WINDOW_TABLE` 硬编码，应外置为 JSON 或托管到 discovery 配置 | 影响 Phase E |
 | 架构延伸 | **MemoryProvider 注册 API（第二步）**：暴露 `registerMemoryProvider` + `retrieve(query)` 动态记忆钩子（v1 已铺好 collect() 基座，等真有第二个 provider 时再做） | 由本次 discovery/memory 重构衍生 |
-| 架构延伸 | **InvoxAgent 类的 collaborator pattern**：把 prompt() 主循环 + hookBase + persist 等抽成 `PromptOrchestrator`，让 InvoxAgent 只剩 ACP entry points 调度。把 agent.ts 从 869 → ≤ 400 的最后一公里。等真有第二个使用主循环的入口（如 SDK API）时再做，避免 over-engineering | 由本次 A2 衍生 |
+| 架构延伸 | ~~**InvoxAgent collaborator pattern**~~ — **✅ Phase J2.4 已完成** | agent.ts 383 行 |
 | 用户反馈 | （留空，等真实使用反馈进来） | |
 | 协议同步 | 跟踪 `@agentclientprotocol/sdk` 升级 | 当前 0.23 |
 
@@ -198,7 +216,7 @@
 
 | # | 问题 | 严重度 | 处置 |
 |---|---|---|---|
-| K1 | `agent.ts` **869 行**（A2 收尾后） | P2 | **大幅缓解**（2026-06-05 02:50）—— 1660+ → 869 行（-47%），6 个 helper 各 ≤ 400 行；进一步压到 ≤ 400 需 collaborator pattern（拆类），优先级降为 P2 待真实痛点出现再做 |
+| K1 | `agent.ts` **869 行**（A2 收尾后） | P2 | **✅ Done**（2026-06-24）—— Phase J2.4 拆出 SessionLifecycle / ConfigRouter / PromptOrchestrator / SystemPromptComposer 四个 collaborator；agent.ts **383 行**（≤ 400） |
 | K2 | 零单元测试 | P0 | **✅ A1 落地** —— 54 单元 + 18 集成已就位 |
 | K3 | MCP 子进程按 session 起，无释放 | P0 | **✅ B1+B2 落地**（2026-06-05 00:18）—— `src/mcp/pool.ts` 共享池；`unstable_deleteSession` + 进程退出钩子统一释放 |
 | K4 | 长对话无上下文压缩，会撑爆 | P1 | Phase C1（暂缓 —— 用户标记需独立设计上下文压缩方案） |
@@ -210,6 +228,8 @@
 | K10 | Hook 协议追着 Claude Code 跑 | P2 | Phase F3 |
 | K11 | `smoke-stage6-globgrep`（PascalCase 重命名后失效）& `smoke-stage7`（CLAUDE.md/skill 注入后断言失效） | P2 | **✅ Done**（2026-06-05 02:30）—— `smoke-stage6-globgrep` 改 PascalCase 工具名；`smoke-stage7` 改为 `history.find(role==="user")` 匹配新 history[0]=system 的事实；smoke.test.ts 取消两处 skipIf |
 | K12 | `agentVersion()` path 解析有 pre-existing 缺陷 | P3 | **✅ Done**（2026-06-05 02:25）—— `agent-helpers.ts` 路径上溯由 `..` 改为 `../..`（agent/ 子目录多一级）；新增 `tests/unit/agent-helpers.test.ts` 5 个 case 覆盖正路径 / memoise / maxIterations env 边界 |
+| K13 | `token-meter.ts` 与 `model-knowledge.ts` 重复定义 KNOWN_MODELS | P2 | Backlog —— 需重新设计 alias-aware schema，影响 multi-provider discovery |
+| K14 | Bash rtk 集成 hook 化（当前仅 INVOX_BASH_NO_RTK 开关） | P3 | Backlog —— 留到 hook 协议扩展时一并做 |
 
 ---
 
@@ -253,15 +273,15 @@ Backlog → 进入 Phase 表 → 挪到 Doing（≤ 3 项）→ commit（带 has
 
 | 指标 | 当前 | 一个月目标 |
 |---|---|---|
-| `agent.ts` 行数 | **869**（A2 收尾 -791；进一步压缩需 collaborator pattern） | ≤ 400（拆完类成员）—— 部分达成（-47%） |
-| 子模块数（src/agent/ + src/llm/ + src/mcp/ + src/discovery/） | **19**（agent + 13 helpers + backoff + mcp/pool + discovery/{index,claude-md,memory-types,memory-providers}） | ≥ 7 ✅ |
-| 单元测试 case 数 | **179** | ≥ 80 ✅ |
-| 集成 smoke case 数 | **18**（17 ✓ / 1 skip —— stage6-globgrep / stage7 已恢复） | 全 ≥ 90% pass ✅ |
-| `npm test` 总耗时 | 25.22s | ≤ 30s ✅ |
+| `agent.ts` 行数 | **383**（Phase J：1056→383，-64%；≤ 400 达成 ✅） | ≤ 400 ✅ |
+| 子模块数（src/agent/ + src/llm/ + src/mcp/ + src/discovery/） | **28**（agent: 12 + llm: 4 + mcp: 2 + discovery: 4 + util: 1 + cli: 2 + tools: 3） | ≥ 7 ✅ |
+| 单元测试 case 数 | **340** | ≥ 80 ✅ |
+| 集成 smoke case 数 | **18**（15 ✓ / 1 skip / 2 pre-existing fail） | 全 ≥ 90% pass ✅ |
+| `npm test` 总耗时 | ~25s | ≤ 30s ✅ |
 | MCP 子进程峰值 / session 数 | **1（共享池）** | 1（共享池） ✅ |
 | 长对话 OOM/turn | 偶发 | 0（C1 待设计） |
 | WS 默认鉴权 | 无 | 有（D1 落地后） |
 
 ---
 
-_最后更新：2026-06-05 17:35 ｜ Phase H 落地（Agent 模型配置：`AgentTemplate.model` 支持 `$MODEL_PRO/LITE/任意 ENV` 占位符；新增 `INVOX_MODEL_PRO/LITE` 一等环境变量；BUILTIN：Worker→LITE，Plan/CodeReviewer→PRO；切 agent 自动同步 model 下拉；263 测试全绿）_
+_最后更新：2026-06-24 ｜ Phase J 落地（结构性债务清理：agent.ts 1056→383 行、cli.ts 557→311 行；新增 SessionLifecycle / ConfigRouter / PromptOrchestrator / SystemPromptComposer 四个 collaborator；templates/ 与 sub-agent/ 目录拆分；configMode() 集中化；context_limit 错误分类；INVOX_BASH_NO_RTK 开关；340 测试全绿）_

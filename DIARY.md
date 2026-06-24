@@ -575,6 +575,52 @@ PROGRESS 状态更新：
 
 —— 写于 2026-06-05 02:50。本次工作建议按两组分别 commit：先 K12+K11+新单测一组（安全清账），再 A2 拆分一组（重构）。两组都是绿测后再 commit，不在中间态做任何 commit。
 
+---
+
+## Sprint J — 还结构性债务（2026-06-24）
+
+### 概要
+
+一口气清掉 Phase G/H/I 积累的结构性债务：14 个 Stage，15 个 commit，跨越 4 个子 Phase（J1 类型工厂 → J2 大文件拆分 → J3 职责理顺 → J4 收尾小修）。核心产出：`agent.ts` 从 1056 行压到 383 行（-64%），`cli.ts` 从 557 行压到 311 行（-44%）。
+
+### 拆分前 → 拆分后
+
+```
+重构前（单一 InvoxAgent 胖类）:
+  agent.ts          1056 行  ← 所有 ACP 方法 + prompt 主循环 + 配置 + 生命周期
+  cli.ts             557 行  ← main() + provider 选择 + config 选择
+  templates.ts      1025 行  ← 已在 J2.1 拆为 templates/ 目录
+  sub-agent-runner   745 行  ← 已在 J2.2 拆为 sub-agent/ 目录
+  hooks.ts           762 行  ← 已在 J2.3 合并加载器
+
+重构后:
+  agent.ts             383 行  ← 纯 ACP dispatcher（构造器 + 薄壳方法）
+  session-lifecycle.ts 420 行  ← createSession / restoreSession / destroy / persist
+  prompt-orchestrator  291 行  ← prompt() 主循环 + runOneIteration
+  config-router.ts     190 行  ← applyConfigChange / applyAgentModel / activeAgentFor
+  system-prompt-composer 80 行 ← history[0] 构造的单一入口
+  cli.ts              311 行  ← main() + 参数解析
+  cli/provider-pick    93 行  ← pickMockProvider / pickLegacyProvider / pickLegacyModels
+  cli/config-pick     121 行  ← pickConfigOptions / loadPromptTemplates
+  util/load-json-array 64 行  ← 通用 JSON 数组加载器
+```
+
+### 踩的坑
+
+1. **executeTool 签名变更波及面比预想大**（J3.1）：改 `rawArgs: string` → `args: Record<string, unknown>` 后，除了 prompt-loop.ts（预期中），还有 6 个 smoke 文件 + 2 个测试文件直接调 `executeTool` 并传 `JSON.stringify()`。sed 多行替换搞不定，最后手动 Edit 逐个修。教训：**改公开函数签名前，先 grep 全部调用方**，不要只看 src/。
+
+2. **session-lifecycle.ts 临时超 400 行预算**（J2.4a → J2.4b）：effectiveSystemPromptBody / applyAgentModel 在 J2.4a 搬到 SessionLifecycle 时文件到 485 行。J2.4b 搬到 ConfigRouter 后缩回 420 行。中间态超预算是可接受的，但说明**跨 Stage 的"搬家"要预判最终位置**。
+
+3. **smoke-config-options / smoke-usage-model 是 pre-existing fail**：两个 smoke 在 clean tree 上也挂。原因分别是 agents 模式下不暴露 system_prompt 下拉（预期行为）和 env 未设 $MODEL_LITE。这些不是回归，但说明 smoke 的断言需要更新以适应 Phase G/H 的行为变化。
+
+### 教训
+
+1. **Collaborator pattern 的依赖注入 bag 比 constructor 参数列表更实用**：SessionLifecycleDeps 接口让新增依赖（如 composer / router）只需改接口定义 + 构造处，不影响已有调用方。
+
+2. **configMode() 集中化是值得的**：10 处 `configs.agents.length > 0` 替换为 `configMode(configs) === "agent"` 后，语义更清晰，且未来加第三种模式时只需改一处。
+
+3. **SystemPromptComposer 的引入时机很重要**：J2.4a 时如果直接引入 composer 会增加复杂度（那时候 router 还没抽出来）。等到 J3.2 引入时，router 和 lifecycle 已经稳定，composer 只是一个薄层。**重构的顺序比单步的完美更重要**。
+
 <!-- 新的工作日记追加在这里之上 -->
 
 
