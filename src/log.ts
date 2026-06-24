@@ -1,7 +1,17 @@
-// log：写 stderr + 可选写文件。stdout 在 stdio transport 上专用于
-// JSON-RPC 帧，这里所有日志一律走 fd 2。
-// 设置 INVOX_LOG_FILE 后会同时追加到该文件 —— Zed 启动时 stderr 不易看见，
-// 落盘日志方便排查。
+// log：写 stderr + 按模块分类路由到不同文件。stdout 在 stdio transport 上
+// 专用于 JSON-RPC 帧，这里所有日志一律走 fd 2。
+//
+// ── 三层输出目标 ────────────────────────────────────────────────
+//
+// 1. stderr        → 所有模块，实时输出
+// 2. invox.log     → 仅基础设施模块（通过 INVOX_LOG_FILE 环境变量指定路径）
+//                    模块：cli、mcp、plugins、discovery、transport、
+//                    persistence、templates、agent(生命周期)、providers 等
+// 3. session log   → 会话作用域模块自动写入 .invox/logs/<sessionId>.log
+//                    模块：llm、prompt-loop、tools、sub-agent、agent(turn事件)
+//                    session 日志通过 setSessionLogFile() 绑定，emit() 自动路由
+//
+// ── 配置 ────────────────────────────────────────────────────────
 //
 // 等级由环境变量 INVOX_LOG 控制：
 //   "silent" | "error" | "warn" | "info" | "debug" | "trace"
@@ -19,6 +29,49 @@
 
 import { closeSync, createWriteStream, mkdirSync, openSync, writeSync, type WriteStream } from "node:fs";
 import { join } from "node:path";
+
+// ── 模块分类（决定日志写入哪些文件）──────────────────────────────
+//
+// 基础设施模块 → stderr + INVOX_LOG_FILE（全局运维排查）
+// 会话作用域模块 → stderr + session log（每次会话独立追踪）
+// agent 是双归属：生命周期事件进 invox.log，turn 事件进 session log
+
+const INFRA_MODULES = new Set([
+  "core", "cli", "mcp", "mcp-lifecycle", "plugins", "discovery",
+  "transport", "persistence", "templates", "multi-provider", "providers",
+  "agent",  // 生命周期事件（session created / destroyed 等）需进全局日志
+]);
+
+const SESSION_MODULES = new Set([
+  "agent", "llm", "prompt-loop", "tools", "sub-agent",
+]);
+
+// ── 当前活跃的 session 日志文件 ─────────────────────────────────
+//
+// emit() 会根据模块名自动路由到此处。由 SessionLifecycle /
+// PromptOrchestrator / SubAgent runner 在合适的时机设置和清理。
+
+let currentSessionLog: LogFile | null = null;
+
+/** 绑定当前 session 的日志文件。设置后，SESSION_MODULES 的日志会自动写入该文件。 */
+export function setSessionLogFile(lf: LogFile | null): void {
+  currentSessionLog = lf;
+}
+
+/** 获取当前绑定的 session 日志文件（供 save/restore 模式使用）。 */
+export function getSessionLogFile(): LogFile | null {
+  return currentSessionLog;
+}
+
+/**
+ * 直接向当前 session 日志文件写入一行原始文本（不经 emit() 格式化）。
+ * 用于需要自定义格式的场景（如 `  assistant: ...` 的缩进段落）。
+ */
+export function writeSessionLog(line: string): void {
+  if (currentSessionLog) {
+    currentSessionLog.write(line);
+  }
+}
 
 type Level = "silent" | "error" | "warn" | "info" | "debug" | "trace";
 
@@ -170,9 +223,20 @@ function emit(
     rest.length > 0
       ? `${ts} [${level}] [${moduleName}] ${msg} ${rest.map((r) => safeStringify(r)).join(" ")}\n`
       : `${ts} [${level}] [${moduleName}] ${msg}\n`;
+
+  // 1. stderr —— 所有模块，实时输出
   process.stderr.write(line);
-  const fs = getFileStream();
-  if (fs) fs.write(line);
+
+  // 2. INVOX_LOG_FILE —— 仅基础设施模块（全局运维排查）
+  if (INFRA_MODULES.has(moduleName)) {
+    const fs = getFileStream();
+    if (fs) fs.write(line);
+  }
+
+  // 3. Session 日志 —— 会话作用域模块，自动写入当前 session 日志文件
+  if (SESSION_MODULES.has(moduleName) && currentSessionLog) {
+    currentSessionLog.write(line);
+  }
 }
 
 // ── createLogger ─────────────────────────────────────────────────────

@@ -21,7 +21,7 @@ import type {
   AgentSideConnection,
   ClientCapabilities,
 } from "@agentclientprotocol/sdk";
-import { createLogger, preview } from "../log.js";
+import { createLogger } from "../log.js";
 const log = createLogger("prompt-loop");
 import type { LLMMessage, LLMProvider, ParsedToolCall } from "../llm/types.js";
 import { createMcpTool } from "../mcp/tool.js";
@@ -372,9 +372,6 @@ async function runOneToolCall(
     toolCallId: call.id,
     argsPreview: previewArgs(call.arguments),
   });
-  session.sessionLog?.write(
-    `> ${call.name}: ${previewArgs(call.arguments)}\n`,
-  );
   const toolStartedAt = Date.now();
 
   // 工具参数解析（容错版）：旧实现用裸 JSON.parse(call.arguments)，
@@ -503,10 +500,6 @@ async function runOneToolCall(
           ` …(+${r.resultText.length - 200} more bytes)`
         : r.resultText,
   });
-  session.sessionLog?.write(
-    `. ${call.name}: ${r.ok ? "ok" : "fail"}` +
-      `  (${elapsedMs}ms)  ${preview(r.resultText, 150)}\n`,
-  );
 
   // PostToolUse / PostToolUseFailure hook
   if (r.ok) {

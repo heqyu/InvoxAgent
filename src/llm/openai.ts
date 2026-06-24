@@ -14,7 +14,7 @@
 //            **生产严禁开启** —— prompt / tool 输出可能含 API key、密钥等。
 
 import OpenAI from "openai";
-import { createLogger } from "../log.js";
+import { createLogger, preview, writeSessionLog } from "../log.js";
 const log = createLogger("llm");
 import {
   backoffConfigFromEnv,
@@ -134,6 +134,7 @@ export class OpenAIProvider implements LLMProvider {
     >();
     let finishReason: FinishReason = "other";
     let textBytes = 0;
+    let textContent = "";  // 累积完整回复文本，用于日志预览
     let chunks = 0;
     let firstByteAt = 0;
     let lastChunkAt = startedAt;
@@ -178,6 +179,7 @@ export class OpenAIProvider implements LLMProvider {
 
         if (typeof delta?.content === "string" && delta.content.length > 0) {
           textBytes += delta.content.length;
+          textContent += delta.content;
           yield { kind: "text", text: delta.content };
         }
 
@@ -221,6 +223,11 @@ export class OpenAIProvider implements LLMProvider {
           cached: usageRaw.prompt_tokens_details?.cached_tokens ?? 0,
         }
       : null;
+
+    // LLM 回复内容 —— 与 user: 一致的缩进格式，不经过 emit() 格式化
+    if (textContent) {
+      writeSessionLog(`  assistant: ${preview(textContent, 500)}\n`);
+    }
 
     // 总是把 provider 原始 usage 写进日志 —— 方便对照 OpenAI 计费 dashboard，
     // 验证 invox 显示的数字是否准确。

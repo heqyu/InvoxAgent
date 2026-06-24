@@ -32,6 +32,8 @@ import {
   createLogger,
   openSessionLogFile,
   preview,
+  setSessionLogFile,
+  getSessionLogFile,
 } from "../../log.js";
 const log = createLogger("sub-agent");
 import { runOneIteration, type IterationDeps } from "../prompt-loop.js";
@@ -143,6 +145,9 @@ export async function runSubAgent(
       return `subagent-${safeParent}-${safeRun}-${tsFmt}`;
     },
   });
+  // 保存父 session 的日志上下文，将 emit() 路由切换到子代理日志文件
+  const prevSessionLog = getSessionLogFile();
+  setSessionLogFile(logFile);
   const startedAt = Date.now();
   logFile.write(
     `${ts()} ── subagent start ────────────────────────────────────────\n` +
@@ -291,7 +296,6 @@ export async function runSubAgent(
       `${ts()}   sub.calls:     ${sub.turnUsage.calls}\n` +
       `${ts()}   finalText:     ${preview(finalText, 1000)}\n`,
   );
-  logFile.close();
 
   log.info("subagent done", {
     subagentType: opts.subagentType,
@@ -304,6 +308,10 @@ export async function runSubAgent(
     subOutput: sub.turnUsage.output,
     logPath: logFile.path || undefined,
   });
+
+  // 恢复父 session 的日志上下文，然后关闭子代理日志文件
+  setSessionLogFile(prevSessionLog);
+  logFile.close();
 
   // 8. banner 文本由 tools/sub-agent.ts 在 tool_call_update completed 时拼入
   //    acpContent —— 不再通过 agent_thought_chunk 发送，避免多个并行 SubAgent

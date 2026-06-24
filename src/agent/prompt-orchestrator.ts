@@ -17,7 +17,7 @@ import type {
   PromptRequest,
   PromptResponse,
 } from "@agentclientprotocol/sdk";
-import { createLogger, formatTimestamp, preview } from "../log.js";
+import { createLogger, formatTimestamp, preview, setSessionLogFile } from "../log.js";
 const log = createLogger("agent");
 import type { LLMProvider } from "../llm/types.js";
 import { contentToString } from "../llm/utils.js";
@@ -69,6 +69,9 @@ export class PromptOrchestrator {
     session: Session,
     params: PromptRequest,
   ): Promise<PromptResponse> {
+    // 绑定当前 session 的日志上下文，使后续 emit() 自动路由到 session 日志文件
+    setSessionLogFile(session.sessionLog ?? null);
+
     session.abort = new AbortController();
     // 重置本 turn 的 token 计费 —— 不跨 turn 累加，per-turn 数字才对得上"用户刚问的这次"
     session.turnUsage = emptyTurnUsage();

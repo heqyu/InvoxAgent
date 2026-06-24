@@ -18,6 +18,7 @@ import {
   createLogger,
   formatTimestamp,
   openSessionLogFile,
+  setSessionLogFile,
 } from "../log.js";
 const log = createLogger("agent");
 import { createSession as buildSession } from "./session-factory.js";
@@ -102,6 +103,7 @@ export class SessionLifecycle {
     // ── 开启会话独立日志 ────────────────────────────────────────────
     const sessionLog = openSessionLogFile(cwd, session.id, "session");
     session.sessionLog = sessionLog;
+    setSessionLogFile(sessionLog);
     const allOpts = buildConfigOptions(
       session,
       this.deps.models,
@@ -258,6 +260,7 @@ export class SessionLifecycle {
     // ── 开启会话独立日志（loadSession 恢复后） ───────────────────────
     const sessionLog = openSessionLogFile(cwd, snapshot.id, "session");
     session.sessionLog = sessionLog;
+    setSessionLogFile(sessionLog);
     sessionLog.write(
       `── session load @ ${formatTimestamp(new Date())} ───\n` +
         `  id:          ${snapshot.id}\n` +
@@ -305,6 +308,7 @@ export class SessionLifecycle {
       `── session end @ ${formatTimestamp(new Date())} ──────\n`,
     );
     session.sessionLog?.close();
+    setSessionLogFile(null);
     // ──────────────────────────────────────────────────────────────
 
     // abort 进行中的 prompt + 释放 MCP 池引用。
