@@ -48,7 +48,7 @@ const SCENARIOS: Scenario[] = [
   {
     kind: "auth",
     expectStopReason: "refusal",
-    expectErrorKeyword: /401|INVOX_API_KEY|auth/i,
+    expectErrorKeyword: /401|auth failed/i,
   },
   {
     kind: "network",

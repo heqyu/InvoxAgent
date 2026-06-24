@@ -27,8 +27,7 @@ one:
   "agent_servers": {
     "invox": {
       "command": "node",
-      "args": ["--import", "tsx", "G:/OhMyProjs/InvoxAgent/src/cli.ts"],
-      "env": { "INVOX_BASE_URL": "...", "INVOX_API_KEY": "...", "INVOX_MODEL": "..." }
+      "args": ["--import", "tsx", "G:/OhMyProjs/InvoxAgent/src/cli.ts"]
     },
     "invox-debug": {
       "command": "node",
@@ -38,9 +37,6 @@ one:
         "G:/OhMyProjs/InvoxAgent/src/cli.ts"
       ],
       "env": {
-        "INVOX_BASE_URL": "...",
-        "INVOX_API_KEY": "...",
-        "INVOX_MODEL": "...",
         "INVOX_LOG": "debug"
       }
     }

@@ -90,7 +90,7 @@ export function classifyProviderError(err: unknown): ClassifiedError {
     if (status === 401 || status === 403) {
       return refusal({
         category: "auth",
-        message: `LLM provider auth failed (HTTP ${status}). Check INVOX_API_KEY.`,
+        message: `LLM provider auth failed (HTTP ${status}). Check your API key in providers.json.`,
         status,
         ...(code !== undefined ? { code } : {}),
       });

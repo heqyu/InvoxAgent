@@ -1,18 +1,17 @@
-// Optional smoke test for the OpenAIProvider path. Skips with a clear message
-// if the required env vars aren't set so this can run in CI without secrets.
+// Optional smoke test for the real LLM path via providers.json.
+// Skips with a clear message if no providers.json is found so this can run
+// in CI without secrets.
 //
 // Run:
-//   INVOX_BASE_URL=https://api.openai.com/v1 \
-//   INVOX_MODEL=gpt-4o-mini \
-//   INVOX_API_KEY=sk-... \
 //   npx tsx examples/smoke-openai.ts
 //
-// Or against any OpenAI-compatible endpoint (DeepSeek, vLLM, Ollama-shim, etc.)
-// by changing INVOX_BASE_URL.
+// Requires ~/.invox/providers.json or .invox/providers.json in the project root.
 
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import {
   ClientSideConnection,
@@ -26,13 +25,11 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(__dirname, "..");
 
 async function main(): Promise<void> {
-  const baseURL = process.env["INVOX_BASE_URL"];
-  const apiKey = process.env["INVOX_API_KEY"];
-  const model = process.env["INVOX_MODEL"];
-
-  if (!baseURL || !apiKey || !model) {
+  const projectProviders = join(repoRoot, ".invox", "providers.json");
+  const userProviders = join(homedir(), ".invox", "providers.json");
+  if (!existsSync(projectProviders) && !existsSync(userProviders)) {
     console.error(
-      "[smoke-openai] SKIP — set INVOX_BASE_URL, INVOX_API_KEY, INVOX_MODEL to run this test",
+      "[smoke-openai] SKIP — no providers.json found (checked project and ~/.invox/)",
     );
     process.exit(0);
   }
@@ -46,10 +43,6 @@ async function main(): Promise<void> {
       env: {
         ...process.env,
         INVOX_LOG: "info",
-        // Explicitly DO NOT set INVOX_MOCK so OpenAIProvider is picked.
-        INVOX_BASE_URL: baseURL,
-        INVOX_API_KEY: apiKey,
-        INVOX_MODEL: model,
       },
     },
   );

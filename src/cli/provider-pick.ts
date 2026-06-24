@@ -1,14 +1,13 @@
 // Provider / model 选择函数 —— 从 cli.ts 抽出（J2.5）。
 //
-// pickMockProvider / pickLegacyProvider / pickLegacyModels 负责
-// 根据环境变量选择 LLM provider 和构造 model 菜单。
+// pickMockProvider / pickLegacyModels 负责根据环境变量选择离线 mock provider
+// 和构造 model 菜单。正式 provider 由 cli.ts 通过 providers.json 加载。
 
 import { readEnvModelLite, readEnvModelPro } from "../agent/templates/index.js";
 import type { AgentModelConfig, ModelInfo } from "../agent/session-types.js";
 import { EchoProvider } from "../llm/echo.js";
 import { FlakyProvider, type FlakyKind } from "../llm/flaky.js";
 import { BadJsonProvider, MockToolProvider } from "../llm/mock-tools.js";
-import { OpenAIProvider } from "../llm/openai.js";
 import type { LLMProvider } from "../llm/types.js";
 import { createLogger } from "../log.js";
 
@@ -38,27 +37,6 @@ export function pickMockProvider(): LLMProvider | null {
     return new EchoProvider();
   }
   return null;
-}
-
-/**
- * Legacy single-provider 选择（保留向后兼容）。
- *
- * 规则：
- *   - INVOX_API_KEY + INVOX_BASE_URL 都有 → OpenAIProvider
- *   - 其他 → EchoProvider，并 warn 提示
- */
-export function pickLegacyProvider(): LLMProvider {
-  const apiKey = process.env["INVOX_API_KEY"];
-  const baseURL = process.env["INVOX_BASE_URL"];
-  if (apiKey && baseURL) {
-    const model = process.env["INVOX_MODEL"] ?? "gpt-4o-mini";
-    log.info("provider: openai (legacy)", { baseURL, model });
-    return new OpenAIProvider({ apiKey, baseURL, model });
-  }
-  log.warn(
-    "provider: echo (no providers.json and INVOX_API_KEY/INVOX_BASE_URL missing)",
-  );
-  return new EchoProvider();
 }
 
 /**

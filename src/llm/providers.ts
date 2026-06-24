@@ -1,10 +1,9 @@
-// Multi-provider configuration: load provider configs from JSON file or env vars.
+// Multi-provider configuration: load provider configs from .invox/providers.json.
 //
-// Two modes:
-//   1. Multi-provider — .invox/providers.json (JSON config with multiple providers)
-//   2. Legacy single  — INVOX_API_KEY + INVOX_BASE_URL env vars
+// Two-level lookup (project → user):
+//   1. <cwd>/.invox/providers.json — project-level (full precedence)
+//   2. ~/.invox/providers.json     — user-level default
 //
-// providers.json takes precedence when present.
 // apiKey supports $ENV_VAR syntax: value starting with "$" is resolved from process.env.
 
 import { existsSync, readFileSync } from "node:fs";
@@ -139,26 +138,6 @@ function parseProvidersFile(file: string): ProvidersFileConfig | null {
     ...(typeof rec["defaultModel"] === "string" && rec["defaultModel"]
       ? { defaultModel: rec["defaultModel"] as string }
       : {}),
-  };
-}
-
-// ── Env var fallback (backward compatible) ────────────────────────────
-
-/**
- * Build a single-provider config from legacy env vars.
- * Returns null if either INVOX_API_KEY or INVOX_BASE_URL is missing.
- */
-export function loadProviderFromEnv(): ProviderConfig | null {
-  const apiKey = process.env["INVOX_API_KEY"];
-  const baseUrl = process.env["INVOX_BASE_URL"];
-  if (!apiKey || !baseUrl) return null;
-
-  const model = process.env["INVOX_MODEL"];
-  return {
-    name: "default",
-    baseUrl: baseUrl.replace(/\/+$/, ""),
-    apiKey,
-    ...(model ? { models: [model] } : {}),
   };
 }
 

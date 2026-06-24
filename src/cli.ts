@@ -28,7 +28,7 @@ import { StdioTransport } from "./transports/stdio.js";
 import type { Transport } from "./transports/types.js";
 import { WebSocketTransport } from "./transports/websocket.js";
 import type { PermissionPolicy } from "./tools/types.js";
-import { pickMockProvider, pickLegacyProvider, pickLegacyModels } from "./cli/provider-pick.js";
+import { pickMockProvider, pickLegacyModels } from "./cli/provider-pick.js";
 import { pickConfigOptions } from "./cli/config-pick.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -106,7 +106,6 @@ FLAGS:
 
 ENVIRONMENT:
   INVOX_LOG                       silent | error | warn | info | debug   (default: info)
-  INVOX_BASE_URL                  OpenAI-compatible base URL
   INVOX_MODEL                     Default model name passed to provider
   INVOX_MODELS                    Comma-separated selectable models
   INVOX_MODEL_PRO                 Model id for "$MODEL_PRO" agent placeholder
@@ -115,7 +114,6 @@ ENVIRONMENT:
   INVOX_MODEL_LITE                Model id for "$MODEL_LITE" agent placeholder
                                   (used by Worker by default)
                                   alias: MODEL_LITE (without INVOX_ prefix)
-  INVOX_API_KEY                   Provider API key
   INVOX_PROMPT_TEMPLATES_FILE     Path to JSON file of system-prompt templates
                                   (only used when INVOX_AGENTS=disabled)
   INVOX_AGENTS                    "disabled" → use legacy system_prompt dropdown
@@ -128,13 +126,16 @@ ENVIRONMENT:
   INVOX_PLUGIN_DIR                Path to plugin marketplace root (.plugins-cache.json)
 
 MULTI-PROVIDER:
-  Place .invox/providers.json in your project root to configure multiple LLM
-  providers. Each provider needs a name, baseUrl, and apiKey. On startup, invox
-  pings each provider's /v1/models endpoint to discover available models.
+  Configure LLM providers via .invox/providers.json (project-level) or
+  ~/.invox/providers.json (user-level). Each provider needs a name, baseUrl,
+  and apiKey. On startup, invox pings each provider's /v1/models endpoint
+  to discover available models.
 
   Two-level lookup (project → user):
     1. <cwd>/.invox/providers.json  — project-level (full precedence)
     2. ~/.invox/providers.json      — user-level default
+
+  Falls back to EchoProvider if no providers.json is found.
 `,
   );
 }
@@ -153,12 +154,11 @@ function pickPolicy(): PermissionPolicy {
 }
 
 /**
- * Provider + model 联合构建：三种路径按优先级尝试。
+ * Provider + model 联合构建：两种路径按优先级尝试。
  *
  *   1. Mock provider（INVOX_MOCK）—— 离线测试
  *   2. Multi-provider（.invox/providers.json）—— ping /v1/models 发现模型
- *   3. Legacy single-provider（INVOX_API_KEY + INVOX_BASE_URL）
- *   4. EchoProvider 兜底
+ *   3. EchoProvider 兜底（无 providers.json 时）
  */
 async function buildProviderAndModels(): Promise<{
   provider: LLMProvider;
@@ -208,9 +208,10 @@ async function buildProviderAndModels(): Promise<{
     };
   }
 
-  const provider = pickLegacyProvider();
+  log.warn("provider: no providers.json found, falling back to EchoProvider");
   const models = pickLegacyModels();
-  return { provider, models };
+  const { EchoProvider } = await import("./llm/echo.js");
+  return { provider: new EchoProvider(), models };
 }
 
 async function main(): Promise<void> {

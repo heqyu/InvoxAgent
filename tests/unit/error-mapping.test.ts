@@ -58,12 +58,12 @@ describe("classifyProviderError", () => {
       }
     });
 
-    it("401 → refusal / auth，提示 INVOX_API_KEY", () => {
+    it("401 → refusal / auth，提示检查 API key", () => {
       const r = classifyProviderError(apiError(401, "invalid token"));
       expect(r.kind).toBe("refusal");
       if (r.kind === "refusal") {
         expect(r.info.category).toBe("auth");
-        expect(r.info.message).toMatch(/INVOX_API_KEY/);
+        expect(r.info.message).toMatch(/auth failed/);
       }
     });
 

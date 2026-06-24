@@ -95,10 +95,7 @@ npx tsx examples/smoke-usage-model.ts
 # Offline: custom session-config dropdowns (system_prompt + thinking)
 npx tsx examples/smoke-config-options.ts
 
-# Real LLM: against any OpenAI-compatible endpoint
-INVOX_BASE_URL=https://api.openai.com/v1 \
-INVOX_MODEL=gpt-4o-mini \
-INVOX_API_KEY=sk-... \
+# Real LLM: requires providers.json (project-level or ~/.invox/)
 npx tsx examples/smoke-openai.ts
 ```
 
@@ -168,10 +165,8 @@ Then in Zed: open the agent panel, pick **invox**, send a prompt. Stage 1 echoes
 | `INVOX_LOG_FILE` | absolute path to also append logs to (in addition to stderr) | unset |
 | `INVOX_LOG_UTC` | `1` to use ISO UTC timestamps instead of local `MM-DD HH:mm:ss.SSS` | unset |
 | `INVOX_LOG_MODULE` | module filter: `*` (all), `[]` (none), `agent,llm` (whitelist), `*,-agent` (blacklist) | `*` |
-| `INVOX_BASE_URL` | OpenAI-compatible base URL (set both this and API_KEY for real LLM) | — |
 | `INVOX_MODEL` | default model name passed to provider (also the prefilled choice in the client's model dropdown) | `gpt-4o-mini` |
 | `INVOX_MODELS` | comma-separated list of selectable models advertised to the client (e.g. `gpt-4o-mini,gpt-4o,deepseek-chat`). The default `INVOX_MODEL` is auto-included. | unset (menu = `[INVOX_MODEL]`) |
-| `INVOX_API_KEY` | provider API key | — |
 | `INVOX_MOCK` | `1` → EchoProvider; `tools` → MockToolProvider; unset → real | unset |
 | `INVOX_PERMISSIONS` | `never` (default) / `writes` (gate writes+exec) / `always` (gate all tools) | `never` |
 | `INVOX_MAX_ITERATIONS` | max LLM↔tool round-trips per user prompt | `50` |
@@ -187,7 +182,7 @@ Then in Zed: open the agent panel, pick **invox**, send a prompt. Stage 1 echoes
 
 **Provider selection**:
 - `INVOX_MOCK=1` → `EchoProvider` (deterministic, offline)
-- both `INVOX_API_KEY` and `INVOX_BASE_URL` set → `OpenAIProvider`
+- `.invox/providers.json` found → `MultiProvider` (multi-provider with model discovery)
 - otherwise → `EchoProvider` with a warn log
 
 Logs go to **stderr** unconditionally — stdout is reserved for JSON-RPC framing.
@@ -197,8 +192,6 @@ Logs go to **stderr** unconditionally — stdout is reserved for JSON-RPC framin
 invox advertises an ACP **model menu** to clients. In Zed, a dropdown next to the input box lists every id from `INVOX_MODELS`; switching the dropdown sends `session/set_model`, which invox honors immediately for the next prompt and persists in the session JSON so reopening the project restores the choice.
 
 ```bash
-INVOX_BASE_URL=https://api.openai.com/v1 \
-INVOX_API_KEY=sk-... \
 INVOX_MODEL=gpt-4o-mini \
 INVOX_MODELS="gpt-4o-mini,gpt-4o,o1-mini" \
 node dist/cli.js

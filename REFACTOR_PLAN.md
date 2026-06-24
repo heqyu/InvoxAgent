@@ -668,7 +668,7 @@ npx tsx examples/smoke-error-mapping.ts
    ```
 2. `cli.ts:loadPromptTemplates` 改为 1 个 `loadJsonArray` 调用 + validator 闭包。
 3. **额外修复**（review §3.1）：把 `cli.ts:208-238` 中 `shutdownAndExit` 的 const 定义**移到** stdin handler 之前，消除前向引用看起来反直觉的问题。
-4. 顺手把 `pickMockProvider`（318-338）/`pickLegacyProvider`（347-359）/`pickLegacyModels`（385-403）/`pickConfigOptions`（424-460）抽到 `src/cli/provider-pick.ts` + `src/cli/config-pick.ts` 两个文件。`cli.ts` 只保留 `main()` + 参数解析。
+4. 顺手把 `pickMockProvider`（318-338）/`pickLegacyModels`（385-403）/`pickConfigOptions`（424-460）抽到 `src/cli/provider-pick.ts` + `src/cli/config-pick.ts` 两个文件。`cli.ts` 只保留 `main()` + 参数解析。
 
 **验收**：
 - typecheck + npm test 全绿

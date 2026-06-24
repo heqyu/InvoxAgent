@@ -28,7 +28,7 @@ npm run restart            # bash scripts/dev-restart.sh — see "Dev loop with 
 
 ### Smoke tests (offline acceptance harnesses)
 
-Each `examples/smoke-*.ts` ends with `PASS` or throws. Run via `npx tsx examples/<file>.ts`. Real-LLM variant (`smoke-openai.ts`) needs `INVOX_BASE_URL`, `INVOX_MODEL`, `INVOX_API_KEY` in env. Stages 1, 4 also require Zed-direct verification per PLAN.md §7 — the synthetic harness alone does NOT count as VERIFIED.
+Each `examples/smoke-*.ts` ends with `PASS` or throws. Run via `npx tsx examples/<file>.ts`. Real-LLM variant (`smoke-openai.ts`) needs a `providers.json` (project-level or `~/.invox/`). Stages 1, 4 also require Zed-direct verification per PLAN.md §7 — the synthetic harness alone does NOT count as VERIFIED.
 
 There is no unit-test framework. New behavioral checks become a new `smoke-*.ts` harness.
 
@@ -86,13 +86,13 @@ Each `Tool` declares a `tier: "read" | "write" | "execute"`. The router's permis
 
 ### LLM provider selection
 
-`pickProvider()` in `cli.ts` chooses based on env:
+`buildProviderAndModels()` in `cli.ts` chooses based on env:
 
-| Env | Provider |
+| Condition | Provider |
 |---|---|
 | `INVOX_MOCK=tools` | `MockToolProvider` (offline, scripted tool calls — used by `smoke-tools.ts`) |
 | `INVOX_MOCK=1` | `EchoProvider` (offline, deterministic — used by `smoke-stdio.ts` etc.) |
-| both `INVOX_API_KEY` and `INVOX_BASE_URL` | `OpenAIProvider` |
+| `.invox/providers.json` found | `MultiProvider` (multi-provider with model discovery) |
 | neither | `EchoProvider` with a warn |
 
 `LLMProvider.stream()` yields a discriminated union (`text` | `tool_call` | `finish`). The OpenAI provider must accumulate `function.arguments` per `tool_calls[index]` separately — naive concat misses the index, listed in PLAN.md §3 as a known pitfall.

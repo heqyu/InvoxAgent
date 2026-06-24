@@ -11,7 +11,7 @@
 //   - smoke 进程内部的 console.error 都会出现在 stderr —— 因此我们抓 stderr
 //     找 "PASS"，stdout 仍然是 ACP JSON-RPC（与 invox 自己的 stdio 一致）
 //   - smoke-plugin-real 需要外部 ECOMarket 目录，无环境变量则跳过
-//   - smoke-openai 在缺 INVOX_BASE_URL/INVOX_API_KEY 时自身 SKIP 退出 0，
+//   - smoke-openai 在缺 providers.json 时自身 SKIP 退出 0，
 //     vitest 视为通过 —— 这也是 smoke-openai 设计意图
 //   - 跨平台：用 process.execPath + ["--import", "tsx", smokeFile]，避免依赖
 //     PATH 上是否有 tsx

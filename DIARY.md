@@ -600,7 +600,7 @@ PROGRESS 状态更新：
   config-router.ts     190 行  ← applyConfigChange / applyAgentModel / activeAgentFor
   system-prompt-composer 80 行 ← history[0] 构造的单一入口
   cli.ts              311 行  ← main() + 参数解析
-  cli/provider-pick    93 行  ← pickMockProvider / pickLegacyProvider / pickLegacyModels
+  cli/provider-pick    93 行  ← pickMockProvider / pickLegacyModels
   cli/config-pick     121 行  ← pickConfigOptions / loadPromptTemplates
   util/load-json-array 64 行  ← 通用 JSON 数组加载器
 ```
