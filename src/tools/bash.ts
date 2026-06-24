@@ -31,6 +31,10 @@ import { existsSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { createLogger } from "../log.js";
 const log = createLogger("tools");
+
+/** rtk rewrite 集成开关。默认开启；设 INVOX_BASH_NO_RTK=1 关闭。 */
+const RTK_ENABLED = process.env["INVOX_BASH_NO_RTK"] !== "1";
+
 import type { ToolSpec } from "../llm/types.js";
 import {
   errorResult,
@@ -78,26 +82,29 @@ async function execute(
   log.debug("tool: Bash", { command: rawCommand, displayCommand });
 
   // 尝试通过 `rtk rewrite` 改写命令；改写成功且非空则用改写后的，否则原样。
+  // INVOX_BASH_NO_RTK=1 可完全禁用此行为。
   let command = rawCommand;
-  try {
-    const rewritten = await runRtkRewrite(rawCommand, ctx.cwd);
-    if (rewritten) {
-      command = rewritten;
-      if (command === rawCommand) {
-        log.info("Bash: rtk rewrite returned unchanged", {
-          command: rawCommand,
-        });
-      } else {
-        log.info("Bash: rtk rewrite succeeded", {
-          original: rawCommand,
-          rewritten: command,
-        });
+  if (RTK_ENABLED) {
+    try {
+      const rewritten = await runRtkRewrite(rawCommand, ctx.cwd);
+      if (rewritten) {
+        command = rewritten;
+        if (command === rawCommand) {
+          log.info("Bash: rtk rewrite returned unchanged", {
+            command: rawCommand,
+          });
+        } else {
+          log.info("Bash: rtk rewrite succeeded", {
+            original: rawCommand,
+            rewritten: command,
+          });
+        }
       }
+    } catch (e) {
+      log.debug("Bash: rtk rewrite failed, using original command", {
+        error: (e as Error).message,
+      });
     }
-  } catch (e) {
-    log.debug("Bash: rtk rewrite failed, using original command", {
-      error: (e as Error).message,
-    });
   }
 
   if (ctx.caps.terminal === true) {

@@ -61,6 +61,8 @@
 | `Grep(pattern)` | client-side ripgrep | — |
 | `Skill(name, params)` | client-side skill template rendering | — |
 
+> **Bash rtk integration**: Each Bash command is passed through `rtk rewrite` before execution (requires [rtk](https://github.com/nicholasgasior/rtk) installed). If rtk is unavailable, the original command is used silently. Disable with `INVOX_BASH_NO_RTK=1`.
+
 Permission policy for v1: **never ask** — the agent trusts the LLM and runs tools directly. (Stage 5 polish may add an env-knob for stricter policies.)
 
 ## Build & verify
@@ -181,6 +183,7 @@ Then in Zed: open the agent panel, pick **invox**, send a prompt. Stage 1 echoes
 | `INVOX_AGENTS` | `disabled` to fall back to the legacy `system_prompt` dropdown | enabled |
 | `INVOX_AGENTS_DIR` | absolute path to scan for `.invox/agents/*.json` (override `process.cwd()`) | unset |
 | `INVOX_DEFAULT_AGENT` | default agent id when multiple are loaded | `Worker` if present |
+| `INVOX_BASH_NO_RTK` | `"1"` to disable Bash tool's rtk rewrite integration | unset (enabled) |
 
 **Provider selection**:
 - `INVOX_MOCK=1` → `EchoProvider` (deterministic, offline)
