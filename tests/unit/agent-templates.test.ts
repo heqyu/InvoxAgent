@@ -23,11 +23,10 @@ import {
   agentAllowsMcp,
   filterToolSpecsByAgent,
   loadAgentTemplates,
-  readEnvModelLite,
-  readEnvModelPro,
   resolveAgentModel,
   type AgentTemplate,
 } from "../../src/agent/templates/index.js";
+import type { AgentModelsConfig } from "../../src/llm/providers.js";
 
 // ── 临时目录 helper ──────────────────────────────────────────────────
 
@@ -443,105 +442,149 @@ describe("agentAllowsMcp", () => {
 
 describe("resolveAgentModel", () => {
   const fb = "fallback-model";
+  const emptyEnv = {};
+  const emptyAM: AgentModelsConfig | undefined = undefined;
 
   it("undefined → fallback", () => {
-    expect(resolveAgentModel(undefined, fb, {})).toBe(fb);
+    expect(resolveAgentModel(undefined, fb)).toBe(fb);
   });
 
   it("空字符串 → fallback", () => {
-    expect(resolveAgentModel("", fb, {})).toBe(fb);
+    expect(resolveAgentModel("", fb)).toBe(fb);
   });
 
   it("具体 id（不以 $ 开头）→ 原样返回", () => {
-    expect(resolveAgentModel("gpt-4o", fb, {})).toBe("gpt-4o");
-    expect(resolveAgentModel("qwen3-coder-30b", fb, {})).toBe(
-      "qwen3-coder-30b",
+    expect(resolveAgentModel("gpt-4o", fb)).toBe("gpt-4o");
+    expect(resolveAgentModel("qwen3-coder-30b", fb)).toBe("qwen3-coder-30b");
+  });
+
+  // ── agentModels 优先于 env ────────────────────────────────────────
+
+  it("$MODEL_PRO: agentModels.PRO 优先于 env", () => {
+    expect(
+      resolveAgentModel(
+        "$MODEL_PRO",
+        fb,
+        { PRO: "json-pro" },
+        { INVOX_MODEL_PRO: "env-pro" },
+      ),
+    ).toBe("json-pro");
+  });
+
+  it("$MODEL_LITE: agentModels.LITE 优先于 env", () => {
+    expect(
+      resolveAgentModel(
+        "$MODEL_LITE",
+        fb,
+        { LITE: "json-lite" },
+        { INVOX_MODEL_LITE: "env-lite" },
+      ),
+    ).toBe("json-lite");
+  });
+
+  // ── agentModels 回退到 env ────────────────────────────────────────
+
+  it("$MODEL_PRO: agentModels 无 PRO → env fallback", () => {
+    expect(
+      resolveAgentModel("$MODEL_PRO", fb, undefined, {
+        INVOX_MODEL_PRO: "env-pro",
+      }),
+    ).toBe("env-pro");
+  });
+
+  it("$MODEL_LITE: agentModels 无 LITE → env fallback", () => {
+    expect(
+      resolveAgentModel("$MODEL_LITE", fb, undefined, {
+        INVOX_MODEL_LITE: "env-lite",
+      }),
+    ).toBe("env-lite");
+  });
+
+  // ── agentModels 独有配置 ──────────────────────────────────────────
+
+  it("$MODEL_PRO: agentModels.PRO 设定，env 无 → 用 agentModels", () => {
+    expect(resolveAgentModel("$MODEL_PRO", fb, { PRO: "json-pro" })).toBe(
+      "json-pro",
     );
   });
 
-  it("$MODEL_PRO 优先 INVOX_MODEL_PRO", () => {
+  it("$MODEL_LITE: agentModels.LITE 设定，env 无 → 用 agentModels", () => {
+    expect(resolveAgentModel("$MODEL_LITE", fb, { LITE: "json-lite" })).toBe(
+      "json-lite",
+    );
+  });
+
+  // ── env 兼容（无 agentModels 时）─────────────────────────────────
+
+  it("$MODEL_PRO: 无 agentModels, INVOX_ 前缀 env 优先", () => {
     expect(
-      resolveAgentModel("$MODEL_PRO", fb, {
-        INVOX_MODEL_PRO: "claude-3-opus",
+      resolveAgentModel("$MODEL_PRO", fb, undefined, {
+        INVOX_MODEL_PRO: "primary",
         MODEL_PRO: "should-be-ignored",
       }),
-    ).toBe("claude-3-opus");
+    ).toBe("primary");
   });
 
-  it("$MODEL_PRO 回退 MODEL_PRO（无前缀别名）", () => {
+  it("$MODEL_PRO: 无 agentModels, 回退 MODEL_PRO 别名", () => {
     expect(
-      resolveAgentModel("$MODEL_PRO", fb, { MODEL_PRO: "claude-3-opus" }),
-    ).toBe("claude-3-opus");
+      resolveAgentModel("$MODEL_PRO", fb, undefined, {
+        MODEL_PRO: "alias-value",
+      }),
+    ).toBe("alias-value");
   });
 
-  it("$MODEL_PRO 两个 env 都未设 → fallback", () => {
-    expect(resolveAgentModel("$MODEL_PRO", fb, {})).toBe(fb);
+  it("$MODEL_PRO: 无 agentModels, 两 env 都未设 → fallback", () => {
+    expect(resolveAgentModel("$MODEL_PRO", fb)).toBe(fb);
   });
 
-  it("$MODEL_LITE 优先 INVOX_MODEL_LITE", () => {
+  it("$MODEL_LITE: 无 agentModels, 优先 INVOX_MODEL_LITE", () => {
     expect(
-      resolveAgentModel("$MODEL_LITE", fb, {
+      resolveAgentModel("$MODEL_LITE", fb, undefined, {
         INVOX_MODEL_LITE: "gpt-4o-mini",
         MODEL_LITE: "ignored",
       }),
     ).toBe("gpt-4o-mini");
   });
 
-  it("$MODEL_LITE 回退 MODEL_LITE", () => {
+  it("$MODEL_LITE: 无 agentModels, 回退 MODEL_LITE", () => {
     expect(
-      resolveAgentModel("$MODEL_LITE", fb, { MODEL_LITE: "haiku" }),
+      resolveAgentModel("$MODEL_LITE", fb, undefined, { MODEL_LITE: "haiku" }),
     ).toBe("haiku");
   });
 
-  it("$MODEL_LITE 都未设 → fallback", () => {
-    expect(resolveAgentModel("$MODEL_LITE", fb, {})).toBe(fb);
+  it("$MODEL_LITE: 无 agentModels, 都未设 → fallback", () => {
+    expect(resolveAgentModel("$MODEL_LITE", fb)).toBe(fb);
   });
+
+  // ── 通用 env 引用 ─────────────────────────────────────────────────
 
   it("$ANY_VAR 通用 env 引用", () => {
     expect(
-      resolveAgentModel("$MY_CUSTOM_MODEL", fb, {
+      resolveAgentModel("$MY_CUSTOM_MODEL", fb, undefined, {
         MY_CUSTOM_MODEL: "deepseek-r1",
       }),
     ).toBe("deepseek-r1");
   });
 
   it("$ANY_VAR 未设 → fallback", () => {
-    expect(resolveAgentModel("$NONEXISTENT", fb, {})).toBe(fb);
+    expect(resolveAgentModel("$NONEXISTENT", fb)).toBe(fb);
   });
 
-  it("$MODEL_PRO 不会因为 INVOX_MODEL_PRO 是空字符串就接受", () => {
-    // 空字符串视为未设，回退到 MODEL_PRO 别名再回退到 fallback
+  // ── 空字符串边界 ──────────────────────────────────────────────────
+
+  it("$MODEL_PRO: 空字符串 env 被忽略，回退到别名", () => {
     expect(
-      resolveAgentModel("$MODEL_PRO", fb, {
+      resolveAgentModel("$MODEL_PRO", fb, undefined, {
         INVOX_MODEL_PRO: "",
         MODEL_PRO: "alias-value",
       }),
     ).toBe("alias-value");
   });
-});
 
-describe("readEnvModelPro / readEnvModelLite", () => {
-  it("两个 env 都没设 → undefined", () => {
-    expect(readEnvModelPro({})).toBeUndefined();
-    expect(readEnvModelLite({})).toBeUndefined();
-  });
-
-  it("INVOX_ 前缀优先于无前缀别名", () => {
+  it("$MODEL_PRO: 空字符串 agentModels 被忽略", () => {
     expect(
-      readEnvModelPro({ INVOX_MODEL_PRO: "primary", MODEL_PRO: "alias" }),
-    ).toBe("primary");
-    expect(
-      readEnvModelLite({ INVOX_MODEL_LITE: "primary", MODEL_LITE: "alias" }),
-    ).toBe("primary");
-  });
-
-  it("仅 alias 时回退使用 alias", () => {
-    expect(readEnvModelPro({ MODEL_PRO: "alias-only" })).toBe("alias-only");
-    expect(readEnvModelLite({ MODEL_LITE: "alias-only" })).toBe("alias-only");
-  });
-
-  it("空字符串视为未设", () => {
-    expect(readEnvModelPro({ INVOX_MODEL_PRO: "" })).toBeUndefined();
+      resolveAgentModel("$MODEL_PRO", fb, { PRO: "" }, { MODEL_PRO: "env" }),
+    ).toBe("env");
   });
 });
 

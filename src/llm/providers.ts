@@ -1,8 +1,13 @@
 // Multi-provider configuration: load provider configs from .invox/providers.json.
 //
-// Two-level lookup (project → user):
-//   1. <cwd>/.invox/providers.json — project-level (full precedence)
+// Two-level lookup with field-level merge (project overrides user on conflict):
+//   1. <cwd>/.invox/providers.json — project-level
 //   2. ~/.invox/providers.json     — user-level default
+//
+// Merge semantics:
+//   - providers[]: deduped by `name`, project wins on conflict
+//   - defaultModel: project wins
+//   - agentModels: field-merged, project wins on key conflict
 //
 // apiKey supports $ENV_VAR syntax: value starting with "$" is resolved from process.env.
 
@@ -31,38 +36,60 @@ export interface ProviderConfig {
   enabled?: boolean;
 }
 
+/**
+ * Agent model tier configuration. Maps logical tier names to actual model IDs.
+ *
+ *   - PRO  : high-reasoning / planning tasks (e.g. Plan, CodeReviewer, BDD agents)
+ *   - LITE : execution tasks that follow an existing plan (e.g. Worker agent)
+ *
+ * Referenced by agent templates via `$MODEL_PRO` / `$MODEL_LITE` placeholders
+ * in the `model` field. Resolved at runtime by `resolveAgentModel()`.
+ */
+export interface AgentModelsConfig {
+  PRO?: string;
+  LITE?: string;
+}
+
 export interface ProvidersFileConfig {
   providers: ProviderConfig[];
   /** Default model ID across all providers. Falls back to first discovered model. */
   defaultModel?: string;
+  /**
+   * Agent model tier configuration. Merged across user + project levels;
+   * project wins on key conflict.
+   */
+  agentModels?: AgentModelsConfig;
 }
 
 // ── JSON config loading ───────────────────────────────────────
 
 /**
- * Load multi-provider config with two-level lookup (project → user).
+ * Load multi-provider config with field-level merge (project → user).
  *
- *   1. `<cwd>/.invox/providers.json` — project-level (full precedence)
+ *   1. `<cwd>/.invox/providers.json` — project-level
  *   2. `~/.invox/providers.json`     — user-level default
- *   3. null                           — neither found → legacy env-var path
+ *
+ * Merge semantics (project wins on conflict):
+ *   - providers[]: deduped by `name`
+ *   - defaultModel: project wins
+ *   - agentModels: field-merged at key level (PRO / LITE)
+ *
+ * Returns null only when neither file provides any usable config.
  *
  * apiKey supports $ENV_VAR syntax: value starting with "$" is resolved from process.env.
  */
-export function loadProvidersJson(cwd: string): ProvidersFileConfig | null {
+export function loadProvidersJson(
+  cwd: string,
+  userDir?: string,
+): ProvidersFileConfig | null {
   const projectFile = join(cwd, ".invox", "providers.json");
-  if (existsSync(projectFile)) {
-    const result = parseProvidersFile(projectFile);
-    if (result) return result;
-  }
+  const userFile = join(userDir ?? homedir(), ".invox", "providers.json");
 
-  // User-level fallback: ~/.invox/providers.json
-  const userFile = join(homedir(), ".invox", "providers.json");
-  if (existsSync(userFile)) {
-    const result = parseProvidersFile(userFile);
-    if (result) return result;
-  }
+  const user = existsSync(userFile) ? parseProvidersFile(userFile) : null;
+  const project = existsSync(projectFile) ? parseProvidersFile(projectFile) : null;
 
-  return null;
+  if (!user && !project) return null;
+  return mergeProvidersFiles(user, project);
 }
 
 /**
@@ -122,8 +149,28 @@ function parseProvidersFile(file: string): ProvidersFileConfig | null {
     });
   }
 
-  if (providers.length === 0) {
-    log.warn("providers.json: no valid providers found after filtering", { file });
+  // Parse agentModels (optional): only accept "PRO" and "LITE" string keys
+  let agentModels: AgentModelsConfig | undefined;
+  const rawAM = rec["agentModels"];
+  if (rawAM && typeof rawAM === "object" && !Array.isArray(rawAM)) {
+    const amRec = rawAM as Record<string, unknown>;
+    const valid: AgentModelsConfig = {};
+    for (const [k, v] of Object.entries(amRec)) {
+      if (k === "PRO" || k === "LITE") {
+        if (typeof v === "string" && v.length > 0) {
+          valid[k] = v;
+        }
+      } else {
+        log.warn("providers.json: ignoring unknown agentModels key", { file, key: k });
+      }
+    }
+    if (valid.PRO || valid.LITE) agentModels = valid;
+  } else if (rawAM !== undefined) {
+    log.warn("providers.json: agentModels should be an object, ignoring", { file });
+  }
+
+  if (providers.length === 0 && !agentModels) {
+    log.warn("providers.json: no valid providers or agentModels found after filtering", { file });
     return null;
   }
 
@@ -138,6 +185,52 @@ function parseProvidersFile(file: string): ProvidersFileConfig | null {
     ...(typeof rec["defaultModel"] === "string" && rec["defaultModel"]
       ? { defaultModel: rec["defaultModel"] as string }
       : {}),
+    ...(agentModels ? { agentModels } : {}),
+  };
+}
+
+/**
+ * Merge two ProvidersFileConfig with field-level precedence.
+ * Project-level values win on conflict; user-level fills gaps.
+ *
+ *   - providers[]: deduped by `name` (project wins)
+ *   - defaultModel: project wins
+ *   - agentModels: field-merged (project wins per key: PRO / LITE)
+ */
+export function mergeProvidersFiles(
+  user: ProvidersFileConfig | null,
+  project: ProvidersFileConfig | null,
+): ProvidersFileConfig {
+  // ── providers[]: merge by name, project wins ──────────────────
+  const providerByName = new Map<string, ProviderConfig>();
+  for (const p of user?.providers ?? []) {
+    providerByName.set(p.name, p);
+  }
+  for (const p of project?.providers ?? []) {
+    providerByName.set(p.name, p); // project overwrites same name
+  }
+  const providers = [...providerByName.values()];
+
+  // ── defaultModel: project wins ────────────────────────────────
+  const defaultModel = project?.defaultModel ?? user?.defaultModel;
+
+  // ── agentModels: field-merged, project wins per key ───────────
+  let agentModels: AgentModelsConfig | undefined;
+  const userAM = user?.agentModels;
+  const projAM = project?.agentModels;
+  if (userAM || projAM) {
+    const merged: AgentModelsConfig = {};
+    if (userAM?.PRO) merged.PRO = userAM.PRO;
+    if (userAM?.LITE) merged.LITE = userAM.LITE;
+    if (projAM?.PRO) merged.PRO = projAM.PRO; // project wins
+    if (projAM?.LITE) merged.LITE = projAM.LITE; // project wins
+    if (merged.PRO || merged.LITE) agentModels = merged;
+  }
+
+  return {
+    providers,
+    ...(defaultModel ? { defaultModel } : {}),
+    ...(agentModels ? { agentModels } : {}),
   };
 }
 

@@ -9,14 +9,7 @@ import { AgentSideConnection } from "@agentclientprotocol/sdk";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import {
-  InvoxAgent,
-  type AgentModelConfig,
-} from "./agent/agent.js";
-import {
-  readEnvModelLite,
-  readEnvModelPro,
-} from "./agent/templates/index.js";
+import { InvoxAgent, type AgentModelConfig } from "./agent/agent.js";
 import { discoverAllModels } from "./llm/discovery.js";
 import { MultiProvider } from "./llm/multi-provider.js";
 import type { LLMProvider } from "./llm/types.js";
@@ -28,7 +21,8 @@ import { StdioTransport } from "./transports/stdio.js";
 import type { Transport } from "./transports/types.js";
 import { WebSocketTransport } from "./transports/websocket.js";
 import type { PermissionPolicy } from "./tools/types.js";
-import { pickMockProvider, pickLegacyModels } from "./cli/provider-pick.js";
+import { pickMockProvider } from "./cli/provider-pick.js";
+import type { ProvidersFileConfig } from "./llm/providers.js";
 import { pickConfigOptions } from "./cli/config-pick.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -106,19 +100,11 @@ FLAGS:
 
 ENVIRONMENT:
   INVOX_LOG                       silent | error | warn | info | debug   (default: info)
-  INVOX_MODEL                     Default model name passed to provider
-  INVOX_MODELS                    Comma-separated selectable models
-  INVOX_MODEL_PRO                 Model id for "$MODEL_PRO" agent placeholder
-                                  (used by Plan / CodeReviewer by default)
-                                  alias: MODEL_PRO (without INVOX_ prefix)
-  INVOX_MODEL_LITE                Model id for "$MODEL_LITE" agent placeholder
-                                  (used by Worker by default)
-                                  alias: MODEL_LITE (without INVOX_ prefix)
   INVOX_PROMPT_TEMPLATES_FILE     Path to JSON file of system-prompt templates
                                   (only used when INVOX_AGENTS=disabled)
   INVOX_AGENTS                    "disabled" → use legacy system_prompt dropdown
                                   (default: enabled, loads .invox/agents/*.json
-                                   + 4 built-in: Plan/Ask/Worker/CodeReviewer)
+                                   + 5 built-in: Plan/Ask/Worker/CodeReviewer/BDD)
   INVOX_AGENTS_DIR                Root directory containing .invox/agents/
                                   (default: process cwd at startup)
   INVOX_DEFAULT_AGENT             Default agent id when multiple are loaded
@@ -131,9 +117,19 @@ MULTI-PROVIDER:
   and apiKey. On startup, invox pings each provider's /v1/models endpoint
   to discover available models.
 
-  Two-level lookup (project → user):
-    1. <cwd>/.invox/providers.json  — project-level (full precedence)
+  Two-level lookup with field-level merge (project overrides user on conflict):
+    1. <cwd>/.invox/providers.json  — project-level
     2. ~/.invox/providers.json      — user-level default
+
+  Merge semantics:
+    - providers[]:      deduped by name, project wins
+    - defaultModel:     project wins
+    - agentModels:      field-merged (PRO / LITE), project wins per key
+
+  agentModels maps agent template placeholders to actual model IDs:
+    { "agentModels": { "PRO": "claude-3-5-sonnet", "LITE": "gpt-4o-mini" } }
+  Used by "$MODEL_PRO" / "$MODEL_LITE" in agent templates (Plan/CodeReviewer/BDD
+  default to PRO; Worker defaults to LITE).
 
   Falls back to EchoProvider if no providers.json is found.
 `,
@@ -153,26 +149,72 @@ function pickPolicy(): PermissionPolicy {
   return "never";
 }
 
+function staticModelsFromConfig(
+  providersConfig: ProvidersFileConfig | null,
+  fallbackModelIds: string | string[],
+): AgentModelConfig {
+  const ids: string[] = [];
+  const fallbacks = Array.isArray(fallbackModelIds)
+    ? fallbackModelIds
+    : [fallbackModelIds];
+  for (const p of providersConfig?.providers ?? []) {
+    for (const id of p.models ?? []) {
+      if (!ids.includes(id)) ids.push(id);
+    }
+  }
+
+  const preferredDefault = providersConfig?.defaultModel;
+  if (ids.length === 0) {
+    if (preferredDefault) {
+      ids.push(preferredDefault);
+    } else {
+      ids.push(...fallbacks);
+    }
+  }
+  const defaultModelId =
+    preferredDefault && ids.includes(preferredDefault) ? preferredDefault : ids[0]!;
+
+  const proId = providersConfig?.agentModels?.PRO;
+  if (proId && !ids.includes(proId)) ids.push(proId);
+  const liteId = providersConfig?.agentModels?.LITE;
+  if (liteId && !ids.includes(liteId)) ids.push(liteId);
+
+  return {
+    available: ids.map((id) => ({ modelId: id, name: id })),
+    defaultModelId,
+    ...(providersConfig?.agentModels
+      ? { agentModels: providersConfig.agentModels }
+      : {}),
+  };
+}
+
 /**
- * Provider + model 联合构建：两种路径按优先级尝试。
+ * Provider + model 联合构建：
  *
- *   1. Mock provider（INVOX_MOCK）—— 离线测试
- *   2. Multi-provider（.invox/providers.json）—— ping /v1/models 发现模型
- *   3. EchoProvider 兜底（无 providers.json 时）
+ *   1. 读取 providers.json（若存在）作为唯一正式 model menu 来源
+ *   2. Mock provider（INVOX_MOCK）只替换 provider，不再通过 env 构造模型菜单
+ *   3. Multi-provider（providers.json.providers 非空）—— ping /v1/models 发现模型
+ *   4. EchoProvider 兜底（无 providers.json 或只有 agentModels 无 provider 时）
  */
 async function buildProviderAndModels(): Promise<{
   provider: LLMProvider;
   models: AgentModelConfig;
 }> {
+  const providersConfig = (
+    await import("./llm/providers.js")
+  ).loadProvidersJson(process.cwd());
+
   const mock = pickMockProvider();
   if (mock) {
-    return { provider: mock, models: pickLegacyModels() };
+    return {
+      provider: mock,
+      // Mock provider is for deterministic offline tests; keep its model menu
+      // isolated from real user/project providers.json.
+      models: staticModelsFromConfig(null, ["alpha", "beta"]),
+    };
   }
 
-  const providersConfig = (await import("./llm/providers.js")).loadProvidersJson(
-    process.cwd(),
-  );
-  if (providersConfig) {
+  if (providersConfig && providersConfig.providers.length > 0) {
     log.info("multi-provider: mode active", {
       providerCount: providersConfig.providers.length,
       names: providersConfig.providers.map((p) => p.name),
@@ -189,14 +231,15 @@ async function buildProviderAndModels(): Promise<{
     });
 
     const modelList = multiProvider.modelList;
-    const proId = readEnvModelPro();
-    const liteId = readEnvModelLite();
+    // agentModels 解析出的 id 自动并入 model 菜单
+    const proId = providersConfig.agentModels?.PRO;
+    const liteId = providersConfig.agentModels?.LITE;
     const allIds = modelList.map((m) => m.modelId);
     if (proId && !allIds.includes(proId)) {
-      modelList.push({ modelId: proId, name: proId, providerName: "env" });
+      modelList.push({ modelId: proId, name: proId, providerName: "agentModels" });
     }
     if (liteId && !allIds.includes(liteId)) {
-      modelList.push({ modelId: liteId, name: liteId, providerName: "env" });
+      modelList.push({ modelId: liteId, name: liteId, providerName: "agentModels" });
     }
 
     return {
@@ -204,14 +247,17 @@ async function buildProviderAndModels(): Promise<{
       models: {
         available: modelList.map((m) => ({ modelId: m.modelId, name: m.name })),
         defaultModelId: multiProvider.defaultModel,
+        agentModels: providersConfig.agentModels,
       },
     };
   }
 
-  log.warn("provider: no providers.json found, falling back to EchoProvider");
-  const models = pickLegacyModels();
+  log.warn("provider: no usable provider configured, falling back to EchoProvider");
   const { EchoProvider } = await import("./llm/echo.js");
-  return { provider: new EchoProvider(), models };
+  return {
+    provider: new EchoProvider(),
+    models: staticModelsFromConfig(providersConfig, "echo-model"),
+  };
 }
 
 async function main(): Promise<void> {

@@ -34,7 +34,7 @@ export const BUILTIN_AGENTS: AgentTemplate[] = [
     prompt: WORKER_PROMPT,
     // tools 未设 = 全部内置；mcp 未设 = 允许
     // model = "$MODEL_LITE"：Worker 是"按计划干活"的角色，用 LITE
-    // 模型节省 token；INVOX_MODEL_LITE 未设时回退 session 当前 model。
+    // 模型节省 token；agentModels.LITE 未设时回退 session 当前 model。
     model: "$MODEL_LITE",
   },
 ];
@@ -60,7 +60,7 @@ export const DEFAULT_USER_AGENTS: Array<
       "只读勘察 + 方案落盘：Read / Glob / Grep / Skill 调研，MakePlan 写入 .invox/plans。",
     prompt: PLAN_PROMPT,
     tools: ["Read", "Glob", "Grep", "Skill", "MakePlan"],
-    // Plan 需要"高度推理规划"能力 → 默认指向 INVOX_MODEL_PRO
+    // Plan 需要"高度推理规划"能力 → 默认指向 agentModels.PRO
     model: "$MODEL_PRO",
   },
   {

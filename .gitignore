@@ -32,3 +32,4 @@ start-server.ps1
 
 # Windows 误操作残留
 nul
+docs/diagrams/

@@ -237,7 +237,7 @@ export class SessionLifecycle {
     }
 
     // 仅当磁盘上的 selectedModel 仍在当前菜单里才恢复；
-    // 用户后来收窄了 INVOX_MODELS 时回退默认，而非沿用不存在的 id。
+    // 用户后来收窄了 providers.json 模型菜单时回退默认，而非沿用不存在的 id。
     const session = buildSession({
       id: snapshot.id,
       cwd,

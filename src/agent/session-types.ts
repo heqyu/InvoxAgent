@@ -32,7 +32,7 @@ export interface Session {
   createdAt: number;
   /**
    * 通过 setSessionConfigOption(configId="model") 选定的 model id。
-   * undefined 时回退到 agent 默认 model（availableModels[0]，源自 INVOX_MODEL）。
+   * undefined 时回退到默认 model（providers.json defaultModel 或 model 列表首项）。
    */
   selectedModel?: string;
   /**
@@ -116,6 +116,8 @@ export interface AgentModelConfig {
   /** 默认 model id，必须在 available 中。会话尚未通过 setSessionModel 选择
    *  model 时使用。 */
   defaultModelId: string;
+  /** Agent model tier 配置（来自 providers.json agentModels）。 */
+  agentModels?: import("../llm/providers.js").AgentModelsConfig;
 }
 
 /**

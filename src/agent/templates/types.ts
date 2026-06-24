@@ -10,11 +10,11 @@
  *   - mcp 未设 → true（不限制）；false → 完全屏蔽 MCP 工具暴露给 LLM
  *   - model 未设 → 走 session 当前 model（用户在 model 下拉里选的）
  *     具体 id："gpt-4o" / "qwen3-coder-30b" / 任何 provider 认识的字符串
- *     env 引用：
- *       "$MODEL_PRO"   → INVOX_MODEL_PRO 优先，回退 MODEL_PRO
- *       "$MODEL_LITE"  → INVOX_MODEL_LITE 优先，回退 MODEL_LITE
+ *     占位符：
+ *       "$MODEL_PRO"   → providers.json agentModels.PRO（env fallback）
+ *       "$MODEL_LITE"  → providers.json agentModels.LITE（env fallback）
  *       "$ANY_VAR"     → process.env.ANY_VAR
- *     env 解析失败时：warn + 回退 session 当前 model（不让 agent 切换报错）
+ *     解析失败时：warn + 回退 session 当前 model（不让 agent 切换报错）
  *
  * Memory / Skills 段不写入 prompt 本身 —— 它们由
  * systemMessageWithMemoryAndSkills 在每次 turn 自动追加。

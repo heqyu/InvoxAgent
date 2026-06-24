@@ -53,11 +53,11 @@ export class ConfigRouter {
   applyAgentModel(session: Session, agent: AgentTemplate): void {
     if (!agent.model) return;
     const fallback = session.selectedModel ?? this.models.defaultModelId;
-    const resolved = resolveAgentModel(agent.model, fallback);
+    const resolved = resolveAgentModel(agent.model, fallback, this.models.agentModels);
     if (resolved === fallback) return; // env 未设 / 等于当前 → no-op
 
     if (!this.availableModelIds.has(resolved)) {
-      // 把 PRO/LITE 解析出但不在原 INVOX_MODELS 列表里的 id 动态并入
+      // 把 PRO/LITE 解析出但不在当前 model 菜单里的 id 动态并入
       this.availableModelIds.add(resolved);
       this.models.available.push({ modelId: resolved, name: resolved });
       log.info("agent model: added resolved id to availableModels", {

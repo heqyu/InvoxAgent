@@ -13,7 +13,7 @@
 //                        把结果追加到 history → 继续
 //   超额 → max_turn_requests
 //
-// MAX_ITERATIONS 默认 50，可通过 INVOX_MAX_ITERATIONS env 覆盖。
+// MAX_ITERATIONS 默认 150，可通过 INVOX_MAX_ITERATIONS env 覆盖。
 import { join } from "node:path";
 import {
   PROTOCOL_VERSION,

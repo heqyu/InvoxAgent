@@ -35,12 +35,12 @@ export function agentVersion(): string {
 
 /**
  * prompt() 单轮内最大 LLM ↔ tool 往返次数。
- * INVOX_MAX_ITERATIONS env 覆盖；非数字 / ≤ 0 一律走默认 50。
+ * INVOX_MAX_ITERATIONS env 覆盖；非数字 / ≤ 0 一律走默认 150。
  */
 export function maxIterations(): number {
   const raw = process.env["INVOX_MAX_ITERATIONS"];
-  if (!raw) return 50;
+  if (!raw) return 150;
   const n = Number.parseInt(raw, 10);
-  if (!Number.isFinite(n) || n <= 0) return 50;
+  if (!Number.isFinite(n) || n <= 0) return 150;
   return n;
 }

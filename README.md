@@ -165,8 +165,6 @@ Then in Zed: open the agent panel, pick **invox**, send a prompt. Stage 1 echoes
 | `INVOX_LOG_FILE` | absolute path to also append logs to (in addition to stderr) | unset |
 | `INVOX_LOG_UTC` | `1` to use ISO UTC timestamps instead of local `MM-DD HH:mm:ss.SSS` | unset |
 | `INVOX_LOG_MODULE` | module filter: `*` (all), `[]` (none), `agent,llm` (whitelist), `*,-agent` (blacklist) | `*` |
-| `INVOX_MODEL` | default model name passed to provider (also the prefilled choice in the client's model dropdown) | `gpt-4o-mini` |
-| `INVOX_MODELS` | comma-separated list of selectable models advertised to the client (e.g. `gpt-4o-mini,gpt-4o,deepseek-chat`). The default `INVOX_MODEL` is auto-included. | unset (menu = `[INVOX_MODEL]`) |
 | `INVOX_MOCK` | `1` → EchoProvider; `tools` → MockToolProvider; unset → real | unset |
 | `INVOX_PERMISSIONS` | `never` (default) / `writes` (gate writes+exec) / `always` (gate all tools) | `never` |
 | `INVOX_MAX_ITERATIONS` | max LLM↔tool round-trips per user prompt | `50` |
@@ -189,15 +187,27 @@ Logs go to **stderr** unconditionally — stdout is reserved for JSON-RPC framin
 
 ## Model selection & token usage
 
-invox advertises an ACP **model menu** to clients. In Zed, a dropdown next to the input box lists every id from `INVOX_MODELS`; switching the dropdown sends `session/set_model`, which invox honors immediately for the next prompt and persists in the session JSON so reopening the project restores the choice.
+invox advertises an ACP **model menu** to clients. In Zed, a dropdown next to the input box lists models discovered from `.invox/providers.json` / `~/.invox/providers.json`; switching the dropdown sends `session/set_model`, which invox honors immediately for the next prompt and persists in the session JSON so reopening the project restores the choice.
 
-```bash
-INVOX_MODEL=gpt-4o-mini \
-INVOX_MODELS="gpt-4o-mini,gpt-4o,o1-mini" \
-node dist/cli.js
+```json
+{
+  "defaultModel": "gpt-4o-mini",
+  "providers": [
+    {
+      "name": "OpenAI",
+      "baseUrl": "https://api.openai.com/v1",
+      "apiKey": "$OPENAI_API_KEY",
+      "models": ["gpt-4o-mini", "gpt-4o", "o1-mini"]
+    }
+  ],
+  "agentModels": {
+    "PRO": "gpt-4o",
+    "LITE": "gpt-4o-mini"
+  }
+}
 ```
 
-The Provider instance is reused across model switches — only the `model` field on each request changes — so swapping models does not rebuild the HTTP client. Different `baseURL`s require restarting invox; one Provider per process for now.
+The Provider instance is reused across model switches — only the `model` field on each request changes — so swapping models within the same provider does not rebuild the HTTP client. Different `baseURL`s are represented as separate providers in `providers.json`.
 
 **Token usage** is sourced from the upstream `stream_options.include_usage` final chunk and reported once per turn on **two channels** so the user sees something today and the protocol stays forward-compatible:
 
@@ -311,11 +321,11 @@ Each agent can pin a model — useful when you want planning agents on a smarter
 |---|---|
 | omitted | Use whatever model the user has selected in the Model dropdown |
 | `"gpt-4o"` (any literal string) | Use this id directly |
-| `"$MODEL_PRO"` | Resolve to `INVOX_MODEL_PRO` env (or `MODEL_PRO` alias) |
-| `"$MODEL_LITE"` | Resolve to `INVOX_MODEL_LITE` env (or `MODEL_LITE` alias) |
+| `"$MODEL_PRO"` | Resolve to `providers.json.agentModels.PRO` (env fallback: `INVOX_MODEL_PRO` / `MODEL_PRO`) |
+| `"$MODEL_LITE"` | Resolve to `providers.json.agentModels.LITE` (env fallback: `INVOX_MODEL_LITE` / `MODEL_LITE`) |
 | `"$ANY_VAR"` | Resolve to `process.env.ANY_VAR` (forward-compat for any custom env) |
 
-When the env is unset, invox warns and falls back to the user's currently selected model — agent switching never fails because of a missing env.
+When the configured tier is unset, invox warns and falls back to the user's currently selected model — agent switching never fails because of a missing model tier.
 
 **Built-in defaults**:
 
@@ -324,19 +334,19 @@ When the env is unset, invox warns and falls back to the user's currently select
 - `CodeReviewer.model = "$MODEL_PRO"` — adversarial review benefits from a smarter model
 - `Ask.model` is unset — pure Q&A, user decides
 
-So setting `INVOX_MODEL_PRO=claude-3-5-sonnet INVOX_MODEL_LITE=gpt-4o-mini` gives you a useful out-of-the-box behavior: switching the Agent dropdown automatically picks the right model.
+So setting `agentModels.PRO=claude-3-5-sonnet` and `agentModels.LITE=gpt-4o-mini` in providers.json gives you a useful out-of-the-box behavior: switching the Agent dropdown automatically picks the right model.
 
-When an agent template's `model` resolves to an id not already in `INVOX_MODELS`, invox auto-injects it into the model menu so the dropdown stays consistent.
+When an agent template's `model` resolves to an id not already in the model menu, invox auto-injects it so the dropdown stays consistent.
 
 ### Configuration
 
-| Env var | Effect |
+| Env var / config | Effect |
 |---|---|
 | `INVOX_AGENTS=disabled` | Hide the Agent dropdown; fall back to legacy System Prompt path |
 | `INVOX_AGENTS_DIR=<path>` | Override scan root (default: `process.cwd()` at startup) |
 | `INVOX_DEFAULT_AGENT=<id>` | Default agent id when multiple are loaded (default: `Worker`) |
-| `INVOX_MODEL_PRO=<id>` | Resolves `$MODEL_PRO` references in `agent.model` (alias: `MODEL_PRO`) |
-| `INVOX_MODEL_LITE=<id>` | Resolves `$MODEL_LITE` references in `agent.model` (alias: `MODEL_LITE`) |
+| `providers.json.agentModels.PRO=<id>` | Resolves `$MODEL_PRO` references in `agent.model` |
+| `providers.json.agentModels.LITE=<id>` | Resolves `$MODEL_LITE` references in `agent.model` |
 
 Override priority for the agent list (high → low): `<scanRoot>/.invox/agents/*.json` → `~/.invox/agents/*.json` → built-ins. Same `id` overrides; the project layer always wins.
 

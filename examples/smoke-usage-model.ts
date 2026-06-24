@@ -8,9 +8,9 @@
 // renames the helper to `unstable_setSessionModel` and wires it correctly.
 //
 // Flow:
-//   1. Spawn invox with INVOX_MOCK=tools and INVOX_MODELS="alpha,beta".
+//   1. Spawn invox with INVOX_MOCK=tools (mock mode advertises alpha,beta).
 //   2. initialize → expect protocolVersion echoed.
-//   3. session/new → assert response.models has both ids and current=alpha.
+//   3. session/new → assert model config has both ids and current=alpha.
 //   4. unstable_setSessionModel(beta) → assert success ({}).
 //   5. session/prompt(...) → assert end_turn AND PromptResponse.usage carries
 //      the synthetic token counts MockToolProvider yields.
@@ -66,8 +66,6 @@ function spawnAgent(sessionCwd: string): SpawnedAgent {
         ...process.env,
         INVOX_LOG: "info",
         INVOX_MOCK: "tools",
-        INVOX_MODELS: "alpha,beta",
-        INVOX_MODEL: "alpha",
         // Pin session store inside our throw-away dir so the disk
         // assertion finds the file deterministically.
         INVOX_SESSION_DIR: join(sessionCwd, ".invox", "sessions"),
