@@ -105,7 +105,9 @@ function readAndResolve(filePath: string, baseDir: string): string | null {
   const resolved = raw.replace(
     /^(\s*)@(\S[^\n]*)$/gm,
     (_match, indent: string, refPath: string) => {
-      const refFullPath = join(baseDir, refPath);
+      // 绝对路径（Unix / 或 Windows drive letter）直接使用，不再拼 baseDir
+      const isAbsolute = /^\//.test(refPath) || /^[A-Za-z]:\\/.test(refPath) || /^[A-Za-z]:\//.test(refPath);
+      const refFullPath = isAbsolute ? refPath : join(baseDir, refPath);
       try {
         if (!existsSync(refFullPath)) {
           log.warn("memory[claude-md]: @reference not found", {
