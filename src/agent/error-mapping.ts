@@ -21,6 +21,7 @@ export interface ProviderErrorInfo {
     | "server"
     | "network"
     | "bad_request"
+    | "context_limit"
     | "unknown";
   /** 一句话描述，可直接展示给用户。 */
   message: string;
@@ -65,7 +66,18 @@ export function classifyProviderError(err: unknown): ClassifiedError {
   const status = typeof e.status === "number" ? e.status : undefined;
   const code = typeof e.code === "string" ? e.code : undefined;
 
-  // 2. HTTP 状态分桶（OpenAI SDK 的 APIError）
+  // 2. Context limit detection (before HTTP status check — many providers
+  //    return 400 for context limit errors, but the message is more specific).
+  if (CONTEXT_LIMIT_PATTERNS.some((p) => p.test(message))) {
+    return refusal({
+      category: "context_limit",
+      message: `上下文超出模型上限。请新建会话或精简 prompt。${shortenMessage(message)}`,
+      ...(status !== undefined ? { status } : {}),
+      ...(code !== undefined ? { code } : {}),
+    });
+  }
+
+  // 3. HTTP 状态分桶（OpenAI SDK 的 APIError）
   if (status !== undefined) {
     if (status === 429) {
       return refusal({
@@ -101,7 +113,7 @@ export function classifyProviderError(err: unknown): ClassifiedError {
     }
   }
 
-  // 3. Node 网络错误码
+  // 4. Node 网络错误码
   if (code !== undefined && NETWORK_CODES.has(code)) {
     return refusal({
       category: "network",
@@ -111,7 +123,7 @@ export function classifyProviderError(err: unknown): ClassifiedError {
     });
   }
 
-  // 4. fetch 风格的 "TypeError: fetch failed" 也归网络
+  // 5. fetch 风格的 "TypeError: fetch failed" 也归网络
   if (/fetch failed|network|ECONN/i.test(message)) {
     return refusal({
       category: "network",
@@ -121,7 +133,7 @@ export function classifyProviderError(err: unknown): ClassifiedError {
     });
   }
 
-  // 5. 兜底
+  // 6. 兜底
   return refusal({
     category: "unknown",
     message: `LLM provider error: ${shortenMessage(message)}`,
@@ -158,6 +170,13 @@ export function serializeRefusalForMeta(
 }
 
 // ── 内部 ─────────────────────────────────────────────────────────────
+
+/** Context limit 正则模式 —— 匹配 OpenAI / Anthropic / 其它 provider 的上下文超限错误。 */
+const CONTEXT_LIMIT_PATTERNS = [
+  /maximum context length is \d+ tokens/i,
+  /context.*length.*exceeded/i,
+  /tokens.*exceeds.*model.*max/i,
+];
 
 /** Node 已知的网络层错误码。 */
 const NETWORK_CODES = new Set([

@@ -90,8 +90,12 @@ function formatToolsForAgent(tpl: AgentTemplate): string {
   return tpl.tools.join(", ");
 }
 
-/** SubAgent 工具描述中的占位符，运行时会被实际的 agent 列表替换 */
+/** SubAgent 工具描述中的占位符，运行时会被实际的 agent 列表替换。
+ *  静态 spec 使用安全兜底值，确保即使绕过 buildDynamicSubAgentSpec，
+ *  LLM 看到的也是合法字符串而非 raw placeholder。 */
 const AGENT_LIST_PLACEHOLDER = "{AGENT_LIST}";
+const AGENT_LIST_STATIC_FALLBACK =
+  "- (Dynamic — refreshed at runtime based on loaded agent templates)\n";
 
 /**
  * 构建 SubAgent 工具的完整描述（静态部分 + 动态 agent 列表）。
@@ -109,7 +113,7 @@ const STATIC_DESCRIPTION_PREFIX =
   `Launch a subagent (a custom Agent template) to handle a focused, multi-step subtask. ` +
   `Each agent type has specific capabilities and tools available to it.\n\n` +
   `Available agent types and the tools they have access to:\n` +
-  AGENT_LIST_PLACEHOLDER +
+  AGENT_LIST_STATIC_FALLBACK +
   `\n` +
   `When using the SubAgent tool, specify a subagent_type parameter to select which agent type to use.\n\n` +
   `## When to use\n\n` +

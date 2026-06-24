@@ -29,6 +29,8 @@ export interface ClaudeMdSection {
 const projectionCache = new WeakMap<DiscoveryResult, ClaudeMdSection[]>();
 
 /**
+ * @deprecated Use `discoverDirs(cwd).memories` instead.
+ *
  * 加载并解析 user / project 两级 CLAUDE.md。
  * 返回数组（user 在前，project 在后），都不存在则返回空数组。
  *

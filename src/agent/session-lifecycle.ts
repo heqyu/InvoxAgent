@@ -65,6 +65,8 @@ export interface SessionLifecycleDeps {
 export class SessionLifecycle {
   /** syncWithZedThreads 在 agent 生命周期内只跑一次，与 session 数量解耦。 */
   private syncedZed = false;
+  /** 进程生命周期内见过的 cwd，用于 destroyFromDisk 的 disk-scan 路径。 */
+  private knownCwds = new Set<string>();
 
   constructor(private readonly deps: SessionLifecycleDeps) {}
 
@@ -78,6 +80,7 @@ export class SessionLifecycle {
     cwd: string,
   ): Promise<{ sessionId: string; configOptions: SessionConfigOption[] }> {
     await this.maybeSyncZedThreads(cwd);
+    this.knownCwds.add(cwd);
 
     // configValues 初始值：根据 agents / system_prompt 路径择一填充
     const initialConfigValues: Record<string, string> = { thinking: "off" };
@@ -188,6 +191,7 @@ export class SessionLifecycle {
     sessionId: string,
   ): Promise<{ session: Session; configOptions: SessionConfigOption[] }> {
     await this.maybeSyncZedThreads(cwd);
+    this.knownCwds.add(cwd);
     const store = new SessionStore(cwd);
     const snapshot = store.load(sessionId);
     if (!snapshot) {
@@ -325,7 +329,7 @@ export class SessionLifecycle {
    * agent 重启过的场景。
    */
   destroyFromDisk(sessionId: string): void {
-    const scanRoots = [process.cwd()];
+    const scanRoots = [...new Set([process.cwd(), ...this.knownCwds])];
     const envOverride = process.env["INVOX_SESSION_DIR"];
     if (envOverride) scanRoots.unshift(envOverride);
     for (const root of scanRoots) {
